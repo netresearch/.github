@@ -18,7 +18,7 @@ We are committed to providing a welcoming and inclusive environment for everyone
 
 ## Enforcement
 
-Instances of unacceptable behavior may be reported to **conduct@netresearch.de**. All reports will be reviewed and addressed promptly and confidentially.
+Instances of unacceptable behavior may be reported via [GitHub's private contact options](https://github.com/orgs/netresearch/discussions) or by opening a private security advisory on the relevant repository. All reports will be reviewed and addressed promptly and confidentially.
 
 ## Attribution
 

@@ -6,12 +6,11 @@ If you discover a security vulnerability in any Netresearch repository, please r
 
 **Do NOT open a public issue.**
 
-Instead, please email **security@netresearch.de** with:
+Instead, use [GitHub's private vulnerability reporting](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability):
 
-- Description of the vulnerability
-- Steps to reproduce
-- Affected repository and version
-- Impact assessment (if possible)
+1. Go to the affected repository's **Security** tab
+2. Click **"Report a vulnerability"**
+3. Fill in the description, steps to reproduce, and impact
 
 We will acknowledge your report within **2 business days** and aim to provide a fix or mitigation within **10 business days**, depending on severity.
 
