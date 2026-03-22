@@ -1,0 +1,100 @@
+name: Build Go Binary with Provenance Attestation
+
+on:
+  workflow_call:
+    inputs:
+      binary-name:
+        description: "Output binary name (e.g., myapp-linux-amd64)"
+        required: true
+        type: string
+      goos:
+        description: "Target OS (GOOS)"
+        required: true
+        type: string
+      goarch:
+        description: "Target architecture (GOARCH)"
+        required: true
+        type: string
+      goarm:
+        description: "ARM version (GOARM) - only for goarch=arm"
+        required: false
+        type: string
+        default: ""
+      go-version-file:
+        description: "Path to go.mod or .go-version for Go version detection"
+        required: false
+        type: string
+        default: "go.mod"
+      main-package:
+        description: "Go main package path"
+        required: false
+        type: string
+        default: "."
+      ldflags:
+        description: "Linker flags (-ldflags value)"
+        required: false
+        type: string
+        default: "-s -w"
+      release-tag:
+        description: "Release tag for uploading the binary as a release asset"
+        required: false
+        type: string
+        default: ""
+      upload-to-release:
+        description: "Upload binary to GitHub release (requires release-tag)"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  build:
+    name: Build and Attest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout caller repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+
+      - name: Build binary
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ inputs.goos }}
+          GOARCH: ${{ inputs.goarch }}
+          GOARM: ${{ inputs.goarm }}
+          BINARY_NAME: ${{ inputs.binary-name }}
+          LDFLAGS: ${{ inputs.ldflags }}
+          MAIN_PACKAGE: ${{ inputs.main-package }}
+        run: |
+          set -euo pipefail
+          go build -trimpath \
+            -ldflags="${LDFLAGS}" \
+            -o "${BINARY_NAME}" \
+            "${MAIN_PACKAGE}"
+
+      - name: Generate provenance attestation
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: ${{ inputs.binary-name }}
+
+      - name: Upload binary to release
+        if: inputs.upload-to-release && inputs.release-tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release-tag }}
+          BINARY: ${{ inputs.binary-name }}
+        run: |
+          gh release upload "$RELEASE_TAG" "$BINARY" --clobber
