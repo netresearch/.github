@@ -40,7 +40,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: markdownlint
-        uses: DavidAnson/markdownlint-cli2-action@db950b66ad30a68974ed7f3a2f2b413653de7a39 # v20.0.0
+        uses: DavidAnson/markdownlint-cli2-action@07035fd053f7be764496c0f8d8f9f41f98305101 # v22.0.0
         with:
           globs: "**/*.md"
 
