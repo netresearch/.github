@@ -1,1 +1,1 @@
-Impressum: https://www.netresearch.de/impressum/
+Impressum: <https://www.netresearch.de/impressum/>
