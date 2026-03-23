@@ -102,21 +102,29 @@ jobs:
             export GOARM="${INPUT_GOARM}"
           fi
 
+          # Append .exe for Windows targets
+          OUTPUT="${BINARY_NAME}"
+          if [[ "${GOOS}" == "windows" ]]; then
+            OUTPUT="${BINARY_NAME}.exe"
+          fi
+
           go build -trimpath \
             -ldflags="${LDFLAGS}" \
-            -o "${BINARY_NAME}" \
+            -o "${OUTPUT}" \
             "${MAIN_PACKAGE}"
+
+          # Export actual filename for subsequent steps
+          echo "BINARY=${OUTPUT}" >> "$GITHUB_ENV"
 
       - name: Generate provenance attestation
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
-          subject-path: ${{ inputs.binary-name }}
+          subject-path: ${{ env.BINARY }}
 
       - name: Upload binary to release
         if: inputs.upload-to-release && inputs.release-tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release-tag }}
-          BINARY: ${{ inputs.binary-name }}
         run: |
           gh release upload "$RELEASE_TAG" "$BINARY" --clobber
