@@ -20,6 +20,11 @@ on:
         required: false
         type: string
         default: ""
+      cgo-enabled:
+        description: "Enable CGO (0=disabled, 1=enabled)"
+        required: false
+        type: string
+        default: "0"
       go-version-file:
         description: "Path to go.mod or .go-version for Go version detection"
         required: false
@@ -46,8 +51,9 @@ on:
         type: boolean
         default: true
 
+# Least privilege: only request write permissions for jobs that need them
 permissions:
-  contents: write
+  contents: read
   id-token: write
   attestations: write
 
@@ -55,6 +61,10 @@ jobs:
   build:
     name: Build and Attest
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
@@ -63,6 +73,8 @@ jobs:
 
       - name: Checkout caller repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
@@ -71,15 +83,25 @@ jobs:
 
       - name: Build binary
         env:
-          CGO_ENABLED: "0"
+          CGO_ENABLED: ${{ inputs.cgo-enabled }}
           GOOS: ${{ inputs.goos }}
           GOARCH: ${{ inputs.goarch }}
-          GOARM: ${{ inputs.goarm }}
           BINARY_NAME: ${{ inputs.binary-name }}
           LDFLAGS: ${{ inputs.ldflags }}
           MAIN_PACKAGE: ${{ inputs.main-package }}
+          INPUT_GOARM: ${{ inputs.goarm }}
         run: |
           set -euo pipefail
+
+          # Only set GOARM when building for ARM architecture
+          if [[ "${GOARCH}" == "arm" ]]; then
+            if [[ -z "${INPUT_GOARM}" ]]; then
+              echo "::error::GOARM is required when GOARCH=arm"
+              exit 1
+            fi
+            export GOARM="${INPUT_GOARM}"
+          fi
+
           go build -trimpath \
             -ldflags="${LDFLAGS}" \
             -o "${BINARY_NAME}" \
@@ -93,7 +115,7 @@ jobs:
       - name: Upload binary to release
         if: inputs.upload-to-release && inputs.release-tag != ''
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release-tag }}
           BINARY: ${{ inputs.binary-name }}
         run: |
