@@ -1,0 +1,46 @@
+name: Gitleaks Secret Scanning
+
+on:
+  workflow_call:
+    inputs:
+      skip:
+        description: 'Skip secret scanning'
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      GITLEAKS_LICENSE:
+        description: 'License key for Gitleaks'
+        required: false
+
+permissions: {}
+
+jobs:
+  gitleaks:
+    name: Secret Scanning
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: >-
+      !inputs.skip &&
+      github.event_name != 'merge_group' &&
+      github.actor != 'dependabot[bot]'
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}

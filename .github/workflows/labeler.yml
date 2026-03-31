@@ -1,0 +1,31 @@
+name: PR Labeler
+
+on:
+  workflow_call:
+    inputs:
+      configuration-path:
+        description: 'Path to the labeler configuration file'
+        required: false
+        type: string
+        default: '.github/labeler.yml'
+
+permissions: {}
+
+jobs:
+  label:
+    name: Label PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/labeler@634933edcd8ababfe52f92936142cc22ac488b1b # v6.0.1
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          configuration-path: ${{ inputs.configuration-path }}

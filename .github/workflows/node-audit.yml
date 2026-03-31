@@ -1,0 +1,62 @@
+name: Node.js Dependency Audit
+
+on:
+  workflow_call:
+    inputs:
+      audit-level:
+        description: 'Minimum severity to fail on (low, moderate, high, critical)'
+        required: false
+        type: string
+        default: 'high'
+      package-manager:
+        description: 'Package manager to use (npm, pnpm, yarn)'
+        required: false
+        type: string
+        default: 'pnpm'
+      node-version-file:
+        description: 'Node version file (e.g. .nvmrc, .node-version, package.json)'
+        required: false
+        type: string
+        default: '.nvmrc'
+
+permissions: {}
+
+jobs:
+  node-audit:
+    name: Node.js Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm
+        if: inputs.package-manager == 'pnpm'
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ${{ inputs.node-version-file }}
+          cache: ${{ inputs.package-manager }}
+
+      - name: Run audit (pnpm)
+        if: inputs.package-manager == 'pnpm'
+        run: pnpm audit --audit-level=${{ inputs.audit-level }}
+
+      - name: Run audit (npm)
+        if: inputs.package-manager == 'npm'
+        run: npm audit --audit-level=${{ inputs.audit-level }}
+
+      - name: Run audit (yarn)
+        if: inputs.package-manager == 'yarn'
+        run: yarn npm audit --severity ${{ inputs.audit-level }}

@@ -1,0 +1,91 @@
+name: Stale Issues
+
+on:
+  workflow_call:
+    inputs:
+      days-before-stale:
+        description: 'Days before marking as stale'
+        required: false
+        type: number
+        default: 60
+      days-before-close:
+        description: 'Days before closing stale issues'
+        required: false
+        type: number
+        default: 7
+      exempt-issue-labels:
+        description: 'Comma-separated labels to exempt from stale'
+        required: false
+        type: string
+        default: 'pinned,security,bug'
+      exempt-pr-labels:
+        description: 'Comma-separated PR labels to exempt from stale'
+        required: false
+        type: string
+        default: 'pinned,security'
+      operations-per-run:
+        description: 'Max operations per run'
+        required: false
+        type: number
+        default: 30
+      stale-issue-message:
+        description: 'Message when marking issue as stale'
+        required: false
+        type: string
+        default: >-
+          This issue has been automatically marked as stale because it has not had
+          recent activity. It will be closed if no further activity occurs within 7 days.
+          Thank you for your contributions!
+      stale-pr-message:
+        description: 'Message when marking PR as stale'
+        required: false
+        type: string
+        default: >-
+          This pull request has been automatically marked as stale because it has not had
+          recent activity. It will be closed if no further activity occurs within 7 days.
+          Thank you for your contributions!
+      close-issue-message:
+        description: 'Message when closing stale issue'
+        required: false
+        type: string
+        default: >-
+          This issue was closed because it has been stale for 7 days with no activity.
+          Feel free to reopen if you have new information to add.
+      close-pr-message:
+        description: 'Message when closing stale PR'
+        required: false
+        type: string
+        default: >-
+          This pull request was closed because it has been stale for 7 days with no activity.
+          Feel free to reopen if you want to continue working on it.
+
+permissions: {}
+
+jobs:
+  stale:
+    name: Close Stale Issues
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/stale@b5d41d4e1d5dceea10e7104786b73624c18a190f # v10.2.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          stale-issue-message: ${{ inputs.stale-issue-message }}
+          stale-pr-message: ${{ inputs.stale-pr-message }}
+          close-issue-message: ${{ inputs.close-issue-message }}
+          close-pr-message: ${{ inputs.close-pr-message }}
+          days-before-stale: ${{ inputs.days-before-stale }}
+          days-before-close: ${{ inputs.days-before-close }}
+          stale-issue-label: stale
+          stale-pr-label: stale
+          exempt-issue-labels: ${{ inputs.exempt-issue-labels }}
+          exempt-pr-labels: ${{ inputs.exempt-pr-labels }}
+          operations-per-run: ${{ inputs.operations-per-run }}

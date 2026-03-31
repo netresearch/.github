@@ -1,0 +1,55 @@
+name: Lock Threads
+
+on:
+  workflow_call:
+    inputs:
+      issue-inactive-days:
+        description: 'Days before locking inactive issues'
+        required: false
+        type: number
+        default: 365
+      pr-inactive-days:
+        description: 'Days before locking inactive PRs'
+        required: false
+        type: number
+        default: 365
+      issue-lock-reason:
+        description: 'Reason for locking issues'
+        required: false
+        type: string
+        default: 'resolved'
+      pr-lock-reason:
+        description: 'Reason for locking PRs'
+        required: false
+        type: string
+        default: 'resolved'
+      log-output:
+        description: 'Log processed threads'
+        required: false
+        type: boolean
+        default: true
+
+permissions: {}
+
+jobs:
+  lock:
+    name: Lock Old Threads
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+        with:
+          egress-policy: audit
+
+      - uses: dessant/lock-threads@7266a7ce5c1df01b1c6db85bf8cd86c737dadbe7 # v6.0.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          issue-inactive-days: ${{ inputs.issue-inactive-days }}
+          issue-lock-reason: ${{ inputs.issue-lock-reason }}
+          pr-inactive-days: ${{ inputs.pr-inactive-days }}
+          pr-lock-reason: ${{ inputs.pr-lock-reason }}
+          log-output: ${{ inputs.log-output }}
