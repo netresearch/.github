@@ -65,7 +65,7 @@ jobs:
             if (total > warning) size = 'large';
             else if (total > Math.floor(warning / 2.5)) size = 'medium';
 
-            console.log(`PR Size: ${size} (${additions}+ / ${deletions}-)`); 
+            console.log(`PR Size: ${size} (${additions}+ / ${deletions}-)`);
 
             if (total > alert) {
               core.warning(`Large PR with ${total} changes. Consider breaking into smaller PRs.`);

@@ -3,7 +3,7 @@
 ## Defense Layers
 
 | Layer | Mechanism | Scope | When |
-|-------|-----------|-------|------|
+| ----- | --------- | ----- | ---- |
 | 1. Stability delay | Renovate `stabilityDays: 3` | All repos with Renovate | Before PR creation |
 | 2. Dependency review | `dependency-review-action` | All repos (org-wide default) | On every PR |
 | 3. Package audit | `pnpm audit` / `composer audit` | Repos with audit workflow | On every PR |
