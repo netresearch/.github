@@ -3,7 +3,7 @@
 ## Defense Layers
 
 | Layer | Mechanism | Scope | When |
-|-------|-----------|-------|------|
+| ----- | --------- | ----- | ---- |
 | 1. Stability delay | Renovate `stabilityDays: 3` | All repos with Renovate | Before PR creation |
 | 2. Dependency review | `dependency-review-action` | All repos (org-wide default) | On every PR |
 | 3. Package audit | `pnpm audit` / `composer audit` | Repos with audit workflow | On every PR |
@@ -35,14 +35,14 @@ When a supply chain attack is discovered:
 
 ### Short-term (within 24 hours)
 
-3. **Revert affected repos** — downgrade to last safe version, regenerate lockfiles
-4. **Rotate secrets** — if the malicious package could have exfiltrated credentials
-5. **Audit CI logs** — check if the malicious code ran in any CI pipeline
+1. **Revert affected repos** — downgrade to last safe version, regenerate lockfiles
+2. **Rotate secrets** — if the malicious package could have exfiltrated credentials
+3. **Audit CI logs** — check if the malicious code ran in any CI pipeline
 
 ### Post-incident
 
-6. **Review auto-merge logs** — identify if/how the compromised version was merged
-7. **Update this document** with lessons learned
+1. **Review auto-merge logs** — identify if/how the compromised version was merged
+2. **Update this document** with lessons learned
 
 ## Workflow Architecture
 
@@ -79,7 +79,7 @@ netresearch/renovate-config
 ## Key Repos
 
 | Repo | Role |
-|------|------|
+| ---- | ---- |
 | [`netresearch/renovate-config`](https://github.com/netresearch/renovate-config) | Org-wide Renovate preset (deny-lists, stability delay) |
 | [`netresearch/.github`](https://github.com/netresearch/.github) | Org-wide default workflows + generic reusable workflows |
 | [`netresearch/typo3-ci-workflows`](https://github.com/netresearch/typo3-ci-workflows) | TYPO3/PHP-specific reusable workflows |
