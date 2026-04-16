@@ -158,16 +158,11 @@ jobs:
           output-file: sbom-${{ steps.tag.outputs.version }}.spdx.json
 
       - name: Generate checksums
-        env:
-          VERSION: ${{ steps.tag.outputs.version }}
         run: |
-          # Checksum all release artifacts that exist
-          FILES=""
-          for f in sbom-*.json; do
-            [ -f "$f" ] && FILES="$FILES $f"
-          done
-          if [ -n "$FILES" ]; then
-            sha256sum $FILES > checksums.txt
+          shopt -s nullglob
+          files=(sbom-*.json)
+          if [ ${#files[@]} -gt 0 ]; then
+            sha256sum "${files[@]}" > checksums.txt
             cat checksums.txt
           else
             echo "No artifacts to checksum"
@@ -199,12 +194,18 @@ jobs:
             checksums.txt
 
       - name: Generate attestation for release artifacts
-        if: inputs.attest
-        uses: actions/attest-build-provenance@db473fddc028af60658334401dc6fa3ffd8669fd # v2.3.0
+        if: inputs.attest && inputs.generate-sbom
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
           subject-path: |
             sbom-*.json
             checksums.txt
+
+      - name: Generate attestation (checksums only)
+        if: inputs.attest && !inputs.generate-sbom
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: checksums.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
@@ -213,6 +214,7 @@ jobs:
           draft: ${{ inputs.draft }}
           prerelease: ${{ contains(steps.tag.outputs.tag, '-rc') || contains(steps.tag.outputs.tag, '-alpha') || contains(steps.tag.outputs.tag, '-beta') }}
           body: ${{ steps.notes.outputs.notes }}
+          fail_on_unmatched_files: false
           files: |
             sbom-*.json
             checksums.txt
