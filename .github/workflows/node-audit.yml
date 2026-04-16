@@ -50,6 +50,10 @@ jobs:
         with:
           version: ${{ inputs.pnpm-version }}
 
+      - name: Enable Corepack
+        if: inputs.package-manager == 'yarn'
+        run: corepack enable
+
       - name: Setup Node
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
