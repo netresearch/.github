@@ -44,8 +44,22 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup pnpm
+      - name: Detect packageManager field
+        id: detect-pm
         if: inputs.package-manager == 'pnpm'
+        run: |
+          if grep -q '"packageManager"' package.json 2>/dev/null; then
+            echo "has_package_manager=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_package_manager=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup pnpm (from packageManager field)
+        if: inputs.package-manager == 'pnpm' && steps.detect-pm.outputs.has_package_manager == 'true'
+        uses: pnpm/action-setup@08c4be7e2e672a47d11bd04269e27e5f3e8529cb # v6
+
+      - name: Setup pnpm (explicit version)
+        if: inputs.package-manager == 'pnpm' && steps.detect-pm.outputs.has_package_manager != 'true'
         uses: pnpm/action-setup@08c4be7e2e672a47d11bd04269e27e5f3e8529cb # v6
         with:
           version: ${{ inputs.pnpm-version }}
