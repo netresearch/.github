@@ -76,7 +76,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs: quality-gate
-    if: github.event.pull_request.draft == false
+    # Skip (not fail) for fork PRs — auto-approve only applies to same-repo
+    # branches. Fork PRs always fail because GITHUB_TOKEN lacks permission.
+    if: >-
+      github.event.pull_request.draft == false
+      && github.event.pull_request.head.repo.full_name == github.repository
     permissions:
       contents: read
       pull-requests: write
