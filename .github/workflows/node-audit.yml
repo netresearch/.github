@@ -13,11 +13,16 @@ on:
         required: false
         type: string
         default: 'pnpm'
-      node-version-file:
-        description: 'Node version file (e.g. .nvmrc, .node-version, package.json)'
+      node-version:
+        description: 'Node.js version (e.g. 22, lts/*). Used when node-version-file is empty.'
         required: false
         type: string
-        default: '.nvmrc'
+        default: 'lts/*'
+      node-version-file:
+        description: 'Node version file (e.g. .nvmrc, .node-version, package.json). Takes precedence over node-version when non-empty.'
+        required: false
+        type: string
+        default: ''
       pnpm-version:
         description: 'pnpm version (only used when package-manager is pnpm and packageManager is not set in package.json)'
         required: false
@@ -68,10 +73,17 @@ jobs:
         if: inputs.package-manager == 'yarn'
         run: corepack enable
 
-      - name: Setup Node
+      - name: Setup Node (from version file)
+        if: inputs.node-version-file != ''
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
           node-version-file: ${{ inputs.node-version-file }}
+
+      - name: Setup Node (explicit version)
+        if: inputs.node-version-file == ''
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: ${{ inputs.node-version }}
 
       - name: Run audit (pnpm)
         if: inputs.package-manager == 'pnpm'
