@@ -112,6 +112,7 @@ jobs:
         id: notes
         env:
           TAG: ${{ steps.tag.outputs.tag }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           DELIMITER="ghadelim_$(openssl rand -hex 8)"
@@ -129,7 +130,7 @@ jobs:
               git log --pretty=format:"- %s" "${PREVIOUS_TAG}..${TAG}"
               echo ""
               echo ""
-              echo "**Full changelog**: https://github.com/${{ github.repository }}/compare/${PREVIOUS_TAG}...${TAG}"
+              echo "**Full changelog**: https://github.com/${REPO}/compare/${PREVIOUS_TAG}...${TAG}"
               echo "$DELIMITER"
             } >> "$GITHUB_OUTPUT"
           fi
@@ -187,11 +188,13 @@ jobs:
 
       - name: Verify Cosign signature
         if: inputs.cosign-sign
+        env:
+          REPO: ${{ github.repository }}
         run: |
           cosign verify-blob \
             --certificate checksums.txt.pem \
             --signature checksums.txt.sig \
-            --certificate-identity-regexp "https://github.com/${{ github.repository }}/*" \
+            --certificate-identity-regexp "https://github.com/${REPO}/*" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             checksums.txt
 
