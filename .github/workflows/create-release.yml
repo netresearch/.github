@@ -106,9 +106,11 @@ jobs:
           # tags via ^{commit}). Works for workflow_dispatch backfills
           # where github.sha is the dispatch ref, not the tag's target.
           SHA=$(git rev-parse "${TAG}^{commit}")
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
-          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          {
+            echo "tag=$TAG"
+            echo "version=${TAG#v}"
+            echo "sha=$SHA"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Verify annotated tag
         if: inputs.require-annotated-tag
