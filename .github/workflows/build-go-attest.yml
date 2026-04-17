@@ -60,6 +60,36 @@ on:
         required: false
         type: string
         default: "spdx-json"
+      ref:
+        description: "Git ref to check out. Defaults to the caller's github.ref."
+        required: false
+        type: string
+        default: ""
+      setup-bun:
+        description: "Install Bun before running pre-build-command. Set true for projects that embed assets built via Bun (Tailwind, TS bundler, etc.)."
+        required: false
+        type: boolean
+        default: false
+      setup-node:
+        description: "Install Node.js before running pre-build-command."
+        required: false
+        type: boolean
+        default: false
+      node-version:
+        description: "Node.js version (when setup-node=true)."
+        required: false
+        type: string
+        default: "lts/*"
+      bun-version:
+        description: "Bun version (when setup-bun=true). Pin to a specific version for reproducible builds."
+        required: false
+        type: string
+        default: "latest"
+      pre-build-command:
+        description: "Shell command(s) run after checkout/toolchain setup and before `go build`. Useful for generating embedded assets (bun run build:assets, templ generate, sqlc generate, etc.)."
+        required: false
+        type: string
+        default: ""
 
 # Least privilege: only request write permissions for jobs that need them
 permissions:
@@ -85,11 +115,37 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Set up Go
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version-file: ${{ inputs.go-version-file }}
+
+      - name: Set up Node.js
+        if: inputs.setup-node
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Set up Bun
+        if: inputs.setup-bun
+        uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
+        with:
+          bun-version: ${{ inputs.bun-version }}
+
+      - name: Run pre-build command
+        if: inputs.pre-build-command != ''
+        env:
+          PRE_BUILD_CMD: ${{ inputs.pre-build-command }}
+        run: |
+          set -euo pipefail
+          echo "::group::pre-build-command"
+          # Invoke bash with strict flags so pipeline failures and
+          # unset-variable references inside the pre-build command
+          # propagate rather than being silently swallowed.
+          bash -euo pipefail -c "$PRE_BUILD_CMD"
+          echo "::endgroup::"
 
       - name: Build binary
         env:
