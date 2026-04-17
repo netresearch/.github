@@ -1,0 +1,296 @@
+name: Python Dependency Audit
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        description: 'Python version (e.g. 3.14). Used when python-version-file is empty.'
+        required: false
+        type: string
+        default: '3.14'
+      python-version-file:
+        description: 'Python version file (.python-version, pyproject.toml). Takes precedence over python-version when non-empty.'
+        required: false
+        type: string
+        default: ''
+      package-manager:
+        description: 'Package manager to use (uv, pip, poetry). Controls how the project is synced and how the audit manifest is produced.'
+        required: false
+        type: string
+        default: 'uv'
+      run-bandit:
+        description: 'Run bandit static-analysis security scan.'
+        required: false
+        type: boolean
+        default: true
+      bandit-severity:
+        description: "Minimum bandit severity to fail on. One of: all, low, medium, high. 'all'/'low' = every finding; 'medium' = -ll; 'high' = -lll."
+        required: false
+        type: string
+        default: 'medium'
+      bandit-target:
+        description: 'Bandit target path (package directory). Defaults to src/ if it exists, otherwise the repo root.'
+        required: false
+        type: string
+        default: ''
+      generate-sbom:
+        description: 'Generate a CycloneDX SBOM and upload it as an artifact.'
+        required: false
+        type: boolean
+        default: true
+      sbom-retention-days:
+        description: 'Artifact retention for the SBOM, in days.'
+        required: false
+        type: number
+        default: 90
+
+permissions: {}
+
+jobs:
+  pip-audit:
+    name: pip-audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Python (from version file)
+        if: inputs.python-version-file != ''
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version-file: ${{ inputs.python-version-file }}
+
+      - name: Setup Python (explicit version)
+        if: inputs.python-version-file == ''
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Validate package-manager input
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package-manager }}
+        run: |
+          case "$PACKAGE_MANAGER" in
+            uv|pip|poetry) : ;;
+            *)
+              echo "::error title=Invalid package-manager::Unsupported package-manager '$PACKAGE_MANAGER'. Expected one of: uv, pip, poetry."
+              exit 1
+              ;;
+          esac
+
+      - name: Install uv
+        if: inputs.package-manager == 'uv'
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+
+      - name: Produce pinned requirements (uv)
+        if: inputs.package-manager == 'uv'
+        run: |
+          uv sync --all-extras --dev --frozen
+          uv export --format requirements-txt --no-hashes --no-emit-project > /tmp/requirements.txt
+          uv run pip install pip-audit
+
+      - name: Produce pinned requirements (poetry)
+        if: inputs.package-manager == 'poetry'
+        run: |
+          pipx install poetry
+          poetry export --with dev --without-hashes -f requirements.txt -o /tmp/requirements.txt
+          pip install pip-audit
+
+      - name: Produce pinned requirements (pip)
+        if: inputs.package-manager == 'pip'
+        run: |
+          pip install --upgrade pip pip-audit
+          if [ -f requirements.txt ]; then
+            cp requirements.txt /tmp/requirements.txt
+          elif [ -f requirements-dev.txt ]; then
+            cp requirements-dev.txt /tmp/requirements.txt
+          else
+            pip install -e '.[dev]' 2>/dev/null || pip install -e .
+            pip freeze --exclude-editable > /tmp/requirements.txt
+          fi
+
+      - name: Run pip-audit
+        # pip-audit exits non-zero on any vulnerability; there is no native
+        # severity floor. Reports are fail-on-any against the pinned
+        # requirements file produced above.
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package-manager }}
+        run: |
+          if [ "$PACKAGE_MANAGER" = "uv" ]; then
+            uv run pip-audit --requirement /tmp/requirements.txt
+          else
+            pip-audit --requirement /tmp/requirements.txt
+          fi
+
+  bandit:
+    name: bandit
+    if: ${{ inputs.run-bandit }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Python (from version file)
+        if: inputs.python-version-file != ''
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version-file: ${{ inputs.python-version-file }}
+
+      - name: Setup Python (explicit version)
+        if: inputs.python-version-file == ''
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install bandit
+        run: |
+          python -m pip install --upgrade pip
+          pip install 'bandit[toml]'
+
+      - name: Resolve bandit target
+        id: target
+        env:
+          BANDIT_TARGET_INPUT: ${{ inputs.bandit-target }}
+        run: |
+          if [ -n "$BANDIT_TARGET_INPUT" ]; then
+            echo "path=$BANDIT_TARGET_INPUT" >> "$GITHUB_OUTPUT"
+          elif [ -d src ]; then
+            echo "path=src" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=." >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run bandit
+        env:
+          SEVERITY: ${{ inputs.bandit-severity }}
+          TARGET: ${{ steps.target.outputs.path }}
+        run: |
+          case "$SEVERITY" in
+            all|low)  FLAGS="" ;;
+            medium)   FLAGS="-ll" ;;
+            high)     FLAGS="-lll" ;;
+            *)
+              echo "::error title=Invalid bandit severity::Unsupported bandit-severity '$SEVERITY'. Expected one of: all, low, medium, high."
+              exit 1
+              ;;
+          esac
+          if [ -f pyproject.toml ]; then
+            bandit -r "$TARGET" -c pyproject.toml $FLAGS
+          else
+            bandit -r "$TARGET" $FLAGS
+          fi
+
+  sbom:
+    name: CycloneDX SBOM
+    if: ${{ inputs.generate-sbom }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Python (from version file)
+        if: inputs.python-version-file != ''
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version-file: ${{ inputs.python-version-file }}
+
+      - name: Setup Python (explicit version)
+        if: inputs.python-version-file == ''
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Validate package-manager input
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package-manager }}
+        run: |
+          case "$PACKAGE_MANAGER" in
+            uv|pip|poetry) : ;;
+            *)
+              echo "::error title=Invalid package-manager::Unsupported package-manager '$PACKAGE_MANAGER'. Expected one of: uv, pip, poetry."
+              exit 1
+              ;;
+          esac
+
+      - name: Install uv
+        if: inputs.package-manager == 'uv'
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+
+      - name: Sync project (uv) — populates site-packages for cyclonedx-py
+        if: inputs.package-manager == 'uv'
+        run: uv sync --all-extras --dev --frozen
+
+      - name: Install project (pip)
+        if: inputs.package-manager == 'pip'
+        run: |
+          pip install --upgrade pip
+          pip install -e '.[dev]' 2>/dev/null || pip install -e . 2>/dev/null || pip install -r requirements.txt
+
+      - name: Install project + cyclonedx (poetry, same venv)
+        # Poetry installs the project into its managed venv. We must invoke
+        # cyclonedx-py in that same venv (via `poetry run`), otherwise the
+        # SBOM would be generated against the system interpreter and miss
+        # all project dependencies.
+        if: inputs.package-manager == 'poetry'
+        run: |
+          pipx install poetry
+          poetry install --with dev
+          poetry run pip install cyclonedx-bom
+
+      - name: Install cyclonedx-bom (uv/pip)
+        if: inputs.package-manager != 'poetry'
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package-manager }}
+        run: |
+          if [ "$PACKAGE_MANAGER" = "uv" ]; then
+            uv run pip install cyclonedx-bom
+          else
+            pip install cyclonedx-bom
+          fi
+
+      - name: Generate CycloneDX SBOM
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package-manager }}
+        run: |
+          case "$PACKAGE_MANAGER" in
+            uv)     uv run cyclonedx-py environment --of JSON -o sbom.cdx.json ;;
+            poetry) poetry run cyclonedx-py environment --of JSON -o sbom.cdx.json ;;
+            pip)    cyclonedx-py environment --of JSON -o sbom.cdx.json ;;
+          esac
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-cyclonedx
+          path: sbom.cdx.json
+          retention-days: ${{ inputs.sbom-retention-days }}
