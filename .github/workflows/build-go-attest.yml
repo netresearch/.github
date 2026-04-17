@@ -50,6 +50,16 @@ on:
         required: false
         type: boolean
         default: true
+      sbom:
+        description: "Generate Syft SPDX-JSON SBOM for the built binary and upload alongside it."
+        required: false
+        type: boolean
+        default: false
+      sbom-format:
+        description: "SBOM format passed to anchore/sbom-action ('spdx-json' or 'cyclonedx-json')."
+        required: false
+        type: string
+        default: "spdx-json"
 
 # Least privilege: only request write permissions for jobs that need them
 permissions:
@@ -121,6 +131,37 @@ jobs:
         with:
           subject-path: ${{ env.BINARY }}
 
+      - name: Resolve SBOM filename
+        if: inputs.sbom
+        id: sbom-name
+        env:
+          BINARY: ${{ env.BINARY }}
+          SBOM_FORMAT: ${{ inputs.sbom-format }}
+        run: |
+          set -euo pipefail
+          case "$SBOM_FORMAT" in
+            spdx-json)       EXT="spdx.json" ;;
+            cyclonedx-json)  EXT="cdx.json" ;;
+            *) echo "::error::unsupported sbom-format '$SBOM_FORMAT' (expected: spdx-json|cyclonedx-json)"; exit 1 ;;
+          esac
+          echo "file=${BINARY}.${EXT}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate SBOM (Syft)
+        if: inputs.sbom
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          file: ${{ env.BINARY }}
+          format: ${{ inputs.sbom-format }}
+          output-file: ${{ steps.sbom-name.outputs.file }}
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Attest SBOM
+        if: inputs.sbom
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: ${{ steps.sbom-name.outputs.file }}
+
       - name: Upload binary to release
         if: inputs.upload-to-release && inputs.release-tag != ''
         env:
@@ -128,3 +169,12 @@ jobs:
           RELEASE_TAG: ${{ inputs.release-tag }}
         run: |
           gh release upload "$RELEASE_TAG" "$BINARY" --clobber
+
+      - name: Upload SBOM to release
+        if: inputs.sbom && inputs.upload-to-release && inputs.release-tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release-tag }}
+          SBOM_FILE: ${{ steps.sbom-name.outputs.file }}
+        run: |
+          gh release upload "$RELEASE_TAG" "$SBOM_FILE" --clobber
