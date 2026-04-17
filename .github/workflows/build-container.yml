@@ -47,11 +47,33 @@ on:
         required: false
         type: boolean
         default: true
+      sign:
+        description: "Cosign keyless OIDC sign the pushed image by digest. Requires push=true."
+        required: false
+        type: boolean
+        default: false
+      attest:
+        description: "Generate SLSA build provenance attestation for the pushed image (actions/attest-build-provenance). Requires push=true."
+        required: false
+        type: boolean
+        default: false
+    outputs:
+      digest:
+        description: "Digest of the pushed image (sha256:...)."
+        value: ${{ jobs.build.outputs.digest }}
+      image-ref:
+        description: "Full image reference <registry>/<owner>/<image-name>."
+        value: ${{ jobs.build.outputs.image-ref }}
+      tags:
+        description: "Newline-separated list of pushed tags (from docker/metadata-action)."
+        value: ${{ jobs.build.outputs.tags }}
 
 permissions:
   contents: read
   packages: write
   security-events: write
+  id-token: write
+  attestations: write
 
 jobs:
   build:
@@ -61,6 +83,12 @@ jobs:
       contents: read
       packages: write
       security-events: write
+      id-token: write
+      attestations: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      image-ref: ${{ env.IMAGE_REF }}
+      tags: ${{ steps.meta.outputs.tags }}
     env:
       IMAGE_REF: ${{ inputs.registry }}/${{ github.repository_owner }}/${{ inputs.image-name }}
     steps:
@@ -136,3 +164,24 @@ jobs:
         with:
           sarif_file: "trivy-results.sarif"
           category: "container-scan"
+
+      - name: Install Cosign
+        if: inputs.sign && inputs.push
+        uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
+
+      - name: Sign image with Cosign (keyless OIDC)
+        if: inputs.sign && inputs.push
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # Sign by digest to cover all tags pointing at this image (recommended practice).
+          cosign sign --yes "${IMAGE_REF}@${DIGEST}"
+
+      - name: Generate SLSA build provenance attestation
+        if: inputs.attest && inputs.push
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-name: ${{ env.IMAGE_REF }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
