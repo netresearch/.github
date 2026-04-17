@@ -51,12 +51,12 @@ on:
         type: boolean
         default: true
       sbom:
-        description: "Generate Syft SPDX-JSON SBOM for the built binary and upload alongside it."
+        description: "Generate Syft SBOM for the built binary (format controlled by sbom-format). When upload-to-release is true and release-tag is set, the SBOM is also uploaded to the release."
         required: false
         type: boolean
         default: false
       sbom-format:
-        description: "SBOM format passed to anchore/sbom-action ('spdx-json' or 'cyclonedx-json')."
+        description: "SBOM format passed to anchore/sbom-action ('spdx-json' or 'cyclonedx-json'). Default 'spdx-json'."
         required: false
         type: string
         default: "spdx-json"
