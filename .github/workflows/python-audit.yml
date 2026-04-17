@@ -18,18 +18,13 @@ on:
         required: false
         type: string
         default: 'uv'
-      audit-level:
-        description: 'Minimum pip-audit vulnerability level (low, medium, high, critical). Only CVEs at or above this level fail the build.'
-        required: false
-        type: string
-        default: 'high'
       run-bandit:
         description: 'Run bandit static-analysis security scan.'
         required: false
         type: boolean
         default: true
       bandit-severity:
-        description: "Minimum bandit severity to fail on. 'all' = every finding; 'medium' = -ll; 'high' = -lll."
+        description: "Minimum bandit severity to fail on. One of: all, low, medium, high. 'all'/'low' = every finding; 'medium' = -ll; 'high' = -lll."
         required: false
         type: string
         default: 'medium'
@@ -81,6 +76,18 @@ jobs:
         with:
           python-version: ${{ inputs.python-version }}
 
+      - name: Validate package-manager input
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package-manager }}
+        run: |
+          case "$PACKAGE_MANAGER" in
+            uv|pip|poetry) : ;;
+            *)
+              echo "::error title=Invalid package-manager::Unsupported package-manager '$PACKAGE_MANAGER'. Expected one of: uv, pip, poetry."
+              exit 1
+              ;;
+          esac
+
       - name: Install uv
         if: inputs.package-manager == 'uv'
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -113,14 +120,12 @@ jobs:
           fi
 
       - name: Run pip-audit
+        # pip-audit exits non-zero on any vulnerability; there is no native
+        # severity floor. Reports are fail-on-any against the pinned
+        # requirements file produced above.
         env:
-          AUDIT_LEVEL: ${{ inputs.audit-level }}
           PACKAGE_MANAGER: ${{ inputs.package-manager }}
         run: |
-          case "$AUDIT_LEVEL" in
-            low|medium|high|critical) : ;;
-            *) echo "Invalid audit-level: $AUDIT_LEVEL" >&2; exit 1 ;;
-          esac
           if [ "$PACKAGE_MANAGER" = "uv" ]; then
             uv run pip-audit --requirement /tmp/requirements.txt
           else
@@ -184,7 +189,10 @@ jobs:
             all|low)  FLAGS="" ;;
             medium)   FLAGS="-ll" ;;
             high)     FLAGS="-lll" ;;
-            *)        FLAGS="-ll" ;;
+            *)
+              echo "::error title=Invalid bandit severity::Unsupported bandit-severity '$SEVERITY'. Expected one of: all, low, medium, high."
+              exit 1
+              ;;
           esac
           if [ -f pyproject.toml ]; then
             bandit -r "$TARGET" -c pyproject.toml $FLAGS
@@ -222,6 +230,18 @@ jobs:
         with:
           python-version: ${{ inputs.python-version }}
 
+      - name: Validate package-manager input
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package-manager }}
+        run: |
+          case "$PACKAGE_MANAGER" in
+            uv|pip|poetry) : ;;
+            *)
+              echo "::error title=Invalid package-manager::Unsupported package-manager '$PACKAGE_MANAGER'. Expected one of: uv, pip, poetry."
+              exit 1
+              ;;
+          esac
+
       - name: Install uv
         if: inputs.package-manager == 'uv'
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -236,13 +256,19 @@ jobs:
           pip install --upgrade pip
           pip install -e '.[dev]' 2>/dev/null || pip install -e . 2>/dev/null || pip install -r requirements.txt
 
-      - name: Install project (poetry)
+      - name: Install project + cyclonedx (poetry, same venv)
+        # Poetry installs the project into its managed venv. We must invoke
+        # cyclonedx-py in that same venv (via `poetry run`), otherwise the
+        # SBOM would be generated against the system interpreter and miss
+        # all project dependencies.
         if: inputs.package-manager == 'poetry'
         run: |
           pipx install poetry
           poetry install --with dev
+          poetry run pip install cyclonedx-bom
 
-      - name: Install cyclonedx-bom
+      - name: Install cyclonedx-bom (uv/pip)
+        if: inputs.package-manager != 'poetry'
         env:
           PACKAGE_MANAGER: ${{ inputs.package-manager }}
         run: |
@@ -256,11 +282,11 @@ jobs:
         env:
           PACKAGE_MANAGER: ${{ inputs.package-manager }}
         run: |
-          if [ "$PACKAGE_MANAGER" = "uv" ]; then
-            uv run cyclonedx-py environment --of JSON -o sbom.cdx.json
-          else
-            cyclonedx-py environment --of JSON -o sbom.cdx.json
-          fi
+          case "$PACKAGE_MANAGER" in
+            uv)     uv run cyclonedx-py environment --of JSON -o sbom.cdx.json ;;
+            poetry) poetry run cyclonedx-py environment --of JSON -o sbom.cdx.json ;;
+            pip)    cyclonedx-py environment --of JSON -o sbom.cdx.json ;;
+          esac
 
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
