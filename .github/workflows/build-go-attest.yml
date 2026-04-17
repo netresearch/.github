@@ -80,6 +80,11 @@ on:
         required: false
         type: string
         default: "lts/*"
+      bun-version:
+        description: "Bun version (when setup-bun=true). Pin to a specific version for reproducible builds."
+        required: false
+        type: string
+        default: "latest"
       pre-build-command:
         description: "Shell command(s) run after checkout/toolchain setup and before `go build`. Useful for generating embedded assets (bun run build:assets, templ generate, sqlc generate, etc.)."
         required: false
@@ -127,7 +132,7 @@ jobs:
         if: inputs.setup-bun
         uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
         with:
-          bun-version: latest
+          bun-version: ${{ inputs.bun-version }}
 
       - name: Run pre-build command
         if: inputs.pre-build-command != ''
@@ -136,7 +141,10 @@ jobs:
         run: |
           set -euo pipefail
           echo "::group::pre-build-command"
-          bash -c "$PRE_BUILD_CMD"
+          # Invoke bash with strict flags so pipeline failures and
+          # unset-variable references inside the pre-build command
+          # propagate rather than being silently swallowed.
+          bash -euo pipefail -c "$PRE_BUILD_CMD"
           echo "::endgroup::"
 
       - name: Build binary
