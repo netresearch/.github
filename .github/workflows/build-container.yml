@@ -91,9 +91,9 @@ jobs:
           tags: |
             type=ref,event=branch,enable=${{ !inputs.ref }}
             type=ref,event=pr,enable=${{ !inputs.ref }}
-            type=semver,pattern={{version}},value=${{ env.SEMVER_REF }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ env.SEMVER_REF }}
-            type=semver,pattern={{major}},value=${{ env.SEMVER_REF }}
+            type=semver,pattern={{version}},value=${{ env.SEMVER_REF }},enable=${{ inputs.ref != '' || startsWith(github.ref, 'refs/tags/') }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ env.SEMVER_REF }},enable=${{ inputs.ref != '' || startsWith(github.ref, 'refs/tags/') }}
+            type=semver,pattern={{major}},value=${{ env.SEMVER_REF }},enable=${{ inputs.ref != '' || startsWith(github.ref, 'refs/tags/') }}
 
       - name: Log in to ${{ inputs.registry }}
         if: inputs.push
