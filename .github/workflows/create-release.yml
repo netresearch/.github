@@ -52,6 +52,9 @@ on:
       is-prerelease:
         description: "Whether this release was marked as prerelease (true/false)."
         value: ${{ jobs.release.outputs.is-prerelease }}
+      sha:
+        description: "The commit SHA the tag points at. Use this (not github.sha) in downstream ldflags/build-args so workflow_dispatch backfills produce correct provenance."
+        value: ${{ jobs.release.outputs.sha }}
 
 permissions:
   contents: read
@@ -70,6 +73,7 @@ jobs:
       upload-url: ${{ steps.create.outputs.upload-url }}
       is-latest: ${{ steps.flags.outputs.make_latest }}
       is-prerelease: ${{ steps.flags.outputs.is_prerelease }}
+      sha: ${{ steps.tag.outputs.sha }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
@@ -98,8 +102,15 @@ jobs:
             echo "::error::Tag '$TAG' is not a valid vMAJOR.MINOR.PATCH semver (e.g. v1.2.3, v1.2.3-rc1)"
             exit 1
           fi
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          # Resolve the commit SHA the tag points at (unwraps annotated
+          # tags via ^{commit}). Works for workflow_dispatch backfills
+          # where github.sha is the dispatch ref, not the tag's target.
+          SHA=$(git rev-parse "${TAG}^{commit}")
+          {
+            echo "tag=$TAG"
+            echo "version=${TAG#v}"
+            echo "sha=$SHA"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Verify annotated tag
         if: inputs.require-annotated-tag
