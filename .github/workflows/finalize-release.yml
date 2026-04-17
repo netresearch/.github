@@ -1,0 +1,220 @@
+name: Finalize Release (checksums + cosign + verification notes)
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.3.0). Defaults to github.ref_name."
+        required: false
+        type: string
+        default: ""
+      asset-pattern:
+        description: "Glob pattern (gh release download --pattern) to select assets for checksumming. Default: all."
+        required: false
+        type: string
+        default: "*"
+      sign-checksums:
+        description: "Cosign keyless OIDC sign the checksums.txt file."
+        required: false
+        type: boolean
+        default: true
+      attest-checksums:
+        description: "Generate a build-provenance attestation for the checksums file."
+        required: false
+        type: boolean
+        default: true
+      append-verification-notes:
+        description: "Append a 'Verify your download' block to the release body with cosign/gh attestation commands."
+        required: false
+        type: boolean
+        default: true
+      image-ref:
+        description: "Optional container image reference (e.g. ghcr.io/org/app) to include in verification notes. Omit for non-container projects."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  finalize:
+    name: Finalize Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        with:
+          egress-policy: audit
+
+      - name: Resolve tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          TAG="${INPUT_TAG:-$REF_NAME}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          REPO: ${{ github.repository }}
+          PATTERN: ${{ inputs.asset-pattern }}
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          cd release
+          gh release download "$TAG" --repo "$REPO" --pattern "$PATTERN" --clobber
+          echo "Downloaded assets:"
+          ls -lah
+
+      - name: Generate sha256 checksums
+        id: checksums
+        run: |
+          set -euo pipefail
+          cd release
+          shopt -s nullglob
+          files=()
+          for f in *; do
+            case "$f" in
+              checksums.txt|checksums.txt.sig|checksums.txt.pem|checksums.txt.bundle) continue ;;
+              *.sig|*.pem|*.bundle) continue ;;
+              *) files+=("$f") ;;
+            esac
+          done
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::No assets matched pattern — nothing to checksum. Refusing to overwrite a potentially valid existing checksums.txt."
+            echo "have_assets=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          sha256sum "${files[@]}" > checksums.txt
+          echo "have_assets=true" >> "$GITHUB_OUTPUT"
+          cat checksums.txt
+
+      - name: Install Cosign
+        if: inputs.sign-checksums
+        uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
+
+      - name: Cosign sign-blob checksums.txt (keyless)
+        if: inputs.sign-checksums
+        run: |
+          set -euo pipefail
+          cd release
+          cosign sign-blob --yes \
+            --output-certificate checksums.txt.pem \
+            --output-signature checksums.txt.sig \
+            checksums.txt
+
+      - name: Cosign verify-blob (sanity check)
+        if: inputs.sign-checksums
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cd release
+          cosign verify-blob \
+            --certificate checksums.txt.pem \
+            --signature checksums.txt.sig \
+            --certificate-identity-regexp "https://github.com/${REPO}/" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            checksums.txt
+
+      - name: Attest checksums
+        if: inputs.attest-checksums
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: release/checksums.txt
+
+      - name: Upload checksums + signature to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          REPO: ${{ github.repository }}
+          SIGN: ${{ inputs.sign-checksums }}
+        run: |
+          set -euo pipefail
+          cd release
+          FILES=("checksums.txt")
+          if [ "$SIGN" = "true" ]; then
+            FILES+=("checksums.txt.pem" "checksums.txt.sig")
+          fi
+          gh release upload "$TAG" "${FILES[@]}" --repo "$REPO" --clobber
+
+      - name: Append verification notes to release body
+        # Skip if neither section would render — prevents leaving an
+        # empty "Verify your download" heading + marker that would
+        # block future runs (the marker is idempotency-checked).
+        if: inputs.append-verification-notes && (inputs.sign-checksums || inputs.image-ref != '')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          REPO: ${{ github.repository }}
+          IMAGE_REF: ${{ inputs.image-ref }}
+          SIGN: ${{ inputs.sign-checksums }}
+        run: |
+          set -euo pipefail
+          # `.body // ""` coerces a null body (no prior notes) to empty
+          # string so we don't prepend the literal word "null".
+          CURRENT=$(gh release view "$TAG" --repo "$REPO" --json body --jq '.body // ""')
+
+          MARKER="<!-- verification-notes -->"
+          if printf '%s' "$CURRENT" | grep -q "$MARKER"; then
+            echo "Verification notes already present — skipping"
+            exit 0
+          fi
+
+          VERSION="${TAG#v}"
+          TICK='`'
+          FENCE='```'
+          emit_checksums_block() {
+            printf 'Verify the checksums file was signed by this repo'\''s release workflow:\n\n'
+            printf '%s\n' "${FENCE}sh"
+            printf 'cosign verify-blob \\\n'
+            printf '  --certificate checksums.txt.pem \\\n'
+            printf '  --signature checksums.txt.sig \\\n'
+            printf '  --certificate-identity-regexp "https://github.com/%s/" \\\n' "$REPO"
+            printf '  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \\\n'
+            printf '  checksums.txt\n'
+            printf '%s\n\n' "${FENCE}"
+            printf 'Then verify each artifact against %schecksums.txt%s:\n\n' "$TICK" "$TICK"
+            printf '%s\n' "${FENCE}sh"
+            printf 'sha256sum -c checksums.txt --ignore-missing\n'
+            printf '%s\n\n' "${FENCE}"
+            printf 'Verify build provenance attestations:\n\n'
+            printf '%s\n' "${FENCE}sh"
+            printf 'gh attestation verify <artifact> --repo %s\n' "$REPO"
+            printf '%s\n\n' "${FENCE}"
+          }
+          emit_image_block() {
+            printf 'Verify the container image signature:\n\n'
+            printf '%s\n' "${FENCE}sh"
+            printf 'cosign verify %s:%s \\\n' "$IMAGE_REF" "$VERSION"
+            printf '  --certificate-identity-regexp "https://github.com/%s/" \\\n' "$REPO"
+            printf '  --certificate-oidc-issuer "https://token.actions.githubusercontent.com"\n'
+            printf '%s\n\n' "${FENCE}"
+            printf 'Verify the container image build provenance:\n\n'
+            printf '%s\n' "${FENCE}sh"
+            printf 'gh attestation verify oci://%s:%s --repo %s\n' "$IMAGE_REF" "$VERSION" "$REPO"
+            printf '%s\n' "${FENCE}"
+          }
+          {
+            printf '%s\n\n' "$CURRENT"
+            printf '%s\n' "$MARKER"
+            printf '## Verify your download\n\n'
+            if [ "$SIGN" = "true" ]; then
+              emit_checksums_block
+            fi
+            if [ -n "$IMAGE_REF" ]; then
+              emit_image_block
+            fi
+          } > release_body.md
+
+          gh release edit "$TAG" --repo "$REPO" --notes-file release_body.md
