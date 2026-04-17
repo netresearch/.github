@@ -91,10 +91,13 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${INPUT_TAG:-$REF_NAME}"
-          case "$TAG" in
-            v[0-9]*) ;;
-            *) echo "::error::Tag '$TAG' does not match vX.Y.Z pattern"; exit 1 ;;
-          esac
+          # Strict semver check: v<major>.<minor>.<patch> with optional
+          # -prerelease / +build suffixes (SemVer 2.0.0).
+          SEMVER_RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+          if ! [[ "$TAG" =~ $SEMVER_RE ]]; then
+            echo "::error::Tag '$TAG' is not a valid vMAJOR.MINOR.PATCH semver (e.g. v1.2.3, v1.2.3-rc1)"
+            exit 1
+          fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
@@ -150,7 +153,15 @@ jobs:
               if [ "$IS_PRE" = "true" ]; then
                 MAKE_LATEST=false
               else
-                EXISTING=$(gh api "repos/$REPO/releases" --paginate --jq '.[] | select(.draft==false and .prerelease==false) | .tag_name' || true)
+                # Fail hard on API error — silently defaulting to
+                # "no existing releases" could incorrectly stamp an old
+                # tag as latest.
+                ALL_TAGS=$(gh api "repos/$REPO/releases" --paginate --jq '.[] | select(.draft==false and .prerelease==false) | .tag_name')
+                # Filter to semver-shaped tags only; ignore non-semver
+                # release tags (e.g. "nightly", "prod") which would
+                # confuse version comparison.
+                SEMVER_RE_GREP='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+                EXISTING=$(printf '%s\n' "$ALL_TAGS" | grep -E "$SEMVER_RE_GREP" || true)
                 if [ -z "$EXISTING" ]; then
                   MAKE_LATEST=true
                 else
