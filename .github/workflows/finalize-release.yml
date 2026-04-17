@@ -77,6 +77,7 @@ jobs:
           ls -lah
 
       - name: Generate sha256 checksums
+        id: checksums
         run: |
           set -euo pipefail
           cd release
@@ -90,11 +91,12 @@ jobs:
             esac
           done
           if [ ${#files[@]} -eq 0 ]; then
-            echo "::warning::No assets found to checksum"
-            : > checksums.txt
-          else
-            sha256sum "${files[@]}" > checksums.txt
+            echo "::error::No assets matched pattern — nothing to checksum. Refusing to overwrite a potentially valid existing checksums.txt."
+            echo "have_assets=false" >> "$GITHUB_OUTPUT"
+            exit 1
           fi
+          sha256sum "${files[@]}" > checksums.txt
+          echo "have_assets=true" >> "$GITHUB_OUTPUT"
           cat checksums.txt
 
       - name: Install Cosign
@@ -147,7 +149,10 @@ jobs:
           gh release upload "$TAG" "${FILES[@]}" --repo "$REPO" --clobber
 
       - name: Append verification notes to release body
-        if: inputs.append-verification-notes
+        # Skip if neither section would render — prevents leaving an
+        # empty "Verify your download" heading + marker that would
+        # block future runs (the marker is idempotency-checked).
+        if: inputs.append-verification-notes && (inputs.sign-checksums || inputs.image-ref != '')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.tag.outputs.tag }}
@@ -156,7 +161,9 @@ jobs:
           SIGN: ${{ inputs.sign-checksums }}
         run: |
           set -euo pipefail
-          CURRENT=$(gh release view "$TAG" --repo "$REPO" --json body --jq .body)
+          # `.body // ""` coerces a null body (no prior notes) to empty
+          # string so we don't prepend the literal word "null".
+          CURRENT=$(gh release view "$TAG" --repo "$REPO" --json body --jq '.body // ""')
 
           MARKER="<!-- verification-notes -->"
           if printf '%s' "$CURRENT" | grep -q "$MARKER"; then
