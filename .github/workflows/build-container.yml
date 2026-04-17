@@ -59,15 +59,19 @@ on:
         default: false
     outputs:
       digest:
-        description: "Digest of the pushed image (sha256:...)."
+        description: "Digest of the pushed image (sha256:...). Empty when push=false."
         value: ${{ jobs.build.outputs.digest }}
-      image-ref:
+      image_ref:
         description: "Full image reference <registry>/<owner>/<image-name>."
-        value: ${{ jobs.build.outputs.image-ref }}
+        value: ${{ jobs.build.outputs.image_ref }}
       tags:
-        description: "Newline-separated list of pushed tags (from docker/metadata-action)."
+        description: "Newline-separated list of pushed tags (from docker/metadata-action). Empty when push=false."
         value: ${{ jobs.build.outputs.tags }}
 
+# Note on permissions: the reusable workflow declares the maximum set it
+# *may* use. GitHub clamps to the caller's granted permissions, so
+# callers that enable `sign: true` or `attest: true` MUST also grant
+# `id-token: write` and `attestations: write` at their job level.
 permissions:
   contents: read
   packages: write
@@ -87,7 +91,7 @@ jobs:
       attestations: write
     outputs:
       digest: ${{ steps.build.outputs.digest }}
-      image-ref: ${{ env.IMAGE_REF }}
+      image_ref: ${{ env.IMAGE_REF }}
       tags: ${{ steps.meta.outputs.tags }}
     env:
       IMAGE_REF: ${{ inputs.registry }}/${{ github.repository_owner }}/${{ inputs.image-name }}
