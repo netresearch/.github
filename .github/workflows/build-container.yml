@@ -57,6 +57,11 @@ on:
         required: false
         type: boolean
         default: false
+      pre-build-command:
+        description: "Shell command(s) run after checkout and before docker build. Useful for downloading release binaries into the build context when the Dockerfile expects pre-built artifacts (e.g. gh release download ...)."
+        required: false
+        type: string
+        default: ""
     outputs:
       digest:
         description: "Digest of the pushed image (sha256:...). Empty when push=false."
@@ -106,6 +111,17 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
           persist-credentials: false
+
+      - name: Run pre-build command
+        if: inputs.pre-build-command != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRE_BUILD_CMD: ${{ inputs.pre-build-command }}
+        run: |
+          set -euo pipefail
+          echo "::group::pre-build-command"
+          bash -euo pipefail -c "$PRE_BUILD_CMD"
+          echo "::endgroup::"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
