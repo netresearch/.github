@@ -1,0 +1,138 @@
+name: Build and Push Container Image
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: "Image name without registry prefix (e.g. my-app). Final image: <registry>/<repo-owner>/<image-name>."
+        required: true
+        type: string
+      ref:
+        description: "Git ref to build (short form, e.g. 'v1.3.0', 'main', or a SHA). Used for both checkout and semver tag extraction. Leave empty to use the caller's github.ref."
+        required: false
+        type: string
+        default: ""
+      platforms:
+        description: "Comma-separated build platforms."
+        required: false
+        type: string
+        default: "linux/amd64,linux/arm64"
+      context:
+        description: "Build context path."
+        required: false
+        type: string
+        default: "."
+      dockerfile:
+        description: "Path to Dockerfile."
+        required: false
+        type: string
+        default: "./Dockerfile"
+      registry:
+        description: "Container registry."
+        required: false
+        type: string
+        default: "ghcr.io"
+      push:
+        description: "Push the built image. Set false for validation-only builds (e.g. on pull_request)."
+        required: false
+        type: boolean
+        default: true
+      trivy-severity:
+        description: "Trivy severity filter."
+        required: false
+        type: string
+        default: "CRITICAL,HIGH"
+      scan:
+        description: "Run Trivy scan and upload SARIF (requires push=true to scan by digest)."
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+  security-events: write
+
+jobs:
+  build:
+    name: Build Container
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+    env:
+      IMAGE_REF: ${{ inputs.registry }}/${{ github.repository_owner }}/${{ inputs.image-name }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Gather Docker metadata
+        id: meta
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
+        env:
+          SEMVER_REF: ${{ inputs.ref || github.ref_name }}
+        with:
+          images: ${{ env.IMAGE_REF }}
+          tags: |
+            type=ref,event=branch,enable=${{ !inputs.ref }}
+            type=ref,event=pr,enable=${{ !inputs.ref }}
+            type=semver,pattern={{version}},value=${{ env.SEMVER_REF }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ env.SEMVER_REF }}
+            type=semver,pattern={{major}},value=${{ env.SEMVER_REF }}
+
+      - name: Log in to ${{ inputs.registry }}
+        if: inputs.push
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        env:
+          BUILD_CONTEXT: ${{ inputs.context }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+        with:
+          context: ${{ env.BUILD_CONTEXT }}
+          file: ${{ env.DOCKERFILE }}
+          push: ${{ inputs.push }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: ${{ inputs.platforms }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run Trivy vulnerability scanner
+        id: trivy
+        if: inputs.scan && inputs.push
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          image-ref: ${{ env.IMAGE_REF }}@${{ steps.build.outputs.digest }}
+          format: "sarif"
+          output: "trivy-results.sarif"
+          severity: ${{ inputs.trivy-severity }}
+          scanners: "vuln,config,secret"
+
+      - name: Upload Trivy results to GitHub Security
+        if: inputs.scan && inputs.push && hashFiles('trivy-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4.35.2
+        with:
+          sarif_file: "trivy-results.sarif"
+          category: "container-scan"
