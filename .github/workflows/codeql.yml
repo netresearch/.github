@@ -1,24 +1,75 @@
 name: CodeQL
 
+# Reusable CodeQL analysis.
+#
+# The `languages` input accepts either a single CodeQL language or a
+# comma-separated list (e.g. `go` or `go,javascript-typescript`). A
+# `prepare` job normalizes the input into a JSON array, then `analyze`
+# fans out as a matrix so that each language gets its own init+analyse
+# pass and emits a distinct `/language:<lang>` SARIF category.
+#
+# Callers passing a single language keep working unchanged (1-element
+# matrix). Callers passing multiple languages now get correct per-
+# language SARIF categories instead of a single colliding one.
+
 on:
   workflow_call:
     inputs:
       languages:
-        description: CodeQL languages to analyze (comma-separated)
+        description: "CodeQL language or comma-separated list of languages to analyze."
         type: string
         default: actions
 
 permissions: {}
 
 jobs:
+  prepare:
+    name: Prepare languages
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    outputs:
+      languages: ${{ steps.split.outputs.languages }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        with:
+          egress-policy: audit
+
+      - name: Split languages into JSON array
+        id: split
+        env:
+          LANGUAGES: ${{ inputs.languages }}
+        run: |
+          set -euo pipefail
+          # Normalize: strip whitespace, drop empties, emit a JSON array.
+          json="$(
+            printf '%s' "$LANGUAGES" \
+              | tr ',' '\n' \
+              | awk 'NF { gsub(/^[ \t]+|[ \t]+$/, "", $0); if ($0 != "") print }' \
+              | jq -R . \
+              | jq -s -c .
+          )"
+          if [ "$json" = "[]" ]; then
+            echo "::error::No languages provided to codeql.yml (input 'languages' is empty)."
+            exit 1
+          fi
+          echo "languages=$json" >> "$GITHUB_OUTPUT"
+
   analyze:
-    name: Analyze
+    name: Analyze (${{ matrix.language }})
+    needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read
       security-events: write
       actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ${{ fromJSON(needs.prepare.outputs.languages) }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
@@ -33,10 +84,10 @@ jobs:
       - name: Initialize CodeQL
         uses: github/codeql-action/init@c10b8064de6f491fea524254123dbe5e09572f13 # v4.35.1
         with:
-          languages: ${{ inputs.languages }}
+          languages: ${{ matrix.language }}
           queries: security-and-quality
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@c10b8064de6f491fea524254123dbe5e09572f13 # v4.35.1
         with:
-          category: /language:${{ inputs.languages }}
+          category: /language:${{ matrix.language }}
