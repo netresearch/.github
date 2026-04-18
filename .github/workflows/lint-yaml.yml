@@ -58,7 +58,14 @@ jobs:
 
       - name: yamllint
         env:
-          YAMLLINT_DEFAULT_CONFIG: "{extends: default, rules: {line-length: disable, truthy: disable, document-start: disable}}"
+          # Relaxed defaults tuned for GitHub Actions YAML:
+          #   - braces/brackets: allow up to 1 space inside (matches idiomatic
+          #     `{ contents: read }` and `[main]` patterns).
+          #   - line-length / truthy / document-start: disabled — noisy for
+          #     workflow files that don't ship `---` or `true` literals.
+          #   - comments: {min-spaces-from-content: 1} — many GHA comments
+          #     use `# ...` with 1 space (yamllint default requires 2).
+          YAMLLINT_DEFAULT_CONFIG: "{extends: default, rules: {line-length: disable, truthy: disable, document-start: disable, braces: {min-spaces-inside: 0, max-spaces-inside: 1}, brackets: {min-spaces-inside: 0, max-spaces-inside: 1}, comments: {min-spaces-from-content: 1}, comments-indentation: disable}}"
         run: |
           pip install --quiet yamllint
           # If the caller repo has its own yamllint config file, prefer it;
