@@ -94,11 +94,11 @@ on:
 # CALLER REQUIREMENTS
 # ===================
 # When calling this reusable workflow, the caller's job-level
-# `permissions:` block MUST grant at least this full set (plus
-# `contents: write` when `upload-to-release: true`). Otherwise
-# push-event runs fail with `startup_failure` before any job runs —
-# GitHub rejects the workflow at startup when the reusable declares
-# permissions the caller hasn't granted.
+# `permissions:` block MUST grant at least this full set (the job
+# requests `contents: write` unconditionally for release-asset
+# uploads). Otherwise push-event runs fail with `startup_failure`
+# before any job runs — GitHub rejects the workflow at startup when
+# the reusable declares permissions the caller hasn't granted.
 #
 #   jobs:
 #     build:
