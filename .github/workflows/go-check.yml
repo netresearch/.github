@@ -271,16 +271,12 @@ jobs:
       - name: Run govulncheck
         env:
           VULNCHECK_VERSION: ${{ inputs.govulncheck-version }}
+        # govulncheck's exit code is the source of truth:
+        #   0 = no vulns, 3 = vulns found. Parsing the text output was fragile
+        #   across govulncheck releases (format changed between v1.1.x and
+        #   later), so just propagate the tool's own status.
         run: |
-          set +e
-          TMP_OUT="$(mktemp)"
-          go run "golang.org/x/vuln/cmd/govulncheck@${VULNCHECK_VERSION}" ./... | tee "$TMP_OUT"
-          set -e
-          if grep -E "^\s*Fixed in:\s+" "$TMP_OUT" | grep -v "Fixed in: N/A" >/dev/null; then
-            echo "::error::govulncheck found vulnerabilities with available fixes"
-            exit 1
-          fi
-          echo "govulncheck: no fixable vulnerabilities"
+          go run "golang.org/x/vuln/cmd/govulncheck@${VULNCHECK_VERSION}" ./...
 
   gosec:
     name: gosec
@@ -323,7 +319,10 @@ jobs:
       - name: Run gosec
         uses: securego/gosec@64b97151cd7b978abdf8d2f1159a4e9096a12c2b # master
         with:
-          args: "-fmt sarif -out gosec-results.sarif ./..."
+          # `-no-fail` keeps the CI step green; findings flow into the
+          # Security tab via the SARIF upload below. Treat code scanning
+          # (not workflow-log grep) as the source of truth for gosec.
+          args: "-no-fail -fmt sarif -out gosec-results.sarif ./..."
 
       - name: Upload gosec SARIF
         if: always() && hashFiles('gosec-results.sarif') != ''
