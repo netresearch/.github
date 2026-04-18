@@ -101,6 +101,10 @@ on:
         description: "install-mode for golangci-lint-action. 'goinstall' compiles golangci-lint against the caller's Go toolchain — use this when your repo targets a Go version newer than the prebuilt binary."
         type: string
         default: "goinstall"
+      golangci-lint-verify:
+        description: "Run `golangci-lint config verify` before linting. Set false when the caller repo's .golangci.yml uses a schema from an older major (e.g. v1-style keys on a v2 binary). Default true — strict is safer."
+        type: boolean
+        default: true
 
       enable-govulncheck:
         description: "Enable the govulncheck job."
@@ -242,6 +246,7 @@ jobs:
           # avoiding binary/repo Go-version mismatches when the repo targets
           # a newer Go than the latest prebuilt binary.
           install-mode: ${{ inputs.golangci-lint-install-mode }}
+          verify: ${{ inputs.golangci-lint-verify }}
 
   govulncheck:
     name: govulncheck
