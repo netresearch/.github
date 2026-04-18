@@ -10,53 +10,14 @@ permissions:
   contents: read
 
 jobs:
-  lint-workflows:
+  workflows:
     name: Lint Workflows
-    runs-on: ubuntu-latest
-    steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
-        with:
-          egress-policy: audit
+    uses: ./.github/workflows/lint-workflows.yml
 
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: actionlint
-        uses: reviewdog/action-actionlint@6fb7acc99f4a1008869fa8a0f09cfca740837d9d # v1.72.0
-        with:
-          fail_level: error
-
-  lint-markdown:
+  markdown:
     name: Lint Markdown
-    runs-on: ubuntu-latest
-    steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
-        with:
-          egress-policy: audit
+    uses: ./.github/workflows/lint-markdown.yml
 
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: markdownlint
-        uses: DavidAnson/markdownlint-cli2-action@ce4853d43830c74c1753b39f3cf40f71c2031eb9 # v23.0.0
-        with:
-          globs: "**/*.md"
-
-  lint-yaml:
+  yaml:
     name: Lint YAML
-    runs-on: ubuntu-latest
-    steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
-        with:
-          egress-policy: audit
-
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: yamllint
-        run: |
-          pip install --quiet yamllint
-          yamllint -d "{extends: default, rules: {line-length: disable, truthy: disable, document-start: disable}}" .
+    uses: ./.github/workflows/lint-yaml.yml
