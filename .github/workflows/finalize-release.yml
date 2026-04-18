@@ -34,6 +34,20 @@ on:
         type: string
         default: ""
 
+# CALLER REQUIREMENTS
+# ===================
+# The caller's job-level `permissions:` block MUST grant at least:
+#
+#   jobs:
+#     finalize:
+#       uses: netresearch/.github/.github/workflows/finalize-release.yml@main
+#       permissions:
+#         contents: write        # upload checksums; edit release notes
+#         id-token: write        # cosign keyless + attestation
+#         attestations: write    # build-provenance for checksums
+#       with:
+#         tag: ${{ needs.create-release.outputs.tag }}
+#         image-ref: ghcr.io/${{ github.repository_owner }}/my-app
 permissions:
   contents: read
 

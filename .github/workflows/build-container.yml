@@ -73,10 +73,26 @@ on:
         description: "Newline-separated list of pushed tags (from docker/metadata-action). Empty when push=false."
         value: ${{ jobs.build.outputs.tags }}
 
-# Note on permissions: the reusable workflow declares the maximum set it
-# *may* use. GitHub clamps to the caller's granted permissions, so
-# callers that enable `sign: true` or `attest: true` MUST also grant
-# `id-token: write` and `attestations: write` at their job level.
+# CALLER REQUIREMENTS
+# ===================
+# When calling this reusable workflow, the caller's job-level
+# `permissions:` block MUST grant at least this full set, otherwise
+# push-event runs fail with `startup_failure` before any job runs
+# (GitHub rejects the workflow at startup when the reusable declares
+# permissions not covered by the caller — even if the specific
+# permission is only needed for an optional feature like sign/attest).
+#
+#   jobs:
+#     build:
+#       uses: netresearch/.github/.github/workflows/build-container.yml@main
+#       permissions:
+#         contents: read
+#         packages: write
+#         security-events: write
+#         id-token: write       # required — even when sign/attest=false
+#         attestations: write   # required — even when sign/attest=false
+#       with:
+#         image-name: my-app
 permissions:
   contents: read
   packages: write

@@ -91,7 +91,26 @@ on:
         type: string
         default: ""
 
-# Least privilege: only request write permissions for jobs that need them
+# CALLER REQUIREMENTS
+# ===================
+# When calling this reusable workflow, the caller's job-level
+# `permissions:` block MUST grant at least this full set (the job
+# requests `contents: write` unconditionally for release-asset
+# uploads). Otherwise push-event runs fail with `startup_failure`
+# before any job runs — GitHub rejects the workflow at startup when
+# the reusable declares permissions the caller hasn't granted.
+#
+#   jobs:
+#     build:
+#       uses: netresearch/.github/.github/workflows/build-go-attest.yml@main
+#       permissions:
+#         contents: write        # required for release asset upload
+#         id-token: write        # required for provenance attestation
+#         attestations: write    # required for provenance attestation
+#       with:
+#         binary-name: my-app-linux-amd64
+#         goos: linux
+#         goarch: amd64
 permissions:
   contents: read
   id-token: write
