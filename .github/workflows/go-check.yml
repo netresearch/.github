@@ -1,0 +1,300 @@
+# Reusable "Go check" workflow — the canonical build / test / lint / security
+# pipeline for Go projects in this org.
+#
+# Jobs (each can be toggled via inputs):
+#   - build-test   : go build + go vet + go test (with optional pre-build-cmd
+#                    for projects whose Go code depends on front-end assets)
+#   - golangci     : golangci-lint via the official action
+#   - govulncheck  : Go vulnerability database scan, fails on fixable vulns
+#   - gosec        : gosec security scan, uploads SARIF
+#
+# Caller pattern:
+#
+#   jobs:
+#     checks:
+#       uses: netresearch/.github/.github/workflows/go-check.yml@main
+#       with:
+#         enable-codecov: true
+#         setup-bun: true
+#         pre-build-cmd: "bun install --frozen-lockfile && bun run build:assets"
+#       secrets:
+#         CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+#
+# SECURITY: every caller-supplied input that lands in a `run:` step is
+# pushed through the `env:` block so it cannot break out of its argument
+# position via quoting/metacharacters.
+
+name: Go Check (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      go-version-file:
+        description: "Path to go.mod / go.work / .go-version for version detection."
+        type: string
+        default: "go.mod"
+      runs-on:
+        description: "Runner label."
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Per-job timeout in minutes."
+        type: number
+        default: 15
+
+      setup-bun:
+        description: "Install Bun before running pre-build-cmd."
+        type: boolean
+        default: false
+      bun-version:
+        description: "Bun version to install (passed to oven-sh/setup-bun)."
+        type: string
+        default: "latest"
+      pre-build-cmd:
+        description: "Shell command to run before go build / test (e.g. 'bun run build:assets')."
+        type: string
+        default: ""
+
+      enable-build-test:
+        description: "Enable the build + vet + test job."
+        type: boolean
+        default: true
+      build-target:
+        description: "Argument passed to `go build -v` and `go vet`."
+        type: string
+        default: "./..."
+      test-packages:
+        description: "Packages to run `go test` against."
+        type: string
+        default: "./..."
+      test-flags:
+        description: "Flags passed to `go test` (before packages)."
+        type: string
+        default: "-race -coverprofile=coverage.out -covermode=atomic"
+
+      enable-codecov:
+        description: "Upload coverage.out to Codecov after tests."
+        type: boolean
+        default: false
+      codecov-flags:
+        description: "Codecov `flags` input."
+        type: string
+        default: "unittests"
+      codecov-file:
+        description: "Coverage file to upload."
+        type: string
+        default: "coverage.out"
+
+      enable-golangci-lint:
+        description: "Enable the golangci-lint job."
+        type: boolean
+        default: true
+      golangci-lint-version:
+        description: "golangci-lint version (passed to the action)."
+        type: string
+        default: "latest"
+      golangci-lint-args:
+        description: "Extra args for golangci-lint run."
+        type: string
+        default: ""
+
+      enable-govulncheck:
+        description: "Enable the govulncheck job. Fails when fixable vulns exist."
+        type: boolean
+        default: true
+      govulncheck-version:
+        description: "govulncheck version (go run target)."
+        type: string
+        default: "latest"
+
+      enable-gosec:
+        description: "Enable the gosec security-scan job (SARIF uploaded)."
+        type: boolean
+        default: true
+
+    secrets:
+      CODECOV_TOKEN:
+        description: "Codecov upload token (only needed when enable-codecov=true)."
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: Build & Test
+    if: ${{ inputs.enable-build-test }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@f808768d1510423e83855289c910610ca9b43176 # v2.17.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+          cache: true
+
+      - name: Set up Bun
+        if: ${{ inputs.setup-bun }}
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ inputs.bun-version }}
+
+      - name: Pre-build command
+        if: ${{ inputs.pre-build-cmd != '' }}
+        env:
+          PRE_BUILD_CMD: ${{ inputs.pre-build-cmd }}
+        run: |
+          bash -c "$PRE_BUILD_CMD"
+
+      - name: Download Go modules
+        run: go mod download
+
+      - name: go vet
+        env:
+          BUILD_TARGET: ${{ inputs.build-target }}
+        run: go vet "$BUILD_TARGET"
+
+      - name: go build
+        env:
+          BUILD_TARGET: ${{ inputs.build-target }}
+        run: go build -v "$BUILD_TARGET"
+
+      - name: go test
+        env:
+          TEST_FLAGS: ${{ inputs.test-flags }}
+          TEST_PACKAGES: ${{ inputs.test-packages }}
+        run: |
+          # shellcheck disable=SC2086  # TEST_FLAGS is a space-separated flag list by design
+          go test -v $TEST_FLAGS "$TEST_PACKAGES"
+
+      - name: Upload coverage to Codecov
+        if: ${{ inputs.enable-codecov }}
+        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ${{ inputs.codecov-file }}
+          flags: ${{ inputs.codecov-flags }}
+          fail_ci_if_error: false
+
+  golangci-lint:
+    name: golangci-lint
+    if: ${{ inputs.enable-golangci-lint }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@f808768d1510423e83855289c910610ca9b43176 # v2.17.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+          cache: true
+
+      - name: Set up Bun
+        if: ${{ inputs.setup-bun }}
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ inputs.bun-version }}
+
+      - name: Pre-build command
+        if: ${{ inputs.pre-build-cmd != '' }}
+        env:
+          PRE_BUILD_CMD: ${{ inputs.pre-build-cmd }}
+        run: |
+          bash -c "$PRE_BUILD_CMD"
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9.2.0
+        with:
+          version: ${{ inputs.golangci-lint-version }}
+          args: ${{ inputs.golangci-lint-args }}
+
+  govulncheck:
+    name: govulncheck
+    if: ${{ inputs.enable-govulncheck }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@f808768d1510423e83855289c910610ca9b43176 # v2.17.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+          cache: true
+
+      - name: Run govulncheck
+        env:
+          VULNCHECK_VERSION: ${{ inputs.govulncheck-version }}
+        run: |
+          set +e
+          TMP_OUT="$(mktemp)"
+          go run "golang.org/x/vuln/cmd/govulncheck@${VULNCHECK_VERSION}" ./... | tee "$TMP_OUT"
+          set -e
+          if grep -E "^\s*Fixed in:\s+" "$TMP_OUT" | grep -v "Fixed in: N/A" >/dev/null; then
+            echo "::error::govulncheck found vulnerabilities with available fixes"
+            exit 1
+          fi
+          echo "govulncheck: no fixable vulnerabilities"
+
+  gosec:
+    name: gosec
+    if: ${{ inputs.enable-gosec }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@f808768d1510423e83855289c910610ca9b43176 # v2.17.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Run gosec
+        uses: securego/gosec@64b97151cd7b978abdf8d2f1159a4e9096a12c2b # master
+        with:
+          args: "-fmt sarif -out gosec-results.sarif ./..."
+
+      - name: Upload gosec SARIF
+        if: always() && hashFiles('gosec-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@c10b8064de6f491fea524254123dbe5e09572f13 # v4.35.1
+        with:
+          sarif_file: gosec-results.sarif
