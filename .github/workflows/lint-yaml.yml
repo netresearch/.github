@@ -34,6 +34,10 @@ on:
         description: "Per-job timeout in minutes."
         type: number
         default: 5
+      strict:
+        description: "Fail the job when yamllint reports findings. Default false — findings are logged but don't block CI (lets repos migrate first, clean up in follow-ups)."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -66,8 +70,10 @@ jobs:
           #   - comments: {min-spaces-from-content: 1} — many GHA comments
           #     use `# ...` with 1 space (yamllint default requires 2).
           YAMLLINT_DEFAULT_CONFIG: "{extends: default, rules: {line-length: disable, truthy: disable, document-start: disable, braces: {min-spaces-inside: 0, max-spaces-inside: 1}, brackets: {min-spaces-inside: 0, max-spaces-inside: 1}, comments: {min-spaces-from-content: 1}, comments-indentation: disable}}"
+          STRICT: ${{ inputs.strict }}
         run: |
           pip install --quiet yamllint
+          set +e
           # If the caller repo has its own yamllint config file, prefer it;
           # otherwise fall back to our inline defaults.
           if [ -f .yamllint ] || [ -f .yamllint.yml ] || [ -f .yamllint.yaml ]; then
@@ -75,3 +81,11 @@ jobs:
           else
             yamllint -d "$YAMLLINT_DEFAULT_CONFIG" .
           fi
+          STATUS=$?
+          set -e
+          if [ "$STATUS" -eq 0 ]; then exit 0; fi
+          if [ "$STRICT" = "true" ]; then
+            echo "::error::yamllint reported findings — failing because strict=true."
+            exit "$STATUS"
+          fi
+          echo "::warning::yamllint reported findings. Non-blocking because strict=false; ship a .yamllint with tightened rules or set strict=true after cleanup."
