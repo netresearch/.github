@@ -1,0 +1,70 @@
+# Reusable "Lint YAML" — runs yamllint over the caller's repository.
+#
+# The yamllint config is the same inline defaults previously used by this
+# repo's `ci.yml`:
+#   extends: default
+#   rules:
+#     line-length: disable
+#     truthy: disable
+#     document-start: disable
+#
+# If the caller repo ships its own `.yamllint`, `.yamllint.yml`, or
+# `.yamllint.yaml`, that file is used instead (yamllint auto-discovers it
+# in the working directory, taking precedence over the `-d` default).
+#
+# Caller pattern:
+#
+#   jobs:
+#     yaml:
+#       uses: netresearch/.github/.github/workflows/lint-yaml.yml@main
+#
+# SECURITY: pinned action SHAs, harden-runner, read-only permissions,
+# `persist-credentials: false` on checkout.
+
+name: Lint YAML (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: "Runner label."
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Per-job timeout in minutes."
+        type: number
+        default: 5
+
+permissions:
+  contents: read
+
+jobs:
+  yamllint:
+    name: yamllint
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: yamllint
+        env:
+          YAMLLINT_DEFAULT_CONFIG: "{extends: default, rules: {line-length: disable, truthy: disable, document-start: disable}}"
+        run: |
+          pip install --quiet yamllint
+          # If the caller repo has its own yamllint config file, prefer it;
+          # otherwise fall back to our inline defaults.
+          if [ -f .yamllint ] || [ -f .yamllint.yml ] || [ -f .yamllint.yaml ]; then
+            yamllint .
+          else
+            yamllint -d "$YAMLLINT_DEFAULT_CONFIG" .
+          fi
