@@ -1,0 +1,210 @@
+# Reusable "TypeScript / frontend check" workflow.
+#
+# Jobs (each can be toggled via inputs):
+#   - type-check   : bun install + tsc / bun run js:build
+#   - lint         : eslint via `bun run lint`
+#   - format-check : `bunx prettier --check .`
+#
+# Caller pattern:
+#
+#   jobs:
+#     ts:
+#       uses: netresearch/.github/.github/workflows/ts-check.yml@main
+#       with:
+#         install-args: "--frozen-lockfile"
+#
+# SECURITY: caller-supplied commands are routed through `env:` so the
+# caller can't break out of argument position via quoting/metacharacters.
+
+name: TS Check (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: "Runner label."
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Per-job timeout in minutes."
+        type: number
+        default: 10
+
+      bun-version:
+        description: "Bun version passed to oven-sh/setup-bun."
+        type: string
+        default: "latest"
+      install-cmd:
+        description: "Dependency install command."
+        type: string
+        default: "bun install --frozen-lockfile"
+
+      pre-command:
+        description: "Optional shell command to run after install but before the checks (e.g. 'go install github.com/a-h/templ/cmd/templ@latest')."
+        type: string
+        default: ""
+
+      setup-go:
+        description: "Install Go before running pre-command (useful for projects that run Go tooling as part of the TS build chain)."
+        type: boolean
+        default: false
+      go-version-file:
+        description: "Path to go.mod / .go-version for version detection when setup-go=true."
+        type: string
+        default: "go.mod"
+
+      enable-type-check:
+        description: "Run the TypeScript type-check job."
+        type: boolean
+        default: true
+      type-check-cmd:
+        description: "Command used for the type-check job."
+        type: string
+        default: "bun run js:build"
+
+      enable-lint:
+        description: "Run the ESLint job."
+        type: boolean
+        default: true
+      lint-cmd:
+        description: "Command used for the lint job."
+        type: string
+        default: "bun run lint"
+
+      enable-format-check:
+        description: "Run the Prettier format check."
+        type: boolean
+        default: true
+      format-check-cmd:
+        description: "Command used for the format-check job."
+        type: string
+        default: "bunx prettier --check ."
+
+permissions:
+  contents: read
+
+jobs:
+  type-check:
+    name: Check types
+    if: ${{ inputs.enable-type-check }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@f808768d1510423e83855289c910610ca9b43176 # v2.17.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        if: ${{ inputs.setup-go }}
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+          cache: true
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ inputs.bun-version }}
+
+      - name: Install dependencies
+        env:
+          INSTALL_CMD: ${{ inputs.install-cmd }}
+        run: bash -c "$INSTALL_CMD"
+
+      - name: Pre-check command
+        if: ${{ inputs.pre-command != '' }}
+        env:
+          PRE_COMMAND: ${{ inputs.pre-command }}
+        run: bash -c "$PRE_COMMAND"
+
+      - name: Type check
+        env:
+          TYPE_CHECK_CMD: ${{ inputs.type-check-cmd }}
+        run: bash -c "$TYPE_CHECK_CMD"
+
+  lint:
+    name: Lint
+    if: ${{ inputs.enable-lint }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@f808768d1510423e83855289c910610ca9b43176 # v2.17.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        if: ${{ inputs.setup-go }}
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+          cache: true
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ inputs.bun-version }}
+
+      - name: Install dependencies
+        env:
+          INSTALL_CMD: ${{ inputs.install-cmd }}
+        run: bash -c "$INSTALL_CMD"
+
+      - name: Pre-check command
+        if: ${{ inputs.pre-command != '' }}
+        env:
+          PRE_COMMAND: ${{ inputs.pre-command }}
+        run: bash -c "$PRE_COMMAND"
+
+      - name: Lint
+        env:
+          LINT_CMD: ${{ inputs.lint-cmd }}
+        run: bash -c "$LINT_CMD"
+
+  format-check:
+    name: Check formatting
+    if: ${{ inputs.enable-format-check }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@f808768d1510423e83855289c910610ca9b43176 # v2.17.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ inputs.bun-version }}
+
+      - name: Install dependencies
+        env:
+          INSTALL_CMD: ${{ inputs.install-cmd }}
+        run: bash -c "$INSTALL_CMD"
+
+      - name: Format check
+        env:
+          FORMAT_CHECK_CMD: ${{ inputs.format-check-cmd }}
+        run: bash -c "$FORMAT_CHECK_CMD"
