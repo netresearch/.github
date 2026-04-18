@@ -56,6 +56,15 @@ on:
         description: "The commit SHA the tag points at. Use this (not github.sha) in downstream ldflags/build-args so workflow_dispatch backfills produce correct provenance."
         value: ${{ jobs.release.outputs.sha }}
 
+# CALLER REQUIREMENTS
+# ===================
+# The caller's job-level `permissions:` block MUST grant at least:
+#
+#   jobs:
+#     create-release:
+#       uses: netresearch/.github/.github/workflows/create-release.yml@main
+#       permissions:
+#         contents: write        # create/edit the GitHub Release
 permissions:
   contents: read
 
