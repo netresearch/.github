@@ -31,6 +31,10 @@ on:
         description: "Glob(s) of Markdown files to lint (passed to markdownlint-cli2-action)."
         type: string
         default: "**/*.md"
+      strict:
+        description: "Fail the job when markdownlint reports findings. Default false — findings are logged but don't block CI (lets repos migrate first, clean up in follow-ups)."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -77,6 +81,16 @@ jobs:
           YAML
 
       - name: markdownlint
+        id: markdownlint
+        # `continue-on-error` keeps the step's failure from failing the job
+        # when strict=false. The "Summary" step below emits a warning in
+        # that case so the finding is still visible.
+        continue-on-error: ${{ !inputs.strict }}
         uses: DavidAnson/markdownlint-cli2-action@ce4853d43830c74c1753b39f3cf40f71c2031eb9 # v23.0.0
         with:
           globs: ${{ inputs.globs }}
+
+      - name: Summary (non-strict mode)
+        if: ${{ !inputs.strict && steps.markdownlint.outcome == 'failure' }}
+        run: |
+          echo "::warning::markdownlint reported findings. Non-blocking because strict=false; ship a .markdownlint.yaml with tightened rules or set strict=true after cleanup."
