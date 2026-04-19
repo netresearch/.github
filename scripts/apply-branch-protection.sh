@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-DRIFT_CONTEXT="Template Drift / drift"
+DRIFT_CONTEXT="drift / Template drift"
 
 declare -A CONSUMERS=(
   [netresearch/ofelia]=go-app
