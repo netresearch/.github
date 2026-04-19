@@ -1,0 +1,183 @@
+# Reusable "template drift check" — compares a consuming repo's .github/
+# tree against the canonical template in this repo. Fails CI when any
+# governed file diverges, unless explicitly listed in the consumer's
+# .github/template.yaml `intentional-drift:` field.
+#
+# Caller pattern (in the consuming repo, from the template):
+#
+#   jobs:
+#     drift:
+#       uses: netresearch/.github/.github/workflows/check-template-drift.yml@main
+#       with:
+#         template: go-app   # or go-lib
+#
+# Governance contract:
+#   - The template directory templates/<template>/.github/ is the source
+#     of truth. Every file in it must exist identically in the consumer,
+#     with the exceptions below.
+#   - Consumer's `.github/template.yaml` is metadata; its content is
+#     expected to differ per-repo (different intentional-drift list) and
+#     is never in the diff comparison.
+#   - `intentional-drift:` entries are paths, relative to consumer root
+#     (e.g. `.github/workflows/ci.yml`). Matching paths are exempt.
+
+name: Template Drift Check (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      template:
+        description: "Template directory to validate against. Matches a subfolder of netresearch/.github/templates/."
+        type: string
+        required: true
+      templates-repo:
+        description: "Repository hosting templates/ (default: netresearch/.github)."
+        type: string
+        default: "netresearch/.github"
+      templates-ref:
+        description: "Ref of templates-repo to compare against."
+        type: string
+        default: "main"
+
+permissions: {}
+
+jobs:
+  drift:
+    name: Template drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout consumer repo
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          path: consumer
+
+      - name: Checkout templates repo
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ inputs.templates-repo }}
+          ref: ${{ inputs.templates-ref }}
+          persist-credentials: false
+          path: templates-src
+
+      - name: Compare consumer against template
+        env:
+          TEMPLATE_NAME: ${{ inputs.template }}
+        run: |
+          set -euo pipefail
+
+          CONSUMER_ROOT="$GITHUB_WORKSPACE/consumer"
+          TEMPLATE_ROOT="$GITHUB_WORKSPACE/templates-src/templates/${TEMPLATE_NAME}"
+
+          if [ ! -d "$TEMPLATE_ROOT" ]; then
+            echo "::error::Template directory $TEMPLATE_ROOT does not exist in ${{ inputs.templates-repo }}@${{ inputs.templates-ref }}."
+            exit 1
+          fi
+
+          # Parse intentional-drift paths from consumer's .github/template.yaml.
+          # Tolerate the file not existing (fresh repos) or not having the key.
+          DRIFT_FILE="$CONSUMER_ROOT/.github/template.yaml"
+          INTENTIONAL=()
+          if [ -f "$DRIFT_FILE" ]; then
+            # Extract `intentional-drift[*].path` using python to avoid
+            # yq/jq runtime dependencies on the runner.
+            mapfile -t INTENTIONAL < <(python3 -c '
+          import sys, yaml
+          try:
+              with open(sys.argv[1]) as f:
+                  doc = yaml.safe_load(f) or {}
+          except Exception as e:
+              sys.stderr.write(f"failed to parse template.yaml: {e}\n"); sys.exit(0)
+          for item in (doc.get("intentional-drift") or []):
+              if isinstance(item, dict) and item.get("path"):
+                  print(item["path"])
+              elif isinstance(item, str):
+                  print(item)
+          ' "$DRIFT_FILE")
+          fi
+
+          # Print resolved drift list for audit visibility in the job log.
+          if [ ${#INTENTIONAL[@]} -eq 0 ]; then
+            echo "No intentional-drift entries."
+          else
+            echo "Intentional-drift paths (${#INTENTIONAL[@]}):"
+            printf '  - %s\n' "${INTENTIONAL[@]}"
+          fi
+
+          # Walk template files; template.yaml itself is metadata, never compared.
+          DRIFT_FOUND=0
+          MISSING=()
+          DIFFERING=()
+
+          while IFS= read -r -d '' tpl_file; do
+            rel="${tpl_file#$TEMPLATE_ROOT/}"
+
+            # Metadata: consumer's copy is expected to diverge (different
+            # template:/intentional-drift: content).
+            if [ "$rel" = ".github/template.yaml" ]; then
+              continue
+            fi
+
+            consumer_path="$CONSUMER_ROOT/$rel"
+
+            # Skip explicitly-intentional-drift paths.
+            skip=0
+            for entry in "${INTENTIONAL[@]:-}"; do
+              if [ "$entry" = "$rel" ]; then
+                skip=1; break
+              fi
+            done
+            if [ "$skip" = "1" ]; then
+              continue
+            fi
+
+            if [ ! -f "$consumer_path" ]; then
+              MISSING+=("$rel")
+              DRIFT_FOUND=1
+              continue
+            fi
+
+            if ! diff -q "$tpl_file" "$consumer_path" >/dev/null 2>&1; then
+              DIFFERING+=("$rel")
+              DRIFT_FOUND=1
+            fi
+          done < <(find "$TEMPLATE_ROOT" -type f -print0)
+
+          if [ "$DRIFT_FOUND" = "0" ]; then
+            echo "::notice::No drift detected against template '${TEMPLATE_NAME}'."
+            exit 0
+          fi
+
+          {
+            echo "::error::Template drift detected vs. ${{ inputs.templates-repo }}/templates/${TEMPLATE_NAME}."
+            echo ""
+            if [ ${#MISSING[@]} -gt 0 ]; then
+              echo "## Missing files (template has them, consumer does not):"
+              for f in "${MISSING[@]}"; do echo "  - $f"; done
+              echo ""
+            fi
+            if [ ${#DIFFERING[@]} -gt 0 ]; then
+              echo "## Differing files:"
+              for f in "${DIFFERING[@]}"; do echo "  - $f"; done
+              echo ""
+            fi
+            echo "Resolve by running scripts/sync-template.sh against this repo,"
+            echo "or add explicit exceptions to .github/template.yaml's intentional-drift:."
+          } >&2
+
+          # Also show diffs for the differing files so a reviewer can see what changed.
+          for f in "${DIFFERING[@]}"; do
+            echo ""
+            echo "=== diff: $f ==="
+            diff -u "$CONSUMER_ROOT/$f" "$TEMPLATE_ROOT/$f" || true
+          done
+
+          exit 1

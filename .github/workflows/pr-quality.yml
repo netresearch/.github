@@ -19,6 +19,26 @@ on:
         type: string
         default: '.github/SECURITY_CONTROLS.md'
 
+      auto-approve-maintainers:
+        description: >-
+          When true, automatically approve PRs whose author_association is
+          OWNER / MEMBER / COLLABORATOR (i.e. project maintainers). Satisfies
+          the "1 approval" branch-protection gate for maintainer PRs without
+          bypassing Copilot review (which runs separately via the Copilot
+          ruleset, not this workflow).
+        required: false
+        type: boolean
+        default: true
+
+      auto-approve-message:
+        description: >-
+          Body text posted with the auto-approval review. Supports standard
+          Markdown. Placeholder `{controls}` is replaced with a link to
+          security-controls-path.
+        required: false
+        type: string
+        default: "**Automated approval for maintainer PR**\n\nAll automated quality gates passed. See [SECURITY_CONTROLS.md]({controls}) for compensating controls."
+
 permissions: {}
 
 jobs:
@@ -79,8 +99,10 @@ jobs:
     # Skip (not fail) for fork PRs — auto-approve only applies to same-repo
     # branches. Fork PRs always fail because GITHUB_TOKEN lacks permission.
     if: >-
-      github.event.pull_request.draft == false
+      inputs.auto-approve-maintainers
+      && github.event.pull_request.draft == false
       && github.event.pull_request.head.repo.full_name == github.repository
+      && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
     permissions:
       contents: read
       pull-requests: write
@@ -94,24 +116,16 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           CONTROLS_PATH: ${{ inputs.security-controls-path }}
+          APPROVE_MESSAGE: ${{ inputs.auto-approve-message }}
         with:
           script: |
             const controlsPath = process.env.CONTROLS_PATH;
+            const message = process.env.APPROVE_MESSAGE.replace(/\\n/g, "\n").replace(/\{controls\}/g, `/${controlsPath}`);
             await github.rest.pulls.createReview({
               owner: context.repo.owner,
               repo: context.repo.repo,
               pull_number: context.issue.number,
               event: 'APPROVE',
-              body: `**Automated approval for solo maintainer project**
-
-            This PR has passed all automated quality gates:
-            - ✅ Static analysis (PHPStan)
-            - ✅ Code style (PHP-CS-Fixer)
-            - ✅ Unit & functional tests
-            - ✅ Security scanning
-            - ✅ Dependency review
-
-            See [SECURITY_CONTROLS.md](/${controlsPath}) for compensating controls documentation.`
+              body: message,
             });
-
-            console.log('PR auto-approved with compensating controls documentation');
+            console.log('PR auto-approved');

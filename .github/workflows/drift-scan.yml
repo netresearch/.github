@@ -1,0 +1,142 @@
+# Weekly fleet-wide template-drift scan. Iterates over the 6 Go repos that
+# consume netresearch/.github templates, compares their .github/ tree to
+# the matching template, and opens/updates one issue per drifting repo.
+#
+# This is a monitoring workflow — informational only, it does not block
+# any PR. Per-repo enforcement is handled by check-template-drift.yml
+# which runs on PR events in each consuming repo.
+
+name: Template Drift Scan
+
+on:
+  schedule:
+    # Monday 06:00 UTC — surfaces drift at start of week for triage.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      repos:
+        description: "Space-separated list of owner/repo entries to scan (default: all Go repos)."
+        required: false
+        type: string
+        default: ""
+
+permissions: {}
+
+jobs:
+  scan:
+    name: Scan consumer
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - repo: netresearch/ofelia
+            template: go-app
+          - repo: netresearch/ldap-manager
+            template: go-app
+          - repo: netresearch/ldap-selfservice-password-changer
+            template: go-app
+          - repo: netresearch/raybeam
+            template: go-app
+          - repo: netresearch/simple-ldap-go
+            template: go-lib
+          - repo: netresearch/go-cron
+            template: go-lib
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout templates
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          path: templates-src
+
+      - name: Checkout consumer repo
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ matrix.repo }}
+          persist-credentials: false
+          path: consumer
+
+      - name: Run drift check
+        id: drift
+        continue-on-error: true
+        env:
+          CONSUMER_DIR: ${{ github.workspace }}/consumer
+          TEMPLATE_DIR: ${{ github.workspace }}/templates-src/templates/${{ matrix.template }}
+        run: |
+          set +e
+          OUTPUT=$(bash "$GITHUB_WORKSPACE/templates-src/scripts/check-drift.sh" "$CONSUMER_DIR" "$TEMPLATE_DIR" 2>&1)
+          STATUS=$?
+          {
+            echo "status=$STATUS"
+            # Preserve multi-line output via GHA heredoc syntax.
+            echo "output<<DRIFT_EOF"
+            echo "$OUTPUT"
+            echo "DRIFT_EOF"
+          } >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Open or update drift issue
+        if: steps.drift.outputs.status != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_REPO: ${{ matrix.repo }}
+          TEMPLATE_NAME: ${{ matrix.template }}
+          DRIFT_OUTPUT: ${{ steps.drift.outputs.output }}
+        run: |
+          set -euo pipefail
+          TITLE="Template drift: ${TARGET_REPO#*/} vs ${TEMPLATE_NAME}"
+          BODY=$(cat <<MARKDOWN
+          ## Template drift detected
+
+          Repo: \`$TARGET_REPO\`
+          Template: \`$TEMPLATE_NAME\` (netresearch/.github)
+          Scan date: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          Auto-opened by \`.github/workflows/drift-scan.yml\`. Resolve by running
+          \`scripts/sync-template.sh $TEMPLATE_NAME $TARGET_REPO\`, then opening
+          the generated PR in the consumer repo.
+
+          If the drift is intentional, add an entry to \`$TARGET_REPO\`'s
+          \`.github/template.yaml\` \`intentional-drift:\` list and close this issue.
+
+          ### Drift output
+
+          \`\`\`
+          $DRIFT_OUTPUT
+          \`\`\`
+          MARKDOWN
+          )
+
+          # Find existing open drift issue for this repo; update it if present.
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --search "$TITLE in:title" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            gh issue edit "$EXISTING" --repo "$GITHUB_REPOSITORY" --body "$BODY"
+            echo "Updated issue #$EXISTING"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body "$BODY" --label "template-drift" || \
+              gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body "$BODY"
+          fi
+
+      - name: Close stale drift issue
+        if: steps.drift.outputs.status == '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_REPO: ${{ matrix.repo }}
+          TEMPLATE_NAME: ${{ matrix.template }}
+        run: |
+          set -euo pipefail
+          TITLE="Template drift: ${TARGET_REPO#*/} vs ${TEMPLATE_NAME}"
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --search "$TITLE in:title" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            gh issue close "$EXISTING" --repo "$GITHUB_REPOSITORY" --comment "Drift resolved — closed automatically by drift-scan on $(date -u +"%Y-%m-%dT%H:%M:%SZ")."
+            echo "Closed stale issue #$EXISTING"
+          fi

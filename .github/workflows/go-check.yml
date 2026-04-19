@@ -124,6 +124,46 @@ on:
         type: boolean
         default: true
 
+      enable-smoke-fast-feedback:
+        description: "Run a short `go test -short` smoke job in parallel with the full build+test for faster CI failure signal."
+        type: boolean
+        default: true
+      smoke-timeout-minutes:
+        description: "Timeout for the smoke-test job (distinct from build-test's timeout-minutes)."
+        type: number
+        default: 3
+
+      coverage-threshold:
+        description: "Minimum total coverage percentage. Enforced after `go test` via coverage.out. Set to 0 to disable."
+        type: number
+        default: 80.0
+
+      enable-fuzz:
+        description: "Run `go test -run=Fuzz` against the repo (fuzz tests in corpus-replay mode). No-op when no FuzzXxx targets exist."
+        type: boolean
+        default: true
+      fuzz-timeout:
+        description: "Per-target fuzz duration (go test -fuzztime value) when running in active fuzzing mode."
+        type: string
+        default: "30s"
+
+      enable-license-check:
+        description: "Scan dependency licenses via google/go-licenses against the org-standard allowlist."
+        type: boolean
+        default: true
+      license-allowlist:
+        description: "Comma-separated SPDX identifiers that replace the built-in org allowlist when non-empty."
+        type: string
+        default: ""
+      license-allowlist-extra:
+        description: "Comma-separated SPDX identifiers added on top of the org allowlist."
+        type: string
+        default: ""
+      license-ignore:
+        description: "Comma-separated Go import paths to exclude from license check."
+        type: string
+        default: ""
+
     secrets:
       CODECOV_TOKEN:
         description: "Codecov upload token (only needed when enable-codecov=true)."
@@ -190,6 +230,20 @@ jobs:
         run: |
           # shellcheck disable=SC2086  # TEST_FLAGS is a space-separated flag list by design
           go test -v $TEST_FLAGS "$TEST_PACKAGES"
+
+      - name: Enforce coverage threshold
+        if: ${{ inputs.enable-build-test && hashFiles('coverage.out') != '' }}
+        env:
+          THRESHOLD: ${{ inputs.coverage-threshold }}
+        run: |
+          set -euo pipefail
+          if [ "${THRESHOLD:-0}" = "0" ] || [ "${THRESHOLD:-0}" = "0.0" ]; then
+            echo "coverage-threshold=0 — enforcement disabled."
+            exit 0
+          fi
+          TOTAL=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%","",$3); print $3}')
+          echo "Total coverage: ${TOTAL}% (threshold ${THRESHOLD}%)"
+          awk -v t="$THRESHOLD" -v a="$TOTAL" 'BEGIN { if (a+0 < t+0) { printf "::error::Coverage %s%% is below threshold %s%%\n", a, t; exit 1 } }'
 
       - name: Upload coverage to Codecov
         if: ${{ inputs.enable-codecov }}
@@ -360,3 +414,148 @@ jobs:
         uses: github/codeql-action/upload-sarif@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4.35.2
         with:
           sarif_file: gosec-results.sarif
+
+  smoke-test:
+    name: Smoke Tests (fast feedback)
+    if: ${{ inputs.enable-smoke-fast-feedback && inputs.enable-build-test }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.smoke-timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+          cache: true
+
+      - name: Set up Bun
+        if: ${{ inputs.setup-bun }}
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ inputs.bun-version }}
+
+      - name: Pre-build command
+        if: ${{ inputs.pre-build-cmd != '' }}
+        env:
+          PRE_BUILD_CMD: ${{ inputs.pre-build-cmd }}
+        run: |
+          bash -c "$PRE_BUILD_CMD"
+
+      - name: go test -short (smoke)
+        env:
+          TEST_PACKAGES: ${{ inputs.test-packages }}
+        run: go test -short -count=1 -timeout=2m "$TEST_PACKAGES"
+
+  fuzz:
+    name: Fuzz (corpus replay)
+    if: ${{ inputs.enable-fuzz }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+          cache: true
+
+      - name: Set up Bun
+        if: ${{ inputs.setup-bun }}
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ inputs.bun-version }}
+
+      - name: Pre-build command
+        if: ${{ inputs.pre-build-cmd != '' }}
+        env:
+          PRE_BUILD_CMD: ${{ inputs.pre-build-cmd }}
+        run: |
+          bash -c "$PRE_BUILD_CMD"
+
+      - name: Run fuzz tests (corpus replay mode)
+        # `-run=Fuzz` + no `-fuzz=` runs FuzzXxx functions as unit tests against
+        # their existing corpus without actively generating new inputs. Fast,
+        # safe to always enable; no-op when repo has no FuzzXxx targets.
+        env:
+          TEST_PACKAGES: ${{ inputs.test-packages }}
+        run: go test -run='^Fuzz' -count=1 -timeout=5m "$TEST_PACKAGES"
+
+  license-check:
+    name: License Scan
+    if: ${{ inputs.enable-license-check }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+          cache: true
+
+      - name: Install go-licenses
+        run: go install github.com/google/go-licenses@latest
+
+      - name: Run license check
+        env:
+          ALLOWLIST_OVERRIDE: ${{ inputs.license-allowlist }}
+          ALLOWLIST_EXTRA: ${{ inputs.license-allowlist-extra }}
+          IGNORE_PATHS: ${{ inputs.license-ignore }}
+        run: |
+          set -euo pipefail
+          # Org-standard allowlist. Permissive licenses commonly found in the
+          # Go ecosystem. Callers override with `license-allowlist` (replace)
+          # or extend with `license-allowlist-extra` (append).
+          DEFAULT_ALLOW="Apache-2.0,Apache-2.0 WITH LLVM-exception,BSD-2-Clause,BSD-3-Clause,BSD-3-Clause-Clear,BlueOak-1.0.0,CC-BY-4.0,CC0-1.0,ISC,MIT,MIT-0,MPL-2.0,Unlicense,0BSD"
+          if [ -n "$ALLOWLIST_OVERRIDE" ]; then
+            ALLOW="$ALLOWLIST_OVERRIDE"
+          else
+            ALLOW="$DEFAULT_ALLOW"
+          fi
+          if [ -n "$ALLOWLIST_EXTRA" ]; then
+            ALLOW="$ALLOW,$ALLOWLIST_EXTRA"
+          fi
+          # Build the --ignore arg list
+          IGNORE_ARGS=""
+          if [ -n "$IGNORE_PATHS" ]; then
+            # shellcheck disable=SC2001
+            for p in $(echo "$IGNORE_PATHS" | sed 's/,/ /g'); do
+              IGNORE_ARGS="$IGNORE_ARGS --ignore=$p"
+            done
+          fi
+          echo "Allowed licenses: $ALLOW"
+          # shellcheck disable=SC2086
+          go-licenses check ./... --allowed_licenses="$ALLOW" $IGNORE_ARGS
