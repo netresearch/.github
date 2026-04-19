@@ -1,0 +1,31 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to (re)build."
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  create:
+    uses: netresearch/.github/.github/workflows/create-release.yml@main
+    with:
+      tag: ${{ inputs.tag || '' }}
+    permissions:
+      contents: write
+
+  binaries:
+    needs: create
+    uses: netresearch/.github/.github/workflows/build-go-attest.yml@main
+    with:
+      tag: ${{ inputs.tag || github.ref_name }}
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write

@@ -1,0 +1,245 @@
+# Reusable "Go mutation testing" workflow — runs gremlins against a Go
+# repository to measure test-suite effectiveness. Can operate in two modes:
+#
+#   - full mode:      mutate every file (slow; use on schedules / dispatch)
+#   - diff-only mode: mutate only files changed vs. the PR's base branch
+#                     (fast; use on pull_request events)
+#
+# This workflow is `workflow_call`-only. Callers own the trigger surface
+# (schedule / workflow_dispatch / pull_request with paths filter). They also
+# decide which mode to run by passing `diff-only: ${{ github.event_name ==
+# 'pull_request' }}`.
+#
+# Caller pattern:
+#
+#   on:
+#     schedule:
+#       - cron: '0 2 * * 0'
+#     workflow_dispatch:
+#     pull_request:
+#       branches: [main]
+#       paths:
+#         - '**.go'
+#         - '.gremlins.yaml'
+#         - '.github/workflows/mutation.yml'
+#
+#   jobs:
+#     mutation:
+#       uses: netresearch/.github/.github/workflows/go-mutation-testing.yml@main
+#       with:
+#         diff-only: ${{ github.event_name == 'pull_request' }}
+#
+# SECURITY: every caller-supplied input that lands in a `run:` step is
+# pushed through the `env:` block so it cannot break out of its argument
+# position via quoting/metacharacters. Same treatment for event context
+# values (base SHA, event name).
+
+name: Go Mutation Testing (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      go-version-file:
+        description: "Path to go.mod / go.work / .go-version for version detection."
+        type: string
+        default: "go.mod"
+      config-path:
+        description: "Path to the gremlins config file."
+        type: string
+        default: ".gremlins.yaml"
+      timeout-minutes:
+        description: "Job timeout in minutes. Mutation runs can be long — default is generous."
+        type: number
+        default: 120
+      diff-only:
+        description: "When true, only mutate files changed vs. the PR base branch. Callers typically set this to the expression comparing github.event_name to 'pull_request'."
+        type: boolean
+        default: false
+      comment-on-pr:
+        description: "Post mutation results as a PR comment when running in diff-only mode on a pull_request event."
+        type: boolean
+        default: true
+      gremlins-version:
+        description: "Gremlins CLI version to install (go install tag)."
+        type: string
+        default: "v0.6.0"
+      score-threshold:
+        description: "Mutation-score threshold (percent). Used for the PR comment emoji / warning — does not fail the job."
+        type: number
+        default: 60
+
+permissions:
+  contents: read
+
+jobs:
+  mutation:
+    name: Mutation Testing
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Full history needed so `git diff BASE...HEAD` works in diff mode.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+          cache: true
+
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Install Gremlins
+        env:
+          GREMLINS_VERSION: ${{ inputs.gremlins-version }}
+        run: |
+          go install "github.com/go-gremlins/gremlins/cmd/gremlins@${GREMLINS_VERSION}"
+
+      - name: Run mutation tests (full)
+        if: ${{ !inputs.diff-only }}
+        env:
+          CONFIG_PATH: ${{ inputs.config-path }}
+        run: |
+          echo "Running full mutation testing..."
+          gremlins unleash --config="$CONFIG_PATH" 2>&1 | tee mutation-output.txt
+          # Gremlins prints "Test efficacy: X.XX%" — extract the score.
+          SCORE=$(grep -oP 'Test efficacy: \K[\d.]+' mutation-output.txt || echo "0")
+          echo "MUTATION_SCORE=${SCORE}" >> "$GITHUB_ENV"
+          {
+            echo "## Mutation Testing Results"
+            echo ""
+            echo "**Mutation Score:** ${SCORE}%"
+            echo ""
+            echo "See the full report in the artifacts."
+          } >> "$GITHUB_STEP_SUMMARY"
+        # Threshold violations shouldn't fail the workflow — they're
+        # surfaced in the summary / PR comment instead.
+        continue-on-error: true
+
+      - name: Run mutation tests (diff only)
+        if: ${{ inputs.diff-only }}
+        env:
+          CONFIG_PATH: ${{ inputs.config-path }}
+          # Push event-context strings through env to keep them out of the
+          # shell-expansion path, per GitHub's injection hardening guide.
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          echo "Running diff-based mutation testing..."
+          # Pick the base ref. On a pull_request event the base SHA is
+          # authoritative; for manual dispatch we fall back to origin/<default>.
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            BASE_REF="$PR_BASE_SHA"
+          else
+            DEFAULT_BRANCH="${GITHUB_BASE_REF:-${GITHUB_REF_NAME}}"
+            BASE_REF="origin/${DEFAULT_BRANCH}"
+          fi
+          echo "Diffing against: $BASE_REF"
+          # Skip if no Go source files (non-test) changed.
+          if ! git diff --name-only "$BASE_REF"...HEAD -- '*.go' | grep -v '_test.go' > /dev/null 2>&1; then
+            echo "No Go source files changed, skipping mutation testing."
+            {
+              echo "## Mutation Testing Results"
+              echo "No Go source files changed - skipped."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "Testing mutations in changed files..."
+          gremlins unleash --config="$CONFIG_PATH" --diff "$BASE_REF" 2>&1 | tee mutation-output.txt
+          SCORE=$(grep -oP 'Test efficacy: \K[\d.]+' mutation-output.txt || echo "0")
+          echo "MUTATION_SCORE=${SCORE}" >> "$GITHUB_ENV"
+          {
+            echo "## Mutation Testing Results (Diff Mode)"
+            echo ""
+            echo "**Mutation Score:** ${SCORE}%"
+            echo ""
+            echo "Testing only changed files for faster feedback."
+          } >> "$GITHUB_STEP_SUMMARY"
+        continue-on-error: true
+
+      - name: Upload mutation reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutation-reports
+          path: |
+            mutation-report.json
+            mutation-report.html
+            mutation-output.txt
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Comment on PR with results
+        # Only comment on in-repo PRs — forks can't receive comments from
+        # the default token, and we don't want to leak the run context.
+        if: >-
+          inputs.comment-on-pr &&
+          inputs.diff-only &&
+          github.event_name == 'pull_request' &&
+          env.MUTATION_SCORE != '' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          SCORE_THRESHOLD: ${{ inputs.score-threshold }}
+        with:
+          script: |
+            const score = process.env.MUTATION_SCORE || '0';
+            const threshold = parseFloat(process.env.SCORE_THRESHOLD || '60');
+            const emoji = parseFloat(score) >= threshold ? ':white_check_mark:' : ':warning:';
+
+            const body = `## ${emoji} Mutation Testing Results
+
+            **Mutation Score:** ${score}% (threshold: ${threshold}%)
+
+            ${parseFloat(score) < threshold
+              ? '> :warning: Score is below threshold. Consider improving test coverage or test quality.'
+              : '> :sparkles: Good job! Mutation score meets the threshold.'}
+
+            <details>
+            <summary>What is mutation testing?</summary>
+
+            Mutation testing measures test quality by introducing small changes (mutations) to the code and checking if tests detect them. A higher score means better test effectiveness.
+
+            - **Killed mutants**: Tests caught the mutation (good!)
+            - **Survived mutants**: Tests missed the mutation (needs improvement)
+            </details>`;
+
+            // Find existing bot comment so we update in place rather than
+            // spamming the PR on every run.
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(c =>
+              c.user.type === 'Bot' && c.body.includes('Mutation Testing Results')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body
+              });
+            }
