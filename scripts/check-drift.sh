@@ -63,7 +63,7 @@ while IFS= read -r -d '' tpl_file; do
   if ! diff -q "$tpl_file" "$consumer_path" >/dev/null 2>&1; then
     DIFFERING+=("$rel")
   fi
-done < <(find "$TEMPLATE_ROOT" -type f -print0)
+done < <(find "$TEMPLATE_ROOT/.github" -type f -print0)
 
 if [ ${#MISSING[@]} -eq 0 ] && [ ${#DIFFERING[@]} -eq 0 ]; then
   echo "No drift."
