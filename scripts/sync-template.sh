@@ -49,7 +49,12 @@ if [ ! -d "$TEMPLATE_DIR" ]; then
   exit 1
 fi
 
-[ -n "$BRANCH" ] || BRANCH="sync/template-${TEMPLATE}-$(date +%Y%m%d-%H%M%S)"
+BRANCH_WAS_SUPPLIED=0
+if [ -n "$BRANCH" ]; then
+  BRANCH_WAS_SUPPLIED=1
+else
+  BRANCH="sync/template-${TEMPLATE}-$(date +%Y%m%d-%H%M%S)"
+fi
 
 WORKTREE=$(mktemp -d -t sync-template-XXXXXX)
 trap 'rm -rf "$WORKTREE"' EXIT
@@ -62,27 +67,38 @@ DEFAULT_BRANCH=$(gh api "repos/${TARGET}" --jq '.default_branch')
 git checkout "$DEFAULT_BRANCH" --quiet
 git pull --quiet
 
-# Drop the PR branch from any previous run, if any, to stay idempotent.
-git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1 && \
+# Handle pre-existing remote branch. For auto-generated branch names
+# (no --branch flag), we can safely delete because the timestamp suffix
+# makes collisions self-inflicted. For user-supplied names, refuse to
+# destroy — the user may have in-flight work on that branch.
+if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+  if [ "$BRANCH_WAS_SUPPLIED" = "1" ]; then
+    echo "::error::Branch '$BRANCH' already exists on origin. Delete it manually or use a different --branch name; refusing to overwrite user-supplied ref." >&2
+    exit 1
+  fi
+  echo "note: deleting stale auto-generated branch '$BRANCH' from origin."
   git push origin --delete "$BRANCH" >/dev/null 2>&1 || true
+fi
 
 git checkout -b "$BRANCH" --quiet
 
-# Copy template files. Overwrite matching paths, preserve repo-specific
-# files that aren't in the template. template.yaml is special-cased:
-# only created on first sync, never overwritten.
-mkdir -p .github/workflows
-cp -v "$TEMPLATE_DIR/dependabot.yml" .github/dependabot.yml
-cp -v "$TEMPLATE_DIR/labeler.yml" .github/labeler.yml
-if [ ! -f .github/template.yaml ]; then
-  cp -v "$TEMPLATE_DIR/template.yaml" .github/template.yaml
-else
-  echo "note: preserving existing .github/template.yaml (carries intentional-drift state)"
+# Copy every file from the template's .github/ tree into the consumer.
+# Overwrites matching paths; leaves repo-specific files (not in the
+# template) alone. template.yaml is special-cased: only created on first
+# sync, never overwritten (it carries per-repo intentional-drift state).
+EXISTING_TEMPLATE_YAML=""
+if [ -f .github/template.yaml ]; then
+  EXISTING_TEMPLATE_YAML=$(cat .github/template.yaml)
 fi
 
-for wf in "$TEMPLATE_DIR/workflows"/*.yml; do
-  cp -v "$wf" ".github/workflows/$(basename "$wf")"
-done
+mkdir -p .github
+# -a preserves mode/timestamps; --no-target-directory avoids nested dir.
+cp -a "$TEMPLATE_DIR/." .github/
+
+if [ -n "$EXISTING_TEMPLATE_YAML" ]; then
+  printf '%s\n' "$EXISTING_TEMPLATE_YAML" > .github/template.yaml
+  echo "note: preserved existing .github/template.yaml (intentional-drift state)."
+fi
 
 if git diff --quiet && git diff --cached --quiet; then
   echo "[$TARGET] no changes vs template — already in sync."

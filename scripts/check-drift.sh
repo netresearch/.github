@@ -30,7 +30,7 @@ try:
     with open(sys.argv[1]) as f:
         doc = yaml.safe_load(f) or {}
 except Exception as e:
-    sys.stderr.write(f"failed to parse template.yaml: {e}\n"); sys.exit(0)
+    sys.stderr.write(f"failed to parse template.yaml: {e}\n"); sys.exit(2)
 for item in (doc.get("intentional-drift") or []):
     if isinstance(item, dict) and item.get("path"):
         print(item["path"])

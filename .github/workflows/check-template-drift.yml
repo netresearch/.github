@@ -71,6 +71,8 @@ jobs:
       - name: Compare consumer against template
         env:
           TEMPLATE_NAME: ${{ inputs.template }}
+          TEMPLATES_REPO: ${{ inputs.templates-repo }}
+          TEMPLATES_REF: ${{ inputs.templates-ref }}
         run: |
           set -euo pipefail
 
@@ -78,7 +80,7 @@ jobs:
           TEMPLATE_ROOT="$GITHUB_WORKSPACE/templates-src/templates/${TEMPLATE_NAME}"
 
           if [ ! -d "$TEMPLATE_ROOT" ]; then
-            echo "::error::Template directory $TEMPLATE_ROOT does not exist in ${{ inputs.templates-repo }}@${{ inputs.templates-ref }}."
+            echo "::error::Template directory $TEMPLATE_ROOT does not exist in ${TEMPLATES_REPO}@${TEMPLATES_REF}."
             exit 1
           fi
 
@@ -95,7 +97,7 @@ jobs:
               with open(sys.argv[1]) as f:
                   doc = yaml.safe_load(f) or {}
           except Exception as e:
-              sys.stderr.write(f"failed to parse template.yaml: {e}\n"); sys.exit(0)
+              sys.stderr.write(f"failed to parse template.yaml: {e}\n"); sys.exit(2)
           for item in (doc.get("intentional-drift") or []):
               if isinstance(item, dict) and item.get("path"):
                   print(item["path"])
@@ -157,7 +159,7 @@ jobs:
           fi
 
           {
-            echo "::error::Template drift detected vs. ${{ inputs.templates-repo }}/templates/${TEMPLATE_NAME}."
+            echo "::error::Template drift detected vs. ${TEMPLATES_REPO}/templates/${TEMPLATE_NAME}."
             echo ""
             if [ ${#MISSING[@]} -gt 0 ]; then
               echo "## Missing files (template has them, consumer does not):"
