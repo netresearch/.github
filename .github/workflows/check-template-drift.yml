@@ -118,7 +118,7 @@ jobs:
           DIFFERING=()
 
           while IFS= read -r -d '' tpl_file; do
-            rel="${tpl_file#$TEMPLATE_ROOT/}"
+            rel="${tpl_file#"$TEMPLATE_ROOT"/}"
 
             # Metadata: consumer's copy is expected to diverge (different
             # template:/intentional-drift: content).

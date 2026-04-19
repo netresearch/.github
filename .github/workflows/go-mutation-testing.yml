@@ -52,7 +52,7 @@ on:
         type: number
         default: 120
       diff-only:
-        description: "When true, only mutate files changed vs. the PR base branch. Callers typically set this to `${{ github.event_name == 'pull_request' }}`."
+        description: "When true, only mutate files changed vs. the PR base branch. Callers typically set this to the expression comparing github.event_name to 'pull_request'."
         type: boolean
         default: false
       comment-on-pr:
