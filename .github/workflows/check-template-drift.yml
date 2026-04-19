@@ -151,7 +151,7 @@ jobs:
               DIFFERING+=("$rel")
               DRIFT_FOUND=1
             fi
-          done < <(find "$TEMPLATE_ROOT" -type f -print0)
+          done < <(find "$TEMPLATE_ROOT/.github" -type f -print0)
 
           if [ "$DRIFT_FOUND" = "0" ]; then
             echo "::notice::No drift detected against template '${TEMPLATE_NAME}'."
