@@ -123,7 +123,6 @@ else
   # transfer root (.github/), but intentional-drift paths are relative to
   # repo root — strip the `.github/` prefix.
   EXCLUDES=$(mktemp)
-  trap '"'"'rm -f "$EXCLUDES"'"'"' RETURN
   for p in "${DRIFT_PATHS[@]}"; do
     case "$p" in
       .github/*) echo "${p#.github/}" >> "$EXCLUDES" ;;

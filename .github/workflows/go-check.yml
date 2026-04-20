@@ -142,11 +142,6 @@ on:
         description: "Run `go test -run=Fuzz` against the repo (fuzz tests in corpus-replay mode). No-op when no FuzzXxx targets exist."
         type: boolean
         default: true
-      fuzz-timeout:
-        description: "Per-target fuzz duration (go test -fuzztime value) when running in active fuzzing mode."
-        type: string
-        default: "30s"
-
       enable-license-check:
         description: "Scan dependency licenses via google/go-licenses against the org-standard allowlist."
         type: boolean
@@ -208,7 +203,9 @@ jobs:
         env:
           PRE_BUILD_CMD: ${{ inputs.pre-build-cmd }}
         run: |
-          bash -c "$PRE_BUILD_CMD"
+          # Strict mode: surface caller script errors instead of silently
+          # continuing into the Go build with a half-built frontend.
+          bash -eu -c "$PRE_BUILD_CMD"
 
       - name: Download Go modules
         run: go mod download
@@ -289,7 +286,9 @@ jobs:
         env:
           PRE_BUILD_CMD: ${{ inputs.pre-build-cmd }}
         run: |
-          bash -c "$PRE_BUILD_CMD"
+          # Strict mode: surface caller script errors instead of silently
+          # continuing into the Go build with a half-built frontend.
+          bash -eu -c "$PRE_BUILD_CMD"
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9.2.0
@@ -337,7 +336,9 @@ jobs:
         env:
           PRE_BUILD_CMD: ${{ inputs.pre-build-cmd }}
         run: |
-          bash -c "$PRE_BUILD_CMD"
+          # Strict mode: surface caller script errors instead of silently
+          # continuing into the Go build with a half-built frontend.
+          bash -eu -c "$PRE_BUILD_CMD"
 
       - name: Run govulncheck
         env:
@@ -399,7 +400,9 @@ jobs:
         env:
           PRE_BUILD_CMD: ${{ inputs.pre-build-cmd }}
         run: |
-          bash -c "$PRE_BUILD_CMD"
+          # Strict mode: surface caller script errors instead of silently
+          # continuing into the Go build with a half-built frontend.
+          bash -eu -c "$PRE_BUILD_CMD"
 
       - name: Run gosec
         uses: securego/gosec@64b97151cd7b978abdf8d2f1159a4e9096a12c2b # master
@@ -450,7 +453,9 @@ jobs:
         env:
           PRE_BUILD_CMD: ${{ inputs.pre-build-cmd }}
         run: |
-          bash -c "$PRE_BUILD_CMD"
+          # Strict mode: surface caller script errors instead of silently
+          # continuing into the Go build with a half-built frontend.
+          bash -eu -c "$PRE_BUILD_CMD"
 
       - name: go test -short (smoke)
         env:
@@ -492,7 +497,9 @@ jobs:
         env:
           PRE_BUILD_CMD: ${{ inputs.pre-build-cmd }}
         run: |
-          bash -c "$PRE_BUILD_CMD"
+          # Strict mode: surface caller script errors instead of silently
+          # continuing into the Go build with a half-built frontend.
+          bash -eu -c "$PRE_BUILD_CMD"
 
       - name: Run fuzz tests (corpus replay mode)
         # `-run=Fuzz` + no `-fuzz=` runs FuzzXxx functions as unit tests against
@@ -527,7 +534,7 @@ jobs:
           cache: true
 
       - name: Install go-licenses
-        run: go install github.com/google/go-licenses@latest
+        run: go install github.com/google/go-licenses@3e084b0caf710f7bfead967567539214f598c0a2  # pinned to avoid upstream breakage on @latest
 
       - name: Run license check
         env:

@@ -247,7 +247,9 @@ jobs:
       - name: Install crane
         uses: imjasonh/setup-crane@6da1ae018866400525525ce74ff892880c099987 # v0.5
         with:
-          version: latest
+          # Pin crane to a known-good release; `latest` broke CI in the past
+          # when upstream re-tagged without backward compat.
+          version: v0.22.1
 
       - name: Log in to Container registry
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
