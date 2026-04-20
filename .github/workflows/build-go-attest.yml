@@ -197,13 +197,16 @@ jobs:
             REPO_NAME="${GITHUB_REPOSITORY##*/}"
 
             # has_main <dir> — succeeds iff <dir>/*.go (excluding *_test.go)
-            # contains a `package main` declaration. Uses find instead of
-            # a grep pipeline to avoid SIGPIPE races under `set -o pipefail`.
+            # contains a `package main` declaration. Collects the grep
+            # output into a variable instead of piping through a reader
+            # that could exit early — eliminates any SIGPIPE race under
+            # `set -o pipefail` regardless of how many files match.
             has_main() {
               local dir="$1"
-              find "$dir" -maxdepth 1 -type f -name '*.go' ! -name '*_test.go' \
-                -exec grep -qE '^package main([[:space:]]|$)' {} \; -print 2>/dev/null \
-                | grep -q .
+              local matches
+              matches=$(find "$dir" -maxdepth 1 -type f -name '*.go' ! -name '*_test.go' \
+                -exec grep -lE '^package main([[:space:]]|$)' {} + 2>/dev/null)
+              [[ -n "$matches" ]]
             }
 
             if has_main .; then
