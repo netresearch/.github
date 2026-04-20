@@ -62,9 +62,12 @@ jobs:
       attestations: write
     with:
       binary-name: ${{ github.event.repository.name }}-${{ matrix.target }}
-      # Fleet convention: main package lives at `./main.go` (repo root).
-      # build-go-attest.yml defaults main-package to `.`, so no input is
-      # needed. All 4 go-app consumers satisfy this convention.
+      # Resolve after checkout (see build-go-attest.yml). `auto` picks
+      # `.` when ./main.go exists, else `./cmd/<repo-name>` when that
+      # main.go exists, else fails. Keeps this template file byte-
+      # identical regardless of whether the consumer uses a root-main
+      # or cmd/ layout.
+      main-package: auto
       goos: ${{ matrix.goos }}
       goarch: ${{ matrix.goarch }}
       goarm: ${{ matrix.goarm || '' }}

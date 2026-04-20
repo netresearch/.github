@@ -31,7 +31,12 @@ on:
         type: string
         default: "go.mod"
       main-package:
-        description: "Go main package path"
+        description: >-
+          Go main package path. Set to `auto` to resolve after checkout:
+          if `./main.go` exists it uses `.`, otherwise if
+          `./cmd/<repo-name>/main.go` exists it uses `./cmd/<repo-name>`,
+          otherwise the build step fails. Accepts any explicit path
+          (e.g. `./cmd/cli`) to bypass the auto-detection.
         required: false
         type: string
         default: "."
@@ -174,9 +179,23 @@ jobs:
           BINARY_NAME: ${{ inputs.binary-name }}
           LDFLAGS: ${{ inputs.ldflags }}
           MAIN_PACKAGE: ${{ inputs.main-package }}
+          REPO_NAME: ${{ github.event.repository.name }}
           INPUT_GOARM: ${{ inputs.goarm }}
         run: |
           set -euo pipefail
+
+          # Resolve `main-package: auto` against the checked-out tree.
+          if [[ "${MAIN_PACKAGE}" == "auto" ]]; then
+            if [[ -f "./main.go" ]]; then
+              MAIN_PACKAGE="."
+            elif [[ -f "./cmd/${REPO_NAME}/main.go" ]]; then
+              MAIN_PACKAGE="./cmd/${REPO_NAME}"
+            else
+              echo "::error::main-package=auto: neither ./main.go nor ./cmd/${REPO_NAME}/main.go exists. Set main-package explicitly." >&2
+              exit 1
+            fi
+            echo "main-package auto-detected as ${MAIN_PACKAGE}"
+          fi
 
           # Only set GOARM when building for ARM architecture
           if [[ "${GOARCH}" == "arm" ]]; then
