@@ -32,11 +32,16 @@ on:
         default: "go.mod"
       main-package:
         description: >-
-          Go main package path. Set to `auto` to resolve after checkout:
-          if `./main.go` exists it uses `.`, otherwise if
-          `./cmd/<repo-name>/main.go` exists it uses `./cmd/<repo-name>`,
-          otherwise the build step fails. Accepts any explicit path
-          (e.g. `./cmd/cli`) to bypass the auto-detection.
+          Go main package path. Set to `auto` to resolve after checkout
+          by scanning for a `package main` declaration:
+            1. If any `./*.go` file declares `package main` → use `.`
+               (picks up repos whose entrypoint uses a non-`main.go`
+               filename — e.g. ofelia.go, cmd.go).
+            2. Else if `./cmd/<repo-name>/*.go` declares `package main`
+               → use `./cmd/<repo-name>`.
+            3. Else fail with a clear message.
+          Accepts any explicit path (e.g. `./cmd/cli`) to bypass the
+          auto-detection.
         required: false
         type: string
         default: "."
@@ -184,14 +189,18 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Resolve `main-package: auto` against the checked-out tree.
+          # Resolve `main-package: auto` against the checked-out tree
+          # by locating a `package main` declaration in any *.go file.
+          # This tolerates non-`main.go` filenames (e.g. ofelia.go).
           if [[ "${MAIN_PACKAGE}" == "auto" ]]; then
-            if [[ -f "./main.go" ]]; then
+            if ls ./*.go 1>/dev/null 2>&1 && \
+               grep -lE '^package main( |$)' ./*.go 2>/dev/null | read -r _; then
               MAIN_PACKAGE="."
-            elif [[ -f "./cmd/${REPO_NAME}/main.go" ]]; then
+            elif [[ -d "./cmd/${REPO_NAME}" ]] && \
+                 grep -lE '^package main( |$)' "./cmd/${REPO_NAME}"/*.go 2>/dev/null | read -r _; then
               MAIN_PACKAGE="./cmd/${REPO_NAME}"
             else
-              echo "::error::main-package=auto: neither ./main.go nor ./cmd/${REPO_NAME}/main.go exists. Set main-package explicitly." >&2
+              echo "::error::main-package=auto: no 'package main' found at repo root or in ./cmd/${REPO_NAME}/. Set main-package explicitly." >&2
               exit 1
             fi
             echo "main-package auto-detected as ${MAIN_PACKAGE}"
