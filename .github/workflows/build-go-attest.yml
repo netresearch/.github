@@ -184,23 +184,34 @@ jobs:
           BINARY_NAME: ${{ inputs.binary-name }}
           LDFLAGS: ${{ inputs.ldflags }}
           MAIN_PACKAGE: ${{ inputs.main-package }}
-          REPO_NAME: ${{ github.event.repository.name }}
           INPUT_GOARM: ${{ inputs.goarm }}
         run: |
           set -euo pipefail
 
-          # Resolve `main-package: auto` against the checked-out tree
-          # by locating a `package main` declaration in any *.go file.
-          # This tolerates non-`main.go` filenames (e.g. ofelia.go).
+          # Resolve `main-package: auto` against the checked-out tree.
+          # Locates a `package main` declaration in any non-test *.go
+          # file so non-`main.go` entrypoints (e.g. ofelia.go) work too.
           if [[ "${MAIN_PACKAGE}" == "auto" ]]; then
-            if ls ./*.go 1>/dev/null 2>&1 && \
-               grep -lE '^package main( |$)' ./*.go 2>/dev/null | read -r _; then
+            # GITHUB_REPOSITORY is always populated (event-independent);
+            # github.event.repository.name is empty on some triggers.
+            REPO_NAME="${GITHUB_REPOSITORY##*/}"
+
+            # has_main <dir> — succeeds iff <dir>/*.go (excluding *_test.go)
+            # contains a `package main` declaration. Uses find instead of
+            # a grep pipeline to avoid SIGPIPE races under `set -o pipefail`.
+            has_main() {
+              local dir="$1"
+              find "$dir" -maxdepth 1 -type f -name '*.go' ! -name '*_test.go' \
+                -exec grep -qE '^package main([[:space:]]|$)' {} \; -print 2>/dev/null \
+                | grep -q .
+            }
+
+            if has_main .; then
               MAIN_PACKAGE="."
-            elif [[ -d "./cmd/${REPO_NAME}" ]] && \
-                 grep -lE '^package main( |$)' "./cmd/${REPO_NAME}"/*.go 2>/dev/null | read -r _; then
+            elif [[ -d "./cmd/${REPO_NAME}" ]] && has_main "./cmd/${REPO_NAME}"; then
               MAIN_PACKAGE="./cmd/${REPO_NAME}"
             else
-              echo "::error::main-package=auto: no 'package main' found at repo root or in ./cmd/${REPO_NAME}/. Set main-package explicitly." >&2
+              echo "::error::main-package=auto: no non-test '.go' file declaring 'package main' at repo root or in ./cmd/${REPO_NAME}/. Set main-package explicitly."
               exit 1
             fi
             echo "main-package auto-detected as ${MAIN_PACKAGE}"
