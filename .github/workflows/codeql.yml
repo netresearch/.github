@@ -2,11 +2,19 @@ name: CodeQL
 
 # Reusable CodeQL analysis.
 #
-# The `languages` input accepts either a single CodeQL language or a
-# comma-separated list (e.g. `go` or `go,javascript-typescript`). A
-# `prepare` job normalizes the input into a JSON array, then `analyze`
-# fans out as a matrix so that each language gets its own init+analyse
-# pass and emits a distinct `/language:<lang>` SARIF category.
+# The `languages` input accepts one of:
+#   - `auto` — in-repo detection: always includes `go`; adds
+#     `javascript-typescript` when a `package.json` exists or any
+#     `.ts` / `.tsx` / `.mts` source is present in the first 4 levels
+#     of the tree. This is the preferred value for Go repos since it
+#     picks up JS/TS tooling automatically.
+#   - a single CodeQL language, e.g. `go`
+#   - a comma-separated list, e.g. `go,javascript-typescript`
+#
+# A `prepare` job normalizes the input into a JSON array, then
+# `analyze` fans out as a matrix so that each language gets its own
+# init+analyse pass and emits a distinct `/language:<lang>` SARIF
+# category.
 #
 # Callers passing a single language keep working unchanged (1-element
 # matrix). Callers passing multiple languages now get correct per-
@@ -16,7 +24,11 @@ on:
   workflow_call:
     inputs:
       languages:
-        description: "CodeQL language or comma-separated list of languages to analyze."
+        description: >-
+          CodeQL language(s) to analyze. Accepts `auto` (detects `go` +
+          `javascript-typescript` when a package.json or TS source is
+          present), a single language (e.g. `go`), or a comma-separated
+          list (e.g. `go,javascript-typescript`).
         type: string
         default: actions
 
