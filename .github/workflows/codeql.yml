@@ -37,12 +37,28 @@ jobs:
         with:
           egress-policy: audit
 
+      - name: Checkout (only needed when auto-detecting)
+        if: ${{ inputs.languages == 'auto' }}
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
       - name: Split languages into JSON array
         id: split
         env:
           LANGUAGES: ${{ inputs.languages }}
         run: |
           set -euo pipefail
+          # `auto` triggers in-repo detection: Go is assumed, plus JS/TS if
+          # there's a package.json or any TS source. Explicit lists still
+          # win — pass `languages: go` or `languages: go,javascript-typescript`.
+          if [ "$LANGUAGES" = "auto" ]; then
+            langs="go"
+            if [ -f package.json ] || [ -n "$(find . -maxdepth 4 -type f \( -name '*.ts' -o -name '*.tsx' -o -name '*.mts' \) 2>/dev/null | head -1)" ]; then
+              langs="${langs},javascript-typescript"
+            fi
+            LANGUAGES="$langs"
+          fi
           # Normalize: strip whitespace, drop empties, emit a JSON array.
           json="$(
             printf '%s' "$LANGUAGES" \
