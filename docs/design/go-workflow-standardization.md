@@ -46,9 +46,9 @@ All callers reference `@main`. When breaking-change pain justifies it, we introd
 
 ### Template contents
 
-**go-app (13 workflow files):** `auto-merge-deps.yml`, `ci.yml`, `codeql.yml`, `container.yml`, `container-retention.yml`, `dependency-review.yml`, `gitleaks.yml`, `labeler.yml`, `mutation.yml`, `pr-quality.yml`, `release.yml`, `scorecard.yml`, `check-template-drift.yml`.
+**go-app (12 workflow files):** `auto-merge-deps.yml`, `ci.yml`, `codeql.yml`, `container-retention.yml`, `dependency-review.yml`, `gitleaks.yml`, `labeler.yml`, `mutation.yml`, `pr-quality.yml`, `release.yml`, `scorecard.yml`, `check-template-drift.yml`. Container builds happen inside `release.yml` on tag push — not a separate per-push workflow. See "Single-build release pipeline" below.
 
-**go-lib (11 workflow files):** `go-app` minus `container.yml` + `container-retention.yml`; `release.yml` calls `golib-create-release.yml`.
+**go-lib (11 workflow files):** `go-app` minus `container-retention.yml`; `release.yml` calls `golib-create-release.yml`.
 
 Plus `.github/dependabot.yml`, `.github/labeler.yml`, `.github/template.yaml` in both templates.
 
@@ -79,9 +79,37 @@ Each consuming repo:
 
 A scheduled `drift-scan.yml` in `netresearch/.github` runs weekly across the fleet and opens/updates one issue per repo listing active drift.
 
-### Container builds
+### Single-build release pipeline
 
-All go-app repos build 5 platforms by default: `linux/386, linux/amd64, linux/arm/v6, linux/arm/v7, linux/arm64`.
+go-app `release.yml` cross-compiles Go binaries **once** and reuses them for two consumers:
+1. Published to the GitHub Release page as user-facing artifacts (all 8 targets: `linux-{386,amd64,arm64,armv6,armv7}`, `darwin-{amd64,arm64}`, `windows-amd64`).
+2. Downloaded back into `bin/` by the `container` job, where the Dockerfile's `binary-selector` stage (`COPY bin/<name>-linux-*`) picks the right binary per `TARGETARCH`/`TARGETVARIANT`.
+
+No `go build` runs inside the Dockerfile — that would be a second compile of the same code for the same outputs. The Dockerfile stays a thin staging layer.
+
+Container images build 5 platforms: `linux/386, linux/amd64, linux/arm/v6, linux/arm/v7, linux/arm64`.
+
+**Frontend-embedding repos** (e.g. ones with `//go:embed *.css`): ship a `bun run build:assets` script in `package.json`. `release.yml` runs it via `build-go-attest.yml`'s `pre-build-command` before `go build`, so embedded assets exist when the matrix binary compiles. Non-frontend repos share the identical workflow — the step is a no-op when `package.json` is absent.
+
+**Dockerfile convention** (all go-app repos):
+```dockerfile
+FROM alpine:<pinned> AS binary-selector
+ARG TARGETARCH
+ARG TARGETVARIANT
+COPY bin/<name>-linux-* /tmp/
+RUN case "${TARGETARCH}" in \
+      arm)            BINARY="<name>-linux-arm${TARGETVARIANT}" ;; \
+      386|amd64|arm64) BINARY="<name>-linux-${TARGETARCH}" ;; \
+      *) echo "unsupported: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    cp "/tmp/${BINARY}" /usr/bin/<name>; chmod +x /usr/bin/<name>
+
+FROM alpine:<pinned>
+# (LABELs, USER, ENTRYPOINT, etc.)
+COPY --from=binary-selector /usr/bin/<name> /usr/bin/<name>
+```
+
+No per-push `container.yml` workflow — containers are only built on tag push from pre-built matrix binaries. The previous template had a separate `container.yml` that ran plain `docker buildx build` on every main push; it was removed because (a) it can't co-exist with the single-build rule without duplicating the Go compile, and (b) container publishing on every main commit was never a fleet requirement.
 
 ### Coverage floor
 
@@ -106,7 +134,6 @@ Executed without grace periods or soft-warn phases.
 | auto-merge-deps | `pull_request_target` |
 | ci / go-check | `push: main, tags`, `pull_request`, `merge_group`, `workflow_dispatch`, `schedule` (weekly) |
 | codeql | `push: main`, `pull_request`, `schedule` |
-| container | `push: main, v*`, `pull_request` |
 | container-retention | `schedule: '0 2 * * 0'`, `workflow_dispatch` |
 | dependency-review | `pull_request` |
 | gitleaks | `push: main`, `pull_request` |
