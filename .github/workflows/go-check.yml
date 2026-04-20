@@ -138,6 +138,46 @@ on:
         type: number
         default: 80.0
 
+      enable-integration-tests:
+        description: >-
+          Run integration tests as a separate job. Uses the build tags declared in
+          `integration-build-tags`. Reports coverage to Codecov under the
+          `integration` flag. Docker daemon is available on ubuntu-latest runners,
+          so testcontainers-based suites work out of the box.
+        type: boolean
+        default: false
+      integration-build-tags:
+        description: "Go build tag(s) that gate integration tests (passed to `-tags`)."
+        type: string
+        default: "integration"
+      integration-test-packages:
+        description: "Packages to run integration tests against."
+        type: string
+        default: "./..."
+      integration-timeout-minutes:
+        description: "Timeout for the integration-tests job."
+        type: number
+        default: 20
+
+      enable-e2e-tests:
+        description: >-
+          Run end-to-end tests as a separate job. Uses the build tags declared in
+          `e2e-build-tags`. Reports coverage to Codecov under the `e2e` flag.
+        type: boolean
+        default: false
+      e2e-build-tags:
+        description: "Go build tag(s) that gate e2e tests (passed to `-tags`)."
+        type: string
+        default: "e2e"
+      e2e-test-packages:
+        description: "Packages to run e2e tests against."
+        type: string
+        default: "./..."
+      e2e-timeout-minutes:
+        description: "Timeout for the e2e-tests job."
+        type: number
+        default: 30
+
       enable-fuzz:
         description: "Run `go test -run=Fuzz` against the repo (fuzz tests in corpus-replay mode). No-op when no FuzzXxx targets exist."
         type: boolean
@@ -566,3 +606,117 @@ jobs:
           echo "Allowed licenses: $ALLOW"
           # shellcheck disable=SC2086
           go-licenses check ./... --allowed_licenses="$ALLOW" $IGNORE_ARGS
+
+  integration-tests:
+    name: Integration Tests
+    if: ${{ inputs.enable-integration-tests }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.integration-timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+          cache: true
+
+      - name: Set up Bun
+        if: ${{ inputs.setup-bun }}
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ inputs.bun-version }}
+
+      - name: Pre-build command
+        if: ${{ inputs.pre-build-cmd != '' }}
+        env:
+          PRE_BUILD_CMD: ${{ inputs.pre-build-cmd }}
+        run: |
+          bash -euo pipefail -c "$PRE_BUILD_CMD"
+
+      - name: Go integration tests
+        env:
+          BUILD_TAGS: ${{ inputs.integration-build-tags }}
+          TEST_PACKAGES: ${{ inputs.integration-test-packages }}
+        run: |
+          go test -race -tags="$BUILD_TAGS" \
+            -coverprofile=coverage-integration.out \
+            -covermode=atomic \
+            -timeout=15m \
+            "$TEST_PACKAGES"
+
+      - name: Upload integration coverage to Codecov
+        if: ${{ inputs.enable-codecov && hashFiles('coverage-integration.out') != '' }}
+        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage-integration.out
+          flags: integration
+          fail_ci_if_error: false
+
+  e2e-tests:
+    name: E2E Tests
+    if: ${{ inputs.enable-e2e-tests }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.e2e-timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+          cache: true
+
+      - name: Set up Bun
+        if: ${{ inputs.setup-bun }}
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ inputs.bun-version }}
+
+      - name: Pre-build command
+        if: ${{ inputs.pre-build-cmd != '' }}
+        env:
+          PRE_BUILD_CMD: ${{ inputs.pre-build-cmd }}
+        run: |
+          bash -euo pipefail -c "$PRE_BUILD_CMD"
+
+      - name: Go e2e tests
+        env:
+          BUILD_TAGS: ${{ inputs.e2e-build-tags }}
+          TEST_PACKAGES: ${{ inputs.e2e-test-packages }}
+        run: |
+          go test -race -tags="$BUILD_TAGS" \
+            -coverprofile=coverage-e2e.out \
+            -covermode=atomic \
+            -timeout=25m \
+            "$TEST_PACKAGES"
+
+      - name: Upload e2e coverage to Codecov
+        if: ${{ inputs.enable-codecov && hashFiles('coverage-e2e.out') != '' }}
+        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage-e2e.out
+          flags: e2e
+          fail_ci_if_error: false
