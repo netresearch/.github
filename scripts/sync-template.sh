@@ -82,21 +82,61 @@ fi
 
 git checkout -b "$BRANCH" --quiet
 
-# Copy every file from the template's .github/ tree into the consumer.
-# Overwrites matching paths; leaves repo-specific files (not in the
-# template) alone. template.yaml is special-cased: only created on first
-# sync, never overwritten (it carries per-repo intentional-drift state).
+# Copy every file from the template's .github/ tree into the consumer,
+# except files the consumer has explicitly flagged as intentional-drift.
+# That flag lives in .github/template.yaml's intentional-drift[].path list.
+# template.yaml itself is never overwritten — it carries per-repo drift state.
 EXISTING_TEMPLATE_YAML=""
 if [ -f .github/template.yaml ]; then
   EXISTING_TEMPLATE_YAML=$(cat .github/template.yaml)
 fi
 
+# Resolve intentional-drift paths (relative to consumer root) so the copy
+# step can skip them. Tolerate missing/malformed template.yaml — the copy
+# proceeds as an unconstrained sync in that case.
+mapfile -t DRIFT_PATHS < <(python3 -c '
+import sys, yaml
+try:
+    with open(".github/template.yaml") as f:
+        doc = yaml.safe_load(f) or {}
+except FileNotFoundError:
+    sys.exit(0)
+except Exception as e:
+    sys.stderr.write(f"warning: could not parse .github/template.yaml: {e}\n")
+    sys.exit(0)
+for item in (doc.get("intentional-drift") or []):
+    if isinstance(item, dict) and item.get("path"):
+        print(item["path"])
+    elif isinstance(item, str):
+        print(item)
+' 2>&1 | grep -v "^warning:" || true)
+
 mkdir -p .github
-# -a preserves mode/timestamps; --no-target-directory avoids nested dir.
-cp -a "$TEMPLATE_DIR/." .github/
+
+if [ ${#DRIFT_PATHS[@]} -eq 0 ]; then
+  # Fast path: no drift — plain recursive copy.
+  cp -a "$TEMPLATE_DIR/." .github/
+else
+  echo "preserving ${#DRIFT_PATHS[@]} intentional-drift path(s):"
+  printf "  - %s\n" "${DRIFT_PATHS[@]}"
+  # Build rsync exclude pattern file. rsync patterns are relative to the
+  # transfer root (.github/), but intentional-drift paths are relative to
+  # repo root — strip the `.github/` prefix.
+  EXCLUDES=$(mktemp)
+  trap '"'"'rm -f "$EXCLUDES"'"'"' RETURN
+  for p in "${DRIFT_PATHS[@]}"; do
+    case "$p" in
+      .github/*) echo "${p#.github/}" >> "$EXCLUDES" ;;
+      *)         echo "$p"           >> "$EXCLUDES" ;;
+    esac
+  done
+  # -a archive; -v verbose (echoes in $CLONE log); --exclude-from skips drifted files.
+  rsync -a --exclude-from="$EXCLUDES" "$TEMPLATE_DIR/" .github/
+  rm -f "$EXCLUDES"
+fi
 
 if [ -n "$EXISTING_TEMPLATE_YAML" ]; then
-  printf '%s\n' "$EXISTING_TEMPLATE_YAML" > .github/template.yaml
+  printf "%s\n" "$EXISTING_TEMPLATE_YAML" > .github/template.yaml
   echo "note: preserved existing .github/template.yaml (intentional-drift state)."
 fi
 
