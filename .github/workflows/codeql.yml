@@ -25,10 +25,10 @@ on:
     inputs:
       languages:
         description: >-
-          CodeQL language(s) to analyze. Accepts `auto` (detects `go` +
-          `javascript-typescript` when a package.json or TS source is
-          present), a single language (e.g. `go`), or a comma-separated
-          list (e.g. `go,javascript-typescript`).
+          CodeQL language(s) to analyze. Accepts `auto` (always includes
+          `go`; adds `javascript-typescript` when a package.json or TS
+          source is present), a single language (e.g. `go`), or a
+          comma-separated list (e.g. `go,javascript-typescript`).
         type: string
         default: actions
 
