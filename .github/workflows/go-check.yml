@@ -534,7 +534,7 @@ jobs:
           cache: true
 
       - name: Install go-licenses
-        run: go install github.com/google/go-licenses@3e084b0caf710f7bfead967567539214f598c0a2  # pinned to avoid upstream breakage on @latest
+        run: go install github.com/google/go-licenses@5348b744d0983d85713295ea08a20cca1654a45e  # pinned to v1.6.0 (post-v1 tags live in /v2 module path)
 
       - name: Run license check
         env:
