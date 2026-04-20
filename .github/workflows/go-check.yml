@@ -205,7 +205,7 @@ jobs:
         run: |
           # Strict mode: surface caller script errors instead of silently
           # continuing into the Go build with a half-built frontend.
-          bash -eu -c "$PRE_BUILD_CMD"
+          bash -euo pipefail -c "$PRE_BUILD_CMD"
 
       - name: Download Go modules
         run: go mod download
@@ -288,7 +288,7 @@ jobs:
         run: |
           # Strict mode: surface caller script errors instead of silently
           # continuing into the Go build with a half-built frontend.
-          bash -eu -c "$PRE_BUILD_CMD"
+          bash -euo pipefail -c "$PRE_BUILD_CMD"
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9.2.0
@@ -338,7 +338,7 @@ jobs:
         run: |
           # Strict mode: surface caller script errors instead of silently
           # continuing into the Go build with a half-built frontend.
-          bash -eu -c "$PRE_BUILD_CMD"
+          bash -euo pipefail -c "$PRE_BUILD_CMD"
 
       - name: Run govulncheck
         env:
@@ -402,7 +402,7 @@ jobs:
         run: |
           # Strict mode: surface caller script errors instead of silently
           # continuing into the Go build with a half-built frontend.
-          bash -eu -c "$PRE_BUILD_CMD"
+          bash -euo pipefail -c "$PRE_BUILD_CMD"
 
       - name: Run gosec
         uses: securego/gosec@64b97151cd7b978abdf8d2f1159a4e9096a12c2b # master
@@ -455,7 +455,7 @@ jobs:
         run: |
           # Strict mode: surface caller script errors instead of silently
           # continuing into the Go build with a half-built frontend.
-          bash -eu -c "$PRE_BUILD_CMD"
+          bash -euo pipefail -c "$PRE_BUILD_CMD"
 
       - name: go test -short (smoke)
         env:
@@ -499,7 +499,7 @@ jobs:
         run: |
           # Strict mode: surface caller script errors instead of silently
           # continuing into the Go build with a half-built frontend.
-          bash -eu -c "$PRE_BUILD_CMD"
+          bash -euo pipefail -c "$PRE_BUILD_CMD"
 
       - name: Run fuzz tests (corpus replay mode)
         # `-run=Fuzz` + no `-fuzz=` runs FuzzXxx functions as unit tests against
