@@ -217,9 +217,16 @@ jobs:
           # fails hard if resolution yields an empty string so opting in
           # can't silently ship a binary with an empty buildTime.
           if [[ "${AUTO_BUILD_TIMESTAMP}" == "true" ]]; then
-            BUILD_TS=$(git show -s --format=%cI HEAD)
+            # Capture both success/failure explicitly — `set -e` would
+            # otherwise abort on a non-zero `git show` before the custom
+            # diagnostic runs. The empty-string check still fires for
+            # exit-0-empty-output edge cases.
+            if ! BUILD_TS=$(git show -s --format=%cI HEAD 2>&1); then
+              echo "::error::auto-build-timestamp=true but 'git show -s --format=%cI HEAD' failed: ${BUILD_TS}. Check that actions/checkout completed and HEAD points at a real commit."
+              exit 1
+            fi
             if [[ -z "${BUILD_TS}" ]]; then
-              echo "::error::auto-build-timestamp=true but 'git show -s --format=%cI HEAD' produced no value. Check that actions/checkout ran with enough history (fetch-depth>=1) and that HEAD is a valid commit."
+              echo "::error::auto-build-timestamp=true but 'git show -s --format=%cI HEAD' returned empty. Check that actions/checkout produced a valid HEAD (fetch-depth 0 or >=1 both work)."
               exit 1
             fi
             LDFLAGS="${LDFLAGS} -X main.buildTime=${BUILD_TS}"
