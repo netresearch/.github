@@ -100,6 +100,19 @@ on:
         required: false
         type: string
         default: ""
+      auto-build-timestamp:
+        description: >-
+          When true, resolve the HEAD commit timestamp (ISO-8601, via
+          `git show -s --format=%cI`) after checkout and append
+          `-X main.buildTime=<value>` to ldflags. Works for every
+          trigger — including `workflow_dispatch` backfills where
+          `github.event.head_commit` is absent — because the timestamp
+          comes from the checked-out git tree, not the event payload.
+          Requires the consumer's main package to declare
+          `var buildTime string` (empty string if not consumed).
+        required: false
+        type: boolean
+        default: false
 
 # CALLER REQUIREMENTS
 # ===================
@@ -185,8 +198,26 @@ jobs:
           LDFLAGS: ${{ inputs.ldflags }}
           MAIN_PACKAGE: ${{ inputs.main-package }}
           INPUT_GOARM: ${{ inputs.goarm }}
+          AUTO_BUILD_TIMESTAMP: ${{ inputs.auto-build-timestamp }}
         run: |
           set -euo pipefail
+
+          # Resolve HEAD commit's ISO-8601 timestamp into an appended
+          # `-X main.buildTime=<value>` ldflag when the caller opted in.
+          # Works on every trigger because it reads git directly instead
+          # of `github.event.head_commit.timestamp` (empty on
+          # workflow_dispatch backfills). Requires the consumer's main
+          # package to declare `var buildTime string`; the ldflag is a
+          # silent no-op otherwise.
+          if [[ "${AUTO_BUILD_TIMESTAMP}" == "true" ]]; then
+            BUILD_TS=$(git show -s --format=%cI HEAD 2>/dev/null || true)
+            if [[ -n "${BUILD_TS}" ]]; then
+              LDFLAGS="${LDFLAGS} -X main.buildTime=${BUILD_TS}"
+              echo "auto-build-timestamp: appended -X main.buildTime=${BUILD_TS}"
+            else
+              echo "::warning::auto-build-timestamp=true but 'git show' produced no value; main.buildTime left unset."
+            fi
+          fi
 
           # Resolve `main-package: auto` against the checked-out tree.
           # Locates a `package main` declaration in any non-test *.go
