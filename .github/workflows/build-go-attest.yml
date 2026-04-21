@@ -108,8 +108,13 @@ on:
           trigger — including `workflow_dispatch` backfills where
           `github.event.head_commit` is absent — because the timestamp
           comes from the checked-out git tree, not the event payload.
-          Requires the consumer's main package to declare
-          `var buildTime string` (empty string if not consumed).
+          The step FAILS if resolution yields an empty value, so opting
+          in guarantees a populated timestamp.
+          The consumer's main package MUST declare `var buildTime
+          string` for the appended ldflag to land. Go 1.21+ linkers
+          silently ignore `-X` targets for missing vars, but older
+          toolchains can reject the build with 'symbol not found',
+          so declaring the var is part of the contract for this input.
         required: false
         type: boolean
         default: false
@@ -206,17 +211,19 @@ jobs:
           # `-X main.buildTime=<value>` ldflag when the caller opted in.
           # Works on every trigger because it reads git directly instead
           # of `github.event.head_commit.timestamp` (empty on
-          # workflow_dispatch backfills). Requires the consumer's main
-          # package to declare `var buildTime string`; the ldflag is a
-          # silent no-op otherwise.
+          # workflow_dispatch backfills).
+          # The consumer's main package must declare `var buildTime
+          # string` to receive the value (see input docs). The step
+          # fails hard if resolution yields an empty string so opting in
+          # can't silently ship a binary with an empty buildTime.
           if [[ "${AUTO_BUILD_TIMESTAMP}" == "true" ]]; then
-            BUILD_TS=$(git show -s --format=%cI HEAD 2>/dev/null || true)
-            if [[ -n "${BUILD_TS}" ]]; then
-              LDFLAGS="${LDFLAGS} -X main.buildTime=${BUILD_TS}"
-              echo "auto-build-timestamp: appended -X main.buildTime=${BUILD_TS}"
-            else
-              echo "::warning::auto-build-timestamp=true but 'git show' produced no value; main.buildTime left unset."
+            BUILD_TS=$(git show -s --format=%cI HEAD)
+            if [[ -z "${BUILD_TS}" ]]; then
+              echo "::error::auto-build-timestamp=true but 'git show -s --format=%cI HEAD' produced no value. Check that actions/checkout ran with enough history (fetch-depth>=1) and that HEAD is a valid commit."
+              exit 1
             fi
+            LDFLAGS="${LDFLAGS} -X main.buildTime=${BUILD_TS}"
+            echo "auto-build-timestamp: appended -X main.buildTime=${BUILD_TS}"
           fi
 
           # Resolve `main-package: auto` against the checked-out tree.
