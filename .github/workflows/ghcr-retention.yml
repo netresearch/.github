@@ -167,7 +167,7 @@ jobs:
               # Check if ANY tag matches a release pattern (kept forever)
               HAS_RELEASE_TAG=$(echo "$version" | jq -r --argjson patterns "$RELEASE_REGEX_JSON" '
                 .metadata.container.tags // []
-                | any(.; . as $t | $patterns | any(.; $t | test(.)))
+                | any(.[]; . as $t | any($patterns[]; . as $p | $t | test($p)))
               ')
 
               if [ "$HAS_RELEASE_TAG" = "true" ]; then
@@ -177,7 +177,7 @@ jobs:
               # Check if this is an edge-pattern image
               IS_EDGE=$(echo "$version" | jq -r --argjson patterns "$EDGE_REGEX_JSON" '
                 .metadata.container.tags // []
-                | any(.; . as $t | $patterns | any(.; $t | test(.)))
+                | any(.[]; . as $t | any($patterns[]; . as $p | $t | test($p)))
               ')
 
               if [ "$IS_EDGE" != "true" ]; then
