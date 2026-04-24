@@ -214,14 +214,21 @@ jobs:
           FAILED=0
           for VERSION_ID in "${VERSIONS_TO_DELETE[@]}"; do
             echo "Deleting version ${VERSION_ID}..."
-            if gh api \
+            if DELETE_OUT=$(gh api \
               --method DELETE \
               -H "Accept: application/vnd.github+json" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
-              "/orgs/${OWNER}/packages/container/${PACKAGE_NAME}/versions/${VERSION_ID}" 2>/dev/null; then
+              "/orgs/${OWNER}/packages/container/${PACKAGE_NAME}/versions/${VERSION_ID}" 2>&1); then
               DELETED=$((DELETED + 1))
             else
-              echo "  WARNING: Failed to delete version ${VERSION_ID}"
+              # Capture the API error body so operators can see WHY the
+              # delete was refused (common causes: 404 for race-deleted
+              # siblings, 422 for versions still referenced by an OCI
+              # manifest crane didn't traverse, 403 for package-level
+              # delete restrictions). The body goes on a single line
+              # so one-liner log scans keep working.
+              ERR_ONE_LINE=$(echo "$DELETE_OUT" | tr '\n' ' ' | head -c 400)
+              echo "  WARNING: Failed to delete version ${VERSION_ID}: ${ERR_ONE_LINE}"
               FAILED=$((FAILED + 1))
             fi
           done
@@ -386,14 +393,21 @@ jobs:
           FAILED=0
           for VERSION_ID in "${VERSIONS_TO_DELETE[@]}"; do
             echo "Deleting version ${VERSION_ID}..."
-            if gh api \
+            if DELETE_OUT=$(gh api \
               --method DELETE \
               -H "Accept: application/vnd.github+json" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
-              "/orgs/${OWNER}/packages/container/${PACKAGE_NAME}/versions/${VERSION_ID}" 2>/dev/null; then
+              "/orgs/${OWNER}/packages/container/${PACKAGE_NAME}/versions/${VERSION_ID}" 2>&1); then
               DELETED=$((DELETED + 1))
             else
-              echo "  WARNING: Failed to delete version ${VERSION_ID}"
+              # Capture the API error body so operators can see WHY the
+              # delete was refused (common causes: 404 for race-deleted
+              # siblings, 422 for versions still referenced by an OCI
+              # manifest crane didn't traverse, 403 for package-level
+              # delete restrictions). The body goes on a single line
+              # so one-liner log scans keep working.
+              ERR_ONE_LINE=$(echo "$DELETE_OUT" | tr '\n' ' ' | head -c 400)
+              echo "  WARNING: Failed to delete version ${VERSION_ID}: ${ERR_ONE_LINE}"
               FAILED=$((FAILED + 1))
             fi
           done
