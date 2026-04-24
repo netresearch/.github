@@ -249,7 +249,7 @@ jobs:
         with:
           # Pin crane to a known-good release; `latest` broke CI in the past
           # when upstream re-tagged without backward compat.
-          version: v0.22.1
+          version: v0.21.5
 
       - name: Log in to Container registry
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
