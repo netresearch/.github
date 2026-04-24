@@ -139,10 +139,20 @@ jobs:
           VERSIONS_TO_DELETE=()
 
           while true; do
-            VERSIONS=$(gh api \
+            # Fail loudly if the API call errors — previously the
+            # `2>/dev/null || echo "[]"` pattern concatenated the
+            # error body onto the fallback `[]`, producing TWO JSON
+            # documents in $VERSIONS. `jq 'length'` then returned
+            # multiline output (e.g. "3\n0" for an error object
+            # followed by the empty array) and every downstream
+            # bash test / jq pipeline mangled.
+            if ! VERSIONS=$(gh api \
               -H "Accept: application/vnd.github+json" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
-              "/orgs/${OWNER}/packages/container/${PACKAGE_NAME}/versions?per_page=100&page=${PAGE}" 2>/dev/null || echo "[]")
+              "/orgs/${OWNER}/packages/container/${PACKAGE_NAME}/versions?per_page=100&page=${PAGE}" 2>&1); then
+              echo "::error::Failed to fetch versions page ${PAGE}: $(echo "$VERSIONS" | tr '\n' ' ' | head -c 400)"
+              exit 1
+            fi
 
             # Check if we got any versions
             COUNT=$(echo "$VERSIONS" | jq 'length')
@@ -329,10 +339,20 @@ jobs:
           VERSIONS_TO_DELETE=()
 
           while true; do
-            VERSIONS=$(gh api \
+            # Fail loudly if the API call errors — previously the
+            # `2>/dev/null || echo "[]"` pattern concatenated the
+            # error body onto the fallback `[]`, producing TWO JSON
+            # documents in $VERSIONS. `jq 'length'` then returned
+            # multiline output (e.g. "3\n0" for an error object
+            # followed by the empty array) and every downstream
+            # bash test / jq pipeline mangled.
+            if ! VERSIONS=$(gh api \
               -H "Accept: application/vnd.github+json" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
-              "/orgs/${OWNER}/packages/container/${PACKAGE_NAME}/versions?per_page=100&page=${PAGE}" 2>/dev/null || echo "[]")
+              "/orgs/${OWNER}/packages/container/${PACKAGE_NAME}/versions?per_page=100&page=${PAGE}" 2>&1); then
+              echo "::error::Failed to fetch versions page ${PAGE}: $(echo "$VERSIONS" | tr '\n' ' ' | head -c 400)"
+              exit 1
+            fi
 
             COUNT=$(echo "$VERSIONS" | jq 'length')
             if [ "$COUNT" -eq 0 ]; then
