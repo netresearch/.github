@@ -150,7 +150,12 @@ jobs:
               -H "Accept: application/vnd.github+json" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
               "/orgs/${OWNER}/packages/container/${PACKAGE_NAME}/versions?per_page=100&page=${PAGE}" 2>&1); then
-              echo "::error::Failed to fetch versions page ${PAGE}: $(echo "$VERSIONS" | tr '\n' ' ' | head -c 400)"
+              # Bash parameter expansion (collapse newlines, truncate).
+              # Avoids `echo | tr | head` because under `set -euo pipefail`
+              # the SIGPIPE that head sends back to tr makes the pipeline
+              # exit non-zero, suppressing the ::error:: we want to emit.
+              VERSIONS_SINGLE_LINE=${VERSIONS//$'\n'/ }
+              echo "::error::Failed to fetch versions page ${PAGE}: ${VERSIONS_SINGLE_LINE:0:400}"
               exit 1
             fi
 
@@ -237,7 +242,10 @@ jobs:
               # manifest crane didn't traverse, 403 for package-level
               # delete restrictions). The body goes on a single line
               # so one-liner log scans keep working.
-              ERR_ONE_LINE=$(echo "$DELETE_OUT" | tr '\n' ' ' | head -c 400)
+              # Bash parameter expansion — same SIGPIPE-avoidance reason
+              # as the fetch path above.
+              DELETE_OUT_SINGLE_LINE=${DELETE_OUT//$'\n'/ }
+              ERR_ONE_LINE=${DELETE_OUT_SINGLE_LINE:0:400}
               echo "  WARNING: Failed to delete version ${VERSION_ID}: ${ERR_ONE_LINE}"
               FAILED=$((FAILED + 1))
             fi
@@ -350,7 +358,12 @@ jobs:
               -H "Accept: application/vnd.github+json" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
               "/orgs/${OWNER}/packages/container/${PACKAGE_NAME}/versions?per_page=100&page=${PAGE}" 2>&1); then
-              echo "::error::Failed to fetch versions page ${PAGE}: $(echo "$VERSIONS" | tr '\n' ' ' | head -c 400)"
+              # Bash parameter expansion (collapse newlines, truncate).
+              # Avoids `echo | tr | head` because under `set -euo pipefail`
+              # the SIGPIPE that head sends back to tr makes the pipeline
+              # exit non-zero, suppressing the ::error:: we want to emit.
+              VERSIONS_SINGLE_LINE=${VERSIONS//$'\n'/ }
+              echo "::error::Failed to fetch versions page ${PAGE}: ${VERSIONS_SINGLE_LINE:0:400}"
               exit 1
             fi
 
@@ -426,7 +439,10 @@ jobs:
               # manifest crane didn't traverse, 403 for package-level
               # delete restrictions). The body goes on a single line
               # so one-liner log scans keep working.
-              ERR_ONE_LINE=$(echo "$DELETE_OUT" | tr '\n' ' ' | head -c 400)
+              # Bash parameter expansion — same SIGPIPE-avoidance reason
+              # as the fetch path above.
+              DELETE_OUT_SINGLE_LINE=${DELETE_OUT//$'\n'/ }
+              ERR_ONE_LINE=${DELETE_OUT_SINGLE_LINE:0:400}
               echo "  WARNING: Failed to delete version ${VERSION_ID}: ${ERR_ONE_LINE}"
               FAILED=$((FAILED + 1))
             fi
