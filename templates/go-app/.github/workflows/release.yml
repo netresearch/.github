@@ -39,6 +39,13 @@ jobs:
       contents: write
     with:
       tag: ${{ inputs.tag || github.ref_name }}
+      # Create as draft so downstream jobs (binaries, container,
+      # finalize) can upload assets. GitHub now treats published
+      # releases as immutable and rejects asset uploads after
+      # publication. The `finalize` job at the end of this pipeline
+      # publishes the draft with the correct latest / prerelease flags
+      # propagated from create-release outputs.
+      draft: true
 
   binaries:
     name: Build ${{ matrix.target }}
@@ -137,3 +144,8 @@ jobs:
     with:
       tag: ${{ needs.create-release.outputs.tag }}
       image-ref: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
+      # Propagate the latest / prerelease decision computed by
+      # create-release so the final publish step (inside finalize)
+      # flips the draft to published with the correct flags.
+      make-latest: ${{ needs.create-release.outputs.is-latest }}
+      prerelease: ${{ needs.create-release.outputs.is-prerelease }}
