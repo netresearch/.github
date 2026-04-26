@@ -33,6 +33,16 @@ on:
         required: false
         type: string
         default: ""
+      make-latest:
+        description: "When publishing a draft release at the end of finalize, mark it as 'Latest'. No-op if the release is already published. Pass `needs.create-release.outputs.is-latest` from create-release."
+        required: false
+        type: string
+        default: "true"
+      prerelease:
+        description: "When publishing a draft release at the end of finalize, mark it as a prerelease. No-op if the release is already published. Pass `needs.create-release.outputs.is-prerelease` from create-release."
+        required: false
+        type: string
+        default: "false"
 
 # CALLER REQUIREMENTS
 # ===================
@@ -232,3 +242,31 @@ jobs:
           } > release_body.md
 
           gh release edit "$TAG" --repo "$REPO" --notes-file release_body.md
+
+      - name: Publish release (flip draft to published)
+        # Final step in the release lifecycle. When create-release was
+        # called with `draft: true` (the recommended pattern when
+        # downstream jobs upload assets — GitHub treats published
+        # releases as immutable and rejects asset uploads), this step
+        # flips the draft to published with the correct latest /
+        # prerelease flags. Idempotent: if the release is already
+        # published (e.g. caller didn't use draft mode), this is a
+        # no-op.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          REPO: ${{ github.repository }}
+          MAKE_LATEST: ${{ inputs.make-latest }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          IS_DRAFT=$(gh release view "$TAG" --repo "$REPO" --json isDraft --jq .isDraft)
+          if [ "$IS_DRAFT" != "true" ]; then
+            echo "Release $TAG is already published — skipping publish step"
+            exit 0
+          fi
+          echo "Publishing draft release $TAG (latest=$MAKE_LATEST, prerelease=$PRERELEASE)"
+          gh release edit "$TAG" --repo "$REPO" \
+            --draft=false \
+            --latest="$MAKE_LATEST" \
+            --prerelease="$PRERELEASE"

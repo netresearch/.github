@@ -243,12 +243,23 @@ jobs:
         run: |
           set -euo pipefail
 
+          # GitHub forbids drafts (and prereleases) from being marked
+          # as 'latest' — `gh release create --latest=true --draft`
+          # errors. When creating as draft, force --latest=false here;
+          # the finalize-release workflow's publish step flips draft to
+          # published with the correct --latest flag.
+          if [ "$DRAFT" = "true" ]; then
+            EFFECTIVE_LATEST=false
+          else
+            EFFECTIVE_LATEST="$MAKE_LATEST"
+          fi
+
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             echo "Release $TAG already exists — updating"
-            gh release edit "$TAG" --repo "$REPO" --notes "$NOTES" --latest="$MAKE_LATEST" --prerelease="$IS_PRE" --draft="$DRAFT"
+            gh release edit "$TAG" --repo "$REPO" --notes "$NOTES" --latest="$EFFECTIVE_LATEST" --prerelease="$IS_PRE" --draft="$DRAFT"
           else
             echo "Creating new release $TAG"
-            CREATE_ARGS=("$TAG" "--repo" "$REPO" "--title" "$TAG" "--notes" "$NOTES" "--latest=$MAKE_LATEST")
+            CREATE_ARGS=("$TAG" "--repo" "$REPO" "--title" "$TAG" "--notes" "$NOTES" "--latest=$EFFECTIVE_LATEST")
             if [ "$IS_PRE" = "true" ]; then
               CREATE_ARGS+=("--prerelease")
             fi
