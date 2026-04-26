@@ -1,0 +1,157 @@
+name: Release (Go application)
+
+# Atomic-release orchestrator for go-app consumers. Builds binaries (matrix),
+# container image (multi-arch), then creates the GitHub Release in a single
+# softprops/action-gh-release@v3 call with all assets — compatible with
+# GitHub's release-immutability enforcement.
+#
+# Replaces the legacy create-release.yml + finalize-release.yml split, which
+# scattered writes to the release across multiple jobs and broke after
+# immutability was enforced.
+#
+# Mirrors typo3-ci-workflows/release-typo3-extension.yml and
+# skill-repo-skill/release.yml — both already proven immutability-friendly.
+
+on:
+  workflow_call:
+    inputs:
+      app-name:
+        description: "Application binary + container image name (e.g. ldap-manager). Caller typically passes github.event.repository.name."
+        required: true
+        type: string
+      tag:
+        description: "Tag to release (e.g. v1.2.3). Defaults to github.ref_name. Override for workflow_dispatch backfills."
+        required: false
+        type: string
+        default: ""
+      main-package:
+        description: "Go main package path. Set to 'auto' to detect '.' vs './cmd/<repo-name>' from the checked-out tree."
+        required: false
+        type: string
+        default: "auto"
+      goos-goarch-matrix:
+        description: "JSON array of {target, goos, goarch, goarm?} matrix entries. Defaults to the standard 8-platform set."
+        required: false
+        type: string
+        default: >-
+          [
+            {"target":"linux-386","goos":"linux","goarch":"386"},
+            {"target":"linux-amd64","goos":"linux","goarch":"amd64"},
+            {"target":"linux-arm64","goos":"linux","goarch":"arm64"},
+            {"target":"linux-armv6","goos":"linux","goarch":"arm","goarm":"6"},
+            {"target":"linux-armv7","goos":"linux","goarch":"arm","goarm":"7"},
+            {"target":"darwin-amd64","goos":"darwin","goarch":"amd64"},
+            {"target":"darwin-arm64","goos":"darwin","goarch":"arm64"},
+            {"target":"windows-amd64","goos":"windows","goarch":"amd64"}
+          ]
+      cgo-enabled:
+        description: "CGO_ENABLED build flag."
+        required: false
+        type: string
+        default: "0"
+      ldflags:
+        description: "Linker flags. Orchestrator appends '-X main.version=<tag> -X main.build=<sha>' automatically."
+        required: false
+        type: string
+        default: "-s -w"
+      auto-build-timestamp:
+        description: "Append '-X main.buildTime=<HEAD-iso8601>' so workflow_dispatch backfills get a populated timestamp."
+        required: false
+        type: boolean
+        default: true
+      setup-bun:
+        description: "Install Bun before pre-build-command. Set true for repos that embed Bun-built assets."
+        required: false
+        type: boolean
+        default: true
+      bun-version:
+        description: "Bun version (when setup-bun=true)."
+        required: false
+        type: string
+        default: "latest"
+      setup-node:
+        description: "Install Node.js before pre-build-command."
+        required: false
+        type: boolean
+        default: false
+      node-version:
+        description: "Node.js version (when setup-node=true)."
+        required: false
+        type: string
+        default: "lts/*"
+      pre-build-command:
+        description: "Shell hook run before 'go build'. Useful for asset embedding (templ generate, bun run build:assets)."
+        required: false
+        type: string
+        default: ""
+      container:
+        description: "Build the container image. Set false for binary-only releases."
+        required: false
+        type: boolean
+        default: true
+      container-platforms:
+        description: "Container build platforms (comma-separated)."
+        required: false
+        type: string
+        default: "linux/386,linux/amd64,linux/arm/v6,linux/arm/v7,linux/arm64"
+      container-pre-build-command:
+        description: "Extra shell run AFTER the orchestrator's automatic binary-artifact download. Empty by default."
+        required: false
+        type: string
+        default: ""
+      dockerfile:
+        description: "Path to Dockerfile."
+        required: false
+        type: string
+        default: "./Dockerfile"
+      prerelease:
+        description: "Prerelease override: 'auto' (detect -rc/-alpha/-beta/-pre suffix), 'true', or 'false'."
+        required: false
+        type: string
+        default: "auto"
+      make-latest:
+        description: "make_latest override: 'auto' (compute from semver vs existing releases), 'true', or 'false'."
+        required: false
+        type: string
+        default: "auto"
+      previous-tag:
+        description: "Override previous tag used for changelog generation."
+        required: false
+        type: string
+        default: ""
+      require-annotated-tag:
+        description: "Reject lightweight tags."
+        required: false
+        type: boolean
+        default: true
+      sign-artifacts:
+        description: "Per-asset cosign sign-blob → .bundle file alongside each binary/SBOM."
+        required: false
+        type: boolean
+        default: true
+      include-sbom:
+        description: "Generate Syft SBOM (spdx-json) per binary. Uploaded as release asset alongside the binary."
+        required: false
+        type: boolean
+        default: true
+
+# CALLER REQUIREMENTS
+# ===================
+# Caller's job-level permissions: block MUST grant at least:
+#
+#   permissions:
+#     contents: write       # release create, checkout, attestation upload
+#     packages: write       # GHCR push (when container=true)
+#     id-token: write       # cosign keyless OIDC + attestations
+#     attestations: write   # actions/attest-build-provenance
+#     security-events: write # Trivy SARIF upload (when container=true)
+permissions:
+  contents: read
+
+jobs:
+  # Jobs are added in subsequent tasks: preflight, binaries, container, release.
+  # Placeholder NOOP keeps actionlint happy until the real jobs land.
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: 'echo "skeleton — jobs added in later plan tasks"'
