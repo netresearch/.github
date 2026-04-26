@@ -63,7 +63,7 @@ on:
         description: "Install Bun before pre-build-command. Set true for repos that embed Bun-built assets."
         required: false
         type: boolean
-        default: true
+        default: false
       bun-version:
         description: "Bun version (when setup-bun=true)."
         required: false
@@ -713,8 +713,6 @@ jobs:
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.repository }}
           VERSION: ${{ needs.preflight.outputs.version }}
-          MAJOR_MINOR: ""
-          MAJOR: ""
           IMAGE_REF: ${{ needs.container.outputs.image-ref }}
           CONTAINER: ${{ inputs.container }}
           SIGN: ${{ inputs.sign-artifacts }}
