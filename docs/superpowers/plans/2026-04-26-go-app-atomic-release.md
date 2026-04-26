@@ -62,7 +62,7 @@ on:
   workflow_call:
     inputs:
       app-name:
-        description: "Application binary + container image name. Pass ${{ github.event.repository.name }}."
+        description: "Application binary + container image name (e.g. ldap-manager). Caller typically passes github.event.repository.name."
         required: true
         type: string
       tag:
@@ -180,25 +180,10 @@ on:
         required: false
         type: boolean
         default: true
-    outputs:
-      tag:
-        description: "Resolved release tag (e.g. v1.4.1)."
-        value: ${{ jobs.preflight.outputs.tag }}
-      version:
-        description: "Tag without v prefix (e.g. 1.4.1)."
-        value: ${{ jobs.preflight.outputs.version }}
-      release-url:
-        description: "URL of the published GitHub release."
-        value: ${{ jobs.release.outputs.release-url }}
-      image-ref:
-        description: "Container image reference without tag (e.g. ghcr.io/netresearch/ldap-manager). Empty if container=false."
-        value: ${{ jobs.container.outputs.image-ref }}
-      image-digest:
-        description: "Pushed container image digest (sha256:...). Empty if container=false."
-        value: ${{ jobs.container.outputs.image-digest }}
-      is-latest:
-        description: "Whether the release was marked as 'Latest' (true/false)."
-        value: ${{ jobs.preflight.outputs.make-latest }}
+# NOTE: outputs block is deferred to Task 5. actionlint statically resolves
+# the `value: ${{ jobs.<name>.outputs.<x> }}` references and forward-referencing
+# jobs that don't exist yet fails the lint. The full outputs block lands in
+# Task 5 alongside the release job.
 
 # CALLER REQUIREMENTS
 # ===================
@@ -810,14 +795,38 @@ upload."
 
 ---
 
-## Task 5: Add `release` job (atomic publish)
+## Task 5: Add `release` job (atomic publish) + workflow outputs
 
 **Files:**
 - Modify: `.github/workflows/release-go-app.yml`
 
 The atomic publish. Downloads ALL binary+SBOM artifacts, per-asset cosign signing, checksums generation + signing + attestation, body composition, single `softprops/action-gh-release@v3` call.
 
-- [ ] **Step 1: Append the `release` job**
+This task ALSO inserts the workflow-level `outputs:` block (deferred from Task 1) into the `workflow_call:` section between `inputs:` and `# CALLER REQUIREMENTS`. The block is:
+
+```yaml
+    outputs:
+      tag:
+        description: "Resolved release tag (e.g. v1.4.1)."
+        value: ${{ jobs.preflight.outputs.tag }}
+      version:
+        description: "Tag without v prefix (e.g. 1.4.1)."
+        value: ${{ jobs.preflight.outputs.version }}
+      release-url:
+        description: "URL of the published GitHub release."
+        value: ${{ jobs.release.outputs.release-url }}
+      image-ref:
+        description: "Container image reference without tag (e.g. ghcr.io/netresearch/ldap-manager). Empty if container=false."
+        value: ${{ jobs.container.outputs.image-ref }}
+      image-digest:
+        description: "Pushed container image digest (sha256:...). Empty if container=false."
+        value: ${{ jobs.container.outputs.image-digest }}
+      is-latest:
+        description: "Whether the release was marked as 'Latest' (true/false)."
+        value: ${{ jobs.preflight.outputs.make-latest }}
+```
+
+- [ ] **Step 1: Append the `release` job AND insert the deferred outputs block**
 
 ```yaml
   release:
