@@ -1,4 +1,13 @@
-name: Finalize Release (checksums + cosign + verification notes)
+name: Finalize Release (DEPRECATED -- use release-go-app.yml)
+
+# DEPRECATED -- 2026-04-26
+# ========================
+# Counterpart to the deprecated create-release.yml. The new
+# release-go-app.yml orchestrator handles checksums, per-asset signing,
+# and verification notes inline in its atomic publish step.
+#
+# See:
+# docs/superpowers/specs/2026-04-26-release-go-app-orchestrator-design.md
 
 on:
   workflow_call:
@@ -61,6 +70,10 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      - name: Deprecation notice
+        run: |
+          echo "::warning title=Deprecated workflow::finalize-release.yml is deprecated. Migrate to release-go-app.yml -- see docs/superpowers/specs/2026-04-26-release-go-app-orchestrator-design.md"
+
       - name: Harden Runner
         uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
         with:
