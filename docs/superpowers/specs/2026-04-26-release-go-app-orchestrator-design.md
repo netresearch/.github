@@ -84,7 +84,7 @@ Add a single new reusable workflow `release-go-app.yml` that owns the entire rel
 | `cgo-enabled` | string | `"0"` | Build flag. |
 | `ldflags` | string | `-s -w` | Linker flags (orchestrator appends `-X main.version=<tag> -X main.build=<sha>`). |
 | `auto-build-timestamp` | boolean | `true` | Append `-X main.buildTime=<HEAD-iso8601>`. |
-| `setup-bun` | boolean | `true` | Install Bun for asset embedding. |
+| `setup-bun` | boolean | `false` | Install Bun for asset embedding. Template caller sets `true` for go-app consumers (preserves byte-identical-template policy with ~10s install overhead per matrix runner). |
 | `bun-version` | string | `latest` | |
 | `setup-node` | boolean | `false` | |
 | `node-version` | string | `lts/*` | |

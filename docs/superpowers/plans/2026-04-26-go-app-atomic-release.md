@@ -109,7 +109,7 @@ on:
         description: "Install Bun before pre-build-command. Set true for repos that embed Bun-built assets."
         required: false
         type: boolean
-        default: true
+        default: false
       bun-version:
         description: "Bun version (when setup-bun=true)."
         required: false
