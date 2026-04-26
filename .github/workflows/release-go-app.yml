@@ -783,8 +783,18 @@ jobs:
             echo "$DELIMITER"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Atomic release publish
-        id: publish
+      - name: Create draft release + upload all assets
+        # Two-phase publish (atomic from caller's perspective, two-phase
+        # at API level): create as draft so all assets can upload, then
+        # flip draft -> published in the next step. Required because
+        # GitHub treats published releases as immutable and rejects
+        # asset uploads — especially for prereleases under the newer
+        # "release.published also fires for draft prereleases" behavior
+        # (softprops/action-gh-release surfaces this as: "Cannot upload
+        # asset X to an immutable release. ... keep the release as a
+        # draft with draft: true, then publish it later from that
+        # draft."). Both phases happen inside this single job — no
+        # cross-job state, still atomic from the orchestrator's POV.
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
         with:
           tag_name: ${{ needs.preflight.outputs.tag }}
@@ -792,6 +802,28 @@ jobs:
           body: ${{ steps.body.outputs.body }}
           files: release/*
           fail_on_unmatched_files: true
-          make_latest: ${{ needs.preflight.outputs.make-latest }}
-          prerelease: ${{ needs.preflight.outputs.is-prerelease == 'true' }}
+          draft: true
           generate_release_notes: false
+
+      - name: Publish draft release
+        # Flips draft -> published with the correct latest/prerelease
+        # flags computed by preflight. After this edit, the release is
+        # immutable — but we have nothing left to upload, so that's
+        # fine. The release-url output is captured here (the draft URL
+        # from the previous step would 404 once published).
+        id: publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          REPO: ${{ github.repository }}
+          MAKE_LATEST: ${{ needs.preflight.outputs.make-latest }}
+          IS_PRE: ${{ needs.preflight.outputs.is-prerelease }}
+        run: |
+          set -euo pipefail
+          gh release edit "$TAG" --repo "$REPO" \
+            --draft=false \
+            --latest="$MAKE_LATEST" \
+            --prerelease="$IS_PRE"
+          URL=$(gh release view "$TAG" --repo "$REPO" --json url --jq .url)
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Published: $URL"

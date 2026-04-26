@@ -239,19 +239,37 @@ Steps:
      ghcr.io/<owner>/<app-name>:<major>
      ```
    - **Verify your download** (verification block — see §5)
-8. **Atomic release publish** — `softprops/action-gh-release@v3`:
+8. **Two-phase atomic publish (single job)** — softprops creates as draft + uploads, then `gh release edit` flips draft → published. Atomic from caller's POV (one job owns both phases; partial state is impossible because the publish step only runs if uploads succeeded), two-phase at API level because GitHub treats published releases as immutable and rejects asset uploads. softprops/action-gh-release surfaces this with the explicit hint: *"Cannot upload asset X to an immutable release. ... keep the release as a draft with draft: true, then publish it later from that draft."*
+
    ```yaml
-   - uses: softprops/action-gh-release@v3
+   - name: Create draft release + upload all assets
+     uses: softprops/action-gh-release@v3
      with:
        tag_name: ${{ needs.preflight.outputs.tag }}
        name: ${{ needs.preflight.outputs.tag }}
        body: ${{ steps.body.outputs.body }}
        files: release/*
        fail_on_unmatched_files: true
-       make_latest: ${{ needs.preflight.outputs.make-latest }}
-       prerelease: ${{ needs.preflight.outputs.is-prerelease }}
-       generate_release_notes: false  # we already composed notes
+       draft: true
+       generate_release_notes: false
+
+   - name: Publish draft release
+     id: publish
+     env:
+       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+       TAG: ${{ needs.preflight.outputs.tag }}
+       REPO: ${{ github.repository }}
+       MAKE_LATEST: ${{ needs.preflight.outputs.make-latest }}
+       IS_PRE: ${{ needs.preflight.outputs.is-prerelease }}
+     run: |
+       set -euo pipefail
+       gh release edit "$TAG" --repo "$REPO" \
+         --draft=false --latest="$MAKE_LATEST" --prerelease="$IS_PRE"
+       URL=$(gh release view "$TAG" --repo "$REPO" --json url --jq .url)
+       echo "url=$URL" >> "$GITHUB_OUTPUT"
    ```
+
+   **Why two-phase, not single-call:** The single softprops call works for non-prerelease workflows with modest asset counts (typo3 releaser pattern). It fails for our combination of prereleases + ~30+ assets — softprops uploads files individually, and GitHub flips the release to immutable mid-upload, causing the last asset to fail with HTTP 422. Empirical validation in the v1.4.1-rc1 E2E test on ldap-manager: 33 of 34 assets uploaded before checksums.txt failed; release ended up published with 0 assets (rolled back). Draft mode sidesteps this entirely — drafts aren't immutable, all uploads succeed, then a single edit publishes.
 
 ## 5. Verification block (release body)
 
