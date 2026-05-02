@@ -55,7 +55,7 @@ on:
         type: string
         default: "."
       wait-for-quality-gate:
-        description: "Block CI on the SonarQube quality-gate result. Default false (analysis runs but the job stays green regardless of gate status)."
+        description: "Block CI on the SonarQube quality-gate result. Default false — the quality-gate poll step is skipped entirely; the scan still uploads results to Sonar but the job's exit status does not depend on the gate outcome."
         type: boolean
         default: false
       quality-gate-timeout:
@@ -96,7 +96,10 @@ jobs:
         uses: SonarSource/sonarqube-scan-action@59db25f34e16620e48ab4bb9e4a5dce155cb5432 # v8.0.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          # Default to SonarCloud when the caller does not pass a host override.
+          # An unset secret resolves to "" which would otherwise override the
+          # scanner's own default and break the integration silently.
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL || 'https://sonarcloud.io' }}
         with:
           args: ${{ inputs.args }}
           projectBaseDir: ${{ inputs.project-base-dir }}
@@ -106,6 +109,9 @@ jobs:
         uses: SonarSource/sonarqube-quality-gate-action@cf038b0e0cdecfa9e56c198bbb7d21d751d62c3b # v1.2.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          # Default to SonarCloud when the caller does not pass a host override.
+          # An unset secret resolves to "" which would otherwise override the
+          # scanner's own default and break the integration silently.
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL || 'https://sonarcloud.io' }}
         with:
           pollingTimeoutSec: ${{ inputs.quality-gate-timeout }}
