@@ -1,0 +1,117 @@
+# Reusable "SonarQube" — runs the official SonarSource scanner against the
+# caller's repository. Defaults target SonarQube Cloud (https://sonarcloud.io);
+# override SONAR_HOST_URL to point at a self-hosted SonarQube Server.
+#
+# Per-repo configuration belongs in a `sonar-project.properties` file at the
+# repository root (sonar.projectKey, sonar.organization, sonar.sources, etc.).
+# The reusable workflow stays language-agnostic; only one-off overrides should
+# go through the `args` input.
+#
+# Caller pattern:
+#
+#   name: SonarQube
+#   on:
+#     push:
+#       branches: [main]
+#     pull_request:
+#       types: [opened, synchronize, reopened]
+#   permissions: {}
+#   jobs:
+#     sonarqube:
+#       uses: netresearch/.github/.github/workflows/sonarqube.yml@main
+#       secrets:
+#         SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+#         # SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}  # only for self-hosted
+#       permissions:
+#         contents: read
+#
+# SECURITY: pinned action SHAs, harden-runner, read-only permissions,
+# `persist-credentials: false` on checkout, secrets passed explicitly
+# (never `secrets: inherit`). No untrusted github.event.* input is used in
+# `run:` blocks — all inputs come via `workflow_call` from trusted callers.
+
+name: SonarQube (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: "Runner label."
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Per-job timeout in minutes. Covers scan + optional quality-gate poll."
+        type: number
+        default: 15
+      args:
+        description: >-
+          Extra arguments forwarded to the Sonar Scanner CLI. Prefer
+          `sonar-project.properties` for persistent configuration; use this
+          input only for one-off overrides (e.g. -Dsonar.python.version=3.13).
+        type: string
+        default: ""
+      project-base-dir:
+        description: "Working directory passed to the scanner via projectBaseDir. Use when the scanner runs from a sub-directory of the repository root."
+        type: string
+        default: "."
+      wait-for-quality-gate:
+        description: "Block CI on the SonarQube quality-gate result. Default false — the quality-gate poll step is skipped entirely; the scan still uploads results to Sonar but the job's exit status does not depend on the gate outcome."
+        type: boolean
+        default: false
+      quality-gate-timeout:
+        description: "Polling timeout in seconds for wait-for-quality-gate."
+        type: number
+        default: 300
+    secrets:
+      SONAR_TOKEN:
+        description: "SonarQube/SonarCloud auth token."
+        required: true
+      SONAR_HOST_URL:
+        description: "Override the SonarQube host. Defaults to SonarCloud (https://sonarcloud.io) when unset. Required for self-hosted SonarQube Server."
+        required: false
+
+permissions: {}
+
+jobs:
+  sonarqube:
+    name: SonarQube Scan
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Sonar requires full history for accurate blame / new-code detection.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@59db25f34e16620e48ab4bb9e4a5dce155cb5432 # v8.0.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          # Default to SonarCloud when the caller does not pass a host override.
+          # An unset secret resolves to "" which would otherwise override the
+          # scanner's own default and break the integration silently.
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL || 'https://sonarcloud.io' }}
+        with:
+          args: ${{ inputs.args }}
+          projectBaseDir: ${{ inputs.project-base-dir }}
+
+      - name: Wait for Quality Gate
+        if: ${{ inputs.wait-for-quality-gate }}
+        uses: SonarSource/sonarqube-quality-gate-action@cf038b0e0cdecfa9e56c198bbb7d21d751d62c3b # v1.2.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          # Default to SonarCloud when the caller does not pass a host override.
+          # An unset secret resolves to "" which would otherwise override the
+          # scanner's own default and break the integration silently.
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL || 'https://sonarcloud.io' }}
+        with:
+          pollingTimeoutSec: ${{ inputs.quality-gate-timeout }}
