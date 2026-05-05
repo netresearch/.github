@@ -1,4 +1,4 @@
-name: Gitleaks Secret Scanning
+name: Secret Scanning (betterleaks)
 
 on:
   workflow_call:
@@ -10,7 +10,9 @@ on:
         default: false
     secrets:
       GITLEAKS_LICENSE:
-        description: 'License key for Gitleaks'
+        # Accepted but ignored — kept for backwards compatibility with consumers
+        # that still pass it. betterleaks is fully OSS and needs no license.
+        description: 'Deprecated: no longer used (betterleaks needs no license). Accepted for backwards compatibility.'
         required: false
 
 permissions: {}
@@ -39,9 +41,32 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Run Gitleaks
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+      - name: Install betterleaks
         env:
-          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+          BETTERLEAKS_VERSION: '1.1.2'
+          BETTERLEAKS_SHA256: '648c20617178065072ff1791d383192a62c911d9b4427f0426a8c504a6d9ddad'
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -sSfL -o betterleaks.tar.gz \
+            "https://github.com/betterleaks/betterleaks/releases/download/v${BETTERLEAKS_VERSION}/betterleaks_${BETTERLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${BETTERLEAKS_SHA256}  betterleaks.tar.gz" | sha256sum -c -
+          tar -xzf betterleaks.tar.gz betterleaks
+          sudo install -m 0755 betterleaks /usr/local/bin/betterleaks
+          betterleaks version
+
+      - name: Run betterleaks
+        run: |
+          betterleaks git \
+            --redact \
+            --report-format sarif \
+            --report-path betterleaks.sarif \
+            --exit-code 2 \
+            "$GITHUB_WORKSPACE"
+
+      - name: Upload SARIF to code scanning
+        if: always() && hashFiles('betterleaks.sarif') != ''
+        uses: github/codeql-action/upload-sarif@e46ed2cbd01164d986452f91f178727624ae40d7 # v4.35.3
+        with:
+          sarif_file: betterleaks.sarif
+          category: betterleaks
