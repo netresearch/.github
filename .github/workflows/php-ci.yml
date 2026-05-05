@@ -37,7 +37,7 @@
 #         phpunit-cmd: "composer ci:tests:unit"
 #         run-cs-fixer: true
 #         cs-fixer-cmd: "composer ci:cgl"
-#         upload-coverage: true
+#         upload-coverage-codecov: true
 #         coverage-php-version: "8.3"
 #       secrets:
 #         CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
@@ -51,6 +51,49 @@
 #         php-versions: '["8.2","8.3","8.4"]'
 #         pre-install-cmd: 'composer require typo3/cms-core:"^13.4" --no-update --no-progress'
 #         extensions: "mbstring, intl, pdo_sqlite"
+#
+# Caller pattern (chained with SonarQube/SonarCloud — Clover coverage):
+#
+#   The org-standard `netresearch/.github/.github/workflows/sonarqube.yml`
+#   reusable is intentionally language-agnostic: it runs the scanner in a
+#   separate job that does its own checkout and never downloads sibling
+#   artifacts. That means a sibling `php-ci` job's coverage cannot reach
+#   the reusable scanner directly. Two patterns exist:
+#
+#   (A) Recommended — call this reusable to produce + upload a Clover
+#       artifact, then run a custom Sonar job that consumes the artifact:
+#
+#       jobs:
+#         php-ci:
+#           uses: netresearch/.github/.github/workflows/php-ci.yml@main
+#           with:
+#             php-versions: '["8.3"]'
+#             coverage: "xdebug"
+#             coverage-format: "clover"
+#             phpunit-cmd: "vendor/bin/phpunit --coverage-clover=coverage.xml"
+#             upload-coverage-artifact: true
+#         sonarqube:
+#           needs: php-ci
+#           runs-on: ubuntu-latest
+#           permissions: { contents: read }
+#           steps:
+#             - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+#               with: { fetch-depth: 0, persist-credentials: false }
+#             - uses: actions/download-artifact@<pinned-sha>
+#               with: { name: php-coverage-clover, path: . }
+#             - uses: SonarSource/sonarqube-scan-action@<pinned-sha>
+#               env:
+#                 SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+#                 SONAR_HOST_URL: 'https://sonarcloud.io'
+#       # In sonar-project.properties, point Sonar at the artifact path:
+#       #   sonar.php.coverage.reportPaths=coverage.xml
+#
+#   (B) Single-job inline (used by t3x-rte_ckeditor_image): when a repo
+#       needs PHP + JS coverage in the same scan, inline a Sonar job that
+#       checks out, runs PHPUnit with coverage, runs vitest with coverage,
+#       and invokes `SonarSource/sonarqube-scan-action` directly. This
+#       reusable is not involved in pattern (B); use it only for the
+#       matrix CI job.
 #
 # SECURITY: pinned action SHAs, harden-runner, read-only permissions,
 # `persist-credentials: false` on checkout, secrets passed explicitly
@@ -169,21 +212,51 @@ on:
         type: boolean
         default: false
 
-      # Codecov upload (single PHP version, gated to avoid double-uploads)
-      upload-coverage:
+      # Coverage handling — both Codecov and artifact upload are supported
+      # and can run together. Coverage steps run only on the matrix entry
+      # whose `matrix.php` equals `coverage-php-version`, to avoid
+      # duplicate uploads when `php-versions` has multiple entries.
+      coverage-format:
         description: >-
-          Upload coverage to Codecov. Requires `coverage` != 'none' and a
-          phpunit-cmd that writes a Clover report to `coverage.xml`.
-          Only runs on the `coverage-php-version` matrix entry to avoid
-          duplicate uploads.
+          Hint about the coverage report format (`clover`, `cobertura`,
+          `crap4j`, or empty). Affects only the artifact name (so
+          downstream jobs can predict which file to expect) and is
+          documented for callers; PHPUnit's flag still has to be passed
+          via `phpunit-cmd` (e.g. `--coverage-clover=coverage.xml`).
+          Default empty leaves the artifact name format-agnostic.
+        type: string
+        default: ""
+      upload-coverage-codecov:
+        description: >-
+          Upload coverage to Codecov. Requires `coverage` != 'none' and
+          a phpunit-cmd that writes a Clover report to `coverage-file`.
+          Only runs on the `coverage-php-version` matrix entry.
         type: boolean
         default: false
+      upload-coverage-artifact:
+        description: >-
+          Upload the coverage report as a workflow artifact named
+          `coverage-artifact-name`. Use this to chain with a downstream
+          SonarQube/SonarCloud job that consumes the artifact via
+          `actions/download-artifact` (see the chained-with-Sonar caller
+          pattern in this file's header). Only runs on the
+          `coverage-php-version` matrix entry.
+        type: boolean
+        default: false
+      coverage-artifact-name:
+        description: "Artifact name used when `upload-coverage-artifact` is true."
+        type: string
+        default: "php-coverage"
+      coverage-artifact-retention-days:
+        description: "Retention for the coverage artifact (1-90)."
+        type: number
+        default: 7
       coverage-php-version:
         description: "PHP version that uploads coverage (must be present in `php-versions`)."
         type: string
         default: "8.3"
       coverage-file:
-        description: "Path to the coverage report that gets uploaded."
+        description: "Path (relative to `working-directory`) to the coverage report that gets uploaded to Codecov and/or as an artifact."
         type: string
         default: "./coverage.xml"
       coverage-flags:
@@ -288,11 +361,24 @@ jobs:
           PHPUNIT_CMD: ${{ inputs.phpunit-cmd }}
         run: bash -c "$PHPUNIT_CMD"
 
+      - name: Upload coverage artifact
+        # Stable artifact name lets a downstream SonarQube job consume the
+        # report via actions/download-artifact. Gate on the configured
+        # coverage PHP version to avoid colliding artifact names across
+        # matrix entries.
+        if: ${{ inputs.upload-coverage-artifact && matrix.php == inputs.coverage-php-version && inputs.coverage != 'none' }}
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: ${{ inputs.coverage-artifact-name }}
+          path: ${{ inputs.working-directory }}/${{ inputs.coverage-file }}
+          if-no-files-found: error
+          retention-days: ${{ inputs.coverage-artifact-retention-days }}
+
       - name: Upload coverage to Codecov
         # Gate on the configured coverage PHP version so we don't double-upload
         # from every matrix entry. Coverage driver must be enabled and the
         # phpunit-cmd must have produced the coverage file.
-        if: ${{ inputs.upload-coverage && matrix.php == inputs.coverage-php-version && inputs.coverage != 'none' }}
+        if: ${{ inputs.upload-coverage-codecov && matrix.php == inputs.coverage-php-version && inputs.coverage != 'none' }}
         uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
