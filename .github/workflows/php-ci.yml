@@ -128,10 +128,15 @@ on:
         description: "Comma-separated PHP extensions for shivammathur/setup-php."
         type: string
         default: "mbstring, intl, json"
-      tools:
-        description: "Comma-separated tools for shivammathur/setup-php (e.g. 'composer:v2', 'composer:v2, php-cs-fixer')."
+      extra-tools:
+        description: >-
+          Additional tools (comma-separated) for shivammathur/setup-php,
+          appended to the always-installed `composer:v2`
+          (e.g. `php-cs-fixer, phpstan`). The reusable always installs
+          Composer because every later step (validate, cache lookup,
+          install, audit) depends on it; callers cannot opt out.
         type: string
-        default: "composer:v2"
+        default: ""
       ini-values:
         description: "php.ini overrides for shivammathur/setup-php (e.g. 'memory_limit=-1')."
         type: string
@@ -147,7 +152,13 @@ on:
         default: "."
 
       composer-args:
-        description: "Arguments forwarded to `composer install`."
+        description: >-
+          Arguments forwarded to `composer install`. Word-split on
+          whitespace into argv; shell metacharacters
+          (`;`, `&&`, `|`, `` ` ``, `$(...)`, newlines) are NOT
+          interpreted — they end up as literal argv entries that Composer
+          will reject. Use `pre-install-cmd` if you need to run a shell
+          command before install.
         type: string
         default: "--prefer-dist --no-progress --no-interaction"
       composer-validate:
@@ -265,7 +276,7 @@ on:
         default: "unittests"
     secrets:
       CODECOV_TOKEN:
-        description: "Codecov upload token. Required for private repositories when `upload-coverage` is true."
+        description: "Codecov upload token. Required for private repositories when `upload-coverage-codecov` is true."
         required: false
 
 permissions: {}
@@ -273,7 +284,23 @@ permissions: {}
 jobs:
   php-ci:
     name: PHP ${{ matrix.php }}
-    if: ${{ inputs.run-phpstan || inputs.run-phpunit || inputs.run-cs-fixer || inputs.run-rector || inputs.run-composer-audit }}
+    # Skip the job only when every feature is off. `composer-validate`,
+    # `pre-install-cmd`, `upload-coverage-codecov`, and
+    # `upload-coverage-artifact` are intentionally part of the gate so a
+    # caller that only wants e.g. composer-validate (with all check
+    # toggles off) still gets a job that runs.
+    if: >-
+      ${{
+        inputs.run-phpstan ||
+        inputs.run-phpunit ||
+        inputs.run-cs-fixer ||
+        inputs.run-rector ||
+        inputs.run-composer-audit ||
+        inputs.composer-validate ||
+        inputs.pre-install-cmd != '' ||
+        inputs.upload-coverage-codecov ||
+        inputs.upload-coverage-artifact
+      }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
@@ -301,7 +328,10 @@ jobs:
         with:
           php-version: ${{ matrix.php }}
           extensions: ${{ inputs.extensions }}
-          tools: ${{ inputs.tools }}
+          # Always-on `composer:v2` (later steps depend on it); callers
+          # add to the list via `extra-tools`. setup-php tolerates the
+          # trailing comma when `extra-tools` is empty.
+          tools: composer:v2, ${{ inputs.extra-tools }}
           ini-values: ${{ inputs.ini-values }}
           coverage: ${{ inputs.coverage }}
 
@@ -331,7 +361,13 @@ jobs:
       - name: Install dependencies
         env:
           COMPOSER_ARGS: ${{ inputs.composer-args }}
-        run: bash -c "composer install $COMPOSER_ARGS"
+        # Word-split COMPOSER_ARGS into argv via `read -ra` so any shell
+        # metacharacters (`;`, `&&`, backticks, `$()`) end up as literal
+        # argv entries Composer rejects, instead of being interpreted by
+        # the shell. Avoids the injection foot-gun of `bash -c "... $VAR"`.
+        run: |
+          read -ra COMPOSER_INSTALL_ARGS <<< "$COMPOSER_ARGS"
+          composer install "${COMPOSER_INSTALL_ARGS[@]}"
 
       - name: Composer audit
         if: ${{ inputs.run-composer-audit }}
