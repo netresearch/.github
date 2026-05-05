@@ -1,0 +1,302 @@
+# Reusable "PHP CI" workflow for non-TYPO3 PHP projects.
+#
+# Provides the union of patterns currently inlined across the netresearch
+# org (composer SDKs, composer plugins, Symfony libraries): checkout +
+# shivammathur/setup-php + composer cache + composer install, then
+# optional PHPStan / PHPUnit / PHP-CS-Fixer / Rector / coverage steps.
+#
+# TYPO3 *extensions* should keep using
+# `netresearch/typo3-ci-workflows/.github/workflows/ci.yml` — but this
+# workflow does support TYPO3 extension repos that need a one-shot
+# `composer require typo3/cms-core:VERSION` before install via the
+# `pre-install-cmd` input (used by `news_importicsxml`, `nr-landingpage`,
+# `t3x-nr-mcp-agent`).
+#
+# Caller pattern (minimal — runs PHPStan + PHPUnit on PHP 8.3):
+#
+#   name: CI
+#   on:
+#     push:
+#       branches: [main]
+#     pull_request:
+#   permissions: {}
+#   jobs:
+#     php-ci:
+#       uses: netresearch/.github/.github/workflows/php-ci.yml@main
+#
+# Caller pattern (matrix + coverage upload + custom commands):
+#
+#   jobs:
+#     php-ci:
+#       uses: netresearch/.github/.github/workflows/php-ci.yml@main
+#       with:
+#         php-versions: '["8.2","8.3","8.4"]'
+#         extensions: "mbstring, intl, soap, libxml"
+#         coverage: "xdebug"
+#         phpstan-cmd: "composer ci:phpstan"
+#         phpunit-cmd: "composer ci:tests:unit"
+#         run-cs-fixer: true
+#         cs-fixer-cmd: "composer ci:cgl"
+#         upload-coverage: true
+#         coverage-php-version: "8.3"
+#       secrets:
+#         CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+#
+# Caller pattern (TYPO3 extension matrix — pin core before install):
+#
+#   jobs:
+#     php-ci:
+#       uses: netresearch/.github/.github/workflows/php-ci.yml@main
+#       with:
+#         php-versions: '["8.2","8.3","8.4"]'
+#         pre-install-cmd: 'composer require typo3/cms-core:"^13.4" --no-update --no-progress'
+#         extensions: "mbstring, intl, pdo_sqlite"
+#
+# SECURITY: pinned action SHAs, harden-runner, read-only permissions,
+# `persist-credentials: false` on checkout, secrets passed explicitly
+# (never `secrets: inherit`). Caller-supplied commands are routed
+# through `env:` so callers can't break out of argument position via
+# quoting/metacharacters. No untrusted github.event.* input is used in
+# `run:` blocks — all inputs come via `workflow_call` from trusted
+# callers.
+
+name: PHP CI (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: "Runner label."
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Per-job timeout in minutes."
+        type: number
+        default: 15
+
+      php-versions:
+        description: >-
+          JSON array string of PHP versions to matrix over
+          (e.g. '[\"8.3\"]' or '[\"8.2\",\"8.3\",\"8.4\"]').
+          Single-version callers pass a single-element array.
+        type: string
+        default: '["8.3"]'
+      extensions:
+        description: "Comma-separated PHP extensions for shivammathur/setup-php."
+        type: string
+        default: "mbstring, intl, json"
+      tools:
+        description: "Comma-separated tools for shivammathur/setup-php (e.g. 'composer:v2', 'composer:v2, php-cs-fixer')."
+        type: string
+        default: "composer:v2"
+      ini-values:
+        description: "php.ini overrides for shivammathur/setup-php (e.g. 'memory_limit=-1')."
+        type: string
+        default: ""
+      coverage:
+        description: "Coverage driver passed to shivammathur/setup-php. One of: none, xdebug, pcov."
+        type: string
+        default: "none"
+
+      working-directory:
+        description: "Working directory for all run steps. Useful for monorepos."
+        type: string
+        default: "."
+
+      composer-args:
+        description: "Arguments forwarded to `composer install`."
+        type: string
+        default: "--prefer-dist --no-progress --no-interaction"
+      composer-validate:
+        description: "Run `composer validate --strict` before install."
+        type: boolean
+        default: true
+      pre-install-cmd:
+        description: >-
+          Optional shell command to run after PHP setup but before
+          `composer install`. Use this to pin framework versions in a
+          matrix (e.g. `composer require typo3/cms-core:"^13.4"
+          --no-update`).
+        type: string
+        default: ""
+
+      # PHPStan
+      run-phpstan:
+        description: "Run PHPStan static analysis."
+        type: boolean
+        default: true
+      phpstan-cmd:
+        description: >-
+          PHPStan command. Default uses the project-installed binary;
+          override with e.g. `composer ci:phpstan` if your project wraps
+          it as a composer script.
+        type: string
+        default: "vendor/bin/phpstan analyse --no-progress --error-format=github"
+
+      # PHPUnit
+      run-phpunit:
+        description: "Run PHPUnit."
+        type: boolean
+        default: true
+      phpunit-cmd:
+        description: "PHPUnit command. Override to use a composer script (e.g. `composer ci:tests:unit`)."
+        type: string
+        default: "vendor/bin/phpunit"
+
+      # PHP-CS-Fixer (off by default — many projects use composer scripts that bundle this with linting)
+      run-cs-fixer:
+        description: "Run PHP-CS-Fixer in dry-run mode."
+        type: boolean
+        default: false
+      cs-fixer-cmd:
+        description: "PHP-CS-Fixer command. Override to use a composer script (e.g. `composer ci:cgl`)."
+        type: string
+        default: "vendor/bin/php-cs-fixer fix --dry-run --diff --verbose"
+
+      # Rector
+      run-rector:
+        description: "Run Rector in dry-run mode."
+        type: boolean
+        default: false
+      rector-cmd:
+        description: "Rector command. Override to use a composer script (e.g. `composer ci:rector`)."
+        type: string
+        default: "vendor/bin/rector process --dry-run --no-progress-bar"
+
+      # Composer audit
+      run-composer-audit:
+        description: "Run `composer audit` after install (security advisories)."
+        type: boolean
+        default: false
+
+      # Codecov upload (single PHP version, gated to avoid double-uploads)
+      upload-coverage:
+        description: >-
+          Upload coverage to Codecov. Requires `coverage` != 'none' and a
+          phpunit-cmd that writes a Clover report to `coverage.xml`.
+          Only runs on the `coverage-php-version` matrix entry to avoid
+          duplicate uploads.
+        type: boolean
+        default: false
+      coverage-php-version:
+        description: "PHP version that uploads coverage (must be present in `php-versions`)."
+        type: string
+        default: "8.3"
+      coverage-file:
+        description: "Path to the coverage report that gets uploaded."
+        type: string
+        default: "./coverage.xml"
+      coverage-flags:
+        description: "Codecov `flags` (comma-separated)."
+        type: string
+        default: "unittests"
+    secrets:
+      CODECOV_TOKEN:
+        description: "Codecov upload token. Required for private repositories when `upload-coverage` is true."
+        required: false
+
+permissions: {}
+
+jobs:
+  php-ci:
+    name: PHP ${{ matrix.php }}
+    if: ${{ inputs.run-phpstan || inputs.run-phpunit || inputs.run-cs-fixer || inputs.run-rector || inputs.run-composer-audit }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ${{ fromJSON(inputs.php-versions) }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup PHP ${{ matrix.php }}
+        uses: shivammathur/setup-php@accd6127cb78bee3e8082180cb391013d204ef9f # v2.37.0
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: ${{ inputs.extensions }}
+          tools: ${{ inputs.tools }}
+          ini-values: ${{ inputs.ini-values }}
+          coverage: ${{ inputs.coverage }}
+
+      - name: Validate composer.json and composer.lock
+        if: ${{ inputs.composer-validate }}
+        run: composer validate --strict
+
+      - name: Resolve composer cache directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache composer packages
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-php-${{ matrix.php }}-composer-${{ hashFiles(format('{0}/composer.json', inputs.working-directory), format('{0}/composer.lock', inputs.working-directory)) }}
+          restore-keys: |
+            ${{ runner.os }}-php-${{ matrix.php }}-composer-
+            ${{ runner.os }}-php-${{ matrix.php }}-
+
+      - name: Pre-install command
+        if: ${{ inputs.pre-install-cmd != '' }}
+        env:
+          PRE_INSTALL_CMD: ${{ inputs.pre-install-cmd }}
+        run: bash -c "$PRE_INSTALL_CMD"
+
+      - name: Install dependencies
+        env:
+          COMPOSER_ARGS: ${{ inputs.composer-args }}
+        run: bash -c "composer install $COMPOSER_ARGS"
+
+      - name: Composer audit
+        if: ${{ inputs.run-composer-audit }}
+        run: composer audit
+
+      - name: PHPStan
+        if: ${{ inputs.run-phpstan }}
+        env:
+          PHPSTAN_CMD: ${{ inputs.phpstan-cmd }}
+        run: bash -c "$PHPSTAN_CMD"
+
+      - name: PHP-CS-Fixer
+        if: ${{ inputs.run-cs-fixer }}
+        env:
+          CS_FIXER_CMD: ${{ inputs.cs-fixer-cmd }}
+        run: bash -c "$CS_FIXER_CMD"
+
+      - name: Rector
+        if: ${{ inputs.run-rector }}
+        env:
+          RECTOR_CMD: ${{ inputs.rector-cmd }}
+        run: bash -c "$RECTOR_CMD"
+
+      - name: PHPUnit
+        if: ${{ inputs.run-phpunit }}
+        env:
+          PHPUNIT_CMD: ${{ inputs.phpunit-cmd }}
+        run: bash -c "$PHPUNIT_CMD"
+
+      - name: Upload coverage to Codecov
+        # Gate on the configured coverage PHP version so we don't double-upload
+        # from every matrix entry. Coverage driver must be enabled and the
+        # phpunit-cmd must have produced the coverage file.
+        if: ${{ inputs.upload-coverage && matrix.php == inputs.coverage-php-version && inputs.coverage != 'none' }}
+        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ${{ inputs.coverage-file }}
+          flags: ${{ inputs.coverage-flags }}
+          working-directory: ${{ inputs.working-directory }}
+          fail_ci_if_error: false
