@@ -453,7 +453,12 @@ jobs:
           args: "-no-fail -fmt sarif -out gosec-results.sarif ./..."
 
       - name: Upload gosec SARIF
-        if: always() && hashFiles('gosec-results.sarif') != ''
+        # Skip on merge_group: the gh-readonly-queue/<branch>/pr-NNN-<sha> ref is
+        # deleted by GitHub as soon as the merge completes, which races with
+        # codeql-action/upload-sarif and causes a guaranteed `ref ... not found`
+        # failure on every successful merge. Push and pull_request events
+        # re-run the same scan with a stable ref, so coverage is not lost.
+        if: always() && github.event_name != 'merge_group' && hashFiles('gosec-results.sarif') != ''
         uses: github/codeql-action/upload-sarif@e46ed2cbd01164d986452f91f178727624ae40d7 # v4.35.3
         with:
           sarif_file: gosec-results.sarif
