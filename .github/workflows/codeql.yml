@@ -31,6 +31,16 @@ on:
           comma-separated list (e.g. `go,javascript-typescript`).
         type: string
         default: actions
+      pre-build-cmd:
+        description: >-
+          Optional shell snippet executed after CodeQL init and before
+          `analyze` runs the autobuilder/extractor. Use for
+          code-generation steps whose outputs must exist for compiled
+          languages to extract cleanly — e.g. `templ generate`,
+          protobuf, OpenAPI clients. Runs under `bash -euo pipefail`.
+          Go is on PATH at this point because CodeQL init installs it.
+        type: string
+        default: ''
 
 permissions: {}
 
@@ -114,6 +124,12 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           queries: security-and-quality
+
+      - name: Run pre-build command
+        if: ${{ inputs.pre-build-cmd != '' }}
+        env:
+          PRE_BUILD_CMD: ${{ inputs.pre-build-cmd }}
+        run: bash -euo pipefail -c "$PRE_BUILD_CMD"
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@e46ed2cbd01164d986452f91f178727624ae40d7 # v4.35.3
