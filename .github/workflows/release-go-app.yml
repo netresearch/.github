@@ -603,7 +603,11 @@ jobs:
           scanners: vuln,config,secret
 
       - name: Upload Trivy SARIF
-        if: hashFiles('trivy-results.sarif') != ''
+        # Skip on merge_group: the gh-readonly-queue ref is deleted by GitHub
+        # the moment the merge completes, racing with codeql-action/upload-sarif
+        # and producing a guaranteed `ref ... not found` failure. Release/push
+        # events run with stable refs.
+        if: github.event_name != 'merge_group' && hashFiles('trivy-results.sarif') != ''
         uses: github/codeql-action/upload-sarif@e46ed2cbd01164d986452f91f178727624ae40d7 # v4.35.3
         with:
           sarif_file: trivy-results.sarif
