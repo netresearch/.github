@@ -31,14 +31,25 @@ on:
           comma-separated list (e.g. `go,javascript-typescript`).
         type: string
         default: actions
-      pre-build-cmd:
+      pre-build-cmd-go:
         description: >-
-          Optional shell snippet executed after CodeQL init and before
-          `analyze` runs the autobuilder/extractor. Use for
-          code-generation steps whose outputs must exist for compiled
-          languages to extract cleanly — e.g. `templ generate`,
-          protobuf, OpenAPI clients. Runs under `bash -euo pipefail`.
-          Go is on PATH at this point because CodeQL init installs it.
+          Optional shell snippet executed for the Go matrix entry only,
+          after CodeQL init and before `analyze` runs the autobuilder.
+          Use for code-generation steps whose outputs must exist for the
+          Go extractor — e.g. `templ generate`, protobuf, OpenAPI
+          clients. Runs under `bash -euo pipefail`. Go is on PATH here
+          because CodeQL init installed it for this matrix entry.
+        type: string
+        default: ''
+      pre-build-cmd-javascript-typescript:
+        description: >-
+          Optional shell snippet executed for the JS/TS matrix entry
+          only, after CodeQL init and before `analyze`. Use for steps
+          like `bun install && bun run codegen` whose outputs must exist
+          for the JS/TS extractor. Runs under `bash -euo pipefail`.
+          Node.js / Bun are NOT installed automatically — add an
+          `actions/setup-node` step in the snippet if you need them, or
+          fork this workflow.
         type: string
         default: ''
 
@@ -125,10 +136,16 @@ jobs:
           languages: ${{ matrix.language }}
           queries: security-and-quality
 
-      - name: Run pre-build command
-        if: ${{ inputs.pre-build-cmd != '' }}
+      - name: Run Go pre-build command
+        if: ${{ matrix.language == 'go' && inputs.pre-build-cmd-go != '' }}
         env:
-          PRE_BUILD_CMD: ${{ inputs.pre-build-cmd }}
+          PRE_BUILD_CMD: ${{ inputs.pre-build-cmd-go }}
+        run: bash -euo pipefail -c "$PRE_BUILD_CMD"
+
+      - name: Run JS/TS pre-build command
+        if: ${{ matrix.language == 'javascript-typescript' && inputs.pre-build-cmd-javascript-typescript != '' }}
+        env:
+          PRE_BUILD_CMD: ${{ inputs.pre-build-cmd-javascript-typescript }}
         run: bash -euo pipefail -c "$PRE_BUILD_CMD"
 
       - name: Perform CodeQL Analysis
