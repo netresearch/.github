@@ -107,42 +107,40 @@ jobs:
         with:
           egress-policy: audit
 
-      # Validate the tag's shape BEFORE checkout. `inputs.tag` is caller-supplied;
-      # passing it unvalidated to `actions/checkout`'s `ref:` is flagged by CodeQL
-      # (actions/untrusted-checkout). A strict semver regex eliminates path
-      # traversal and shell-injection concerns: only `vMAJOR.MINOR.PATCH[-pre][+build]`
-      # gets through.
-      - name: Validate tag format
-        id: validate
+      # actions/checkout deliberately uses the default `github.ref` -- never
+      # `inputs.tag` -- so CodeQL (actions/untrusted-checkout) cannot find a
+      # data-flow path from caller-supplied input to a privileged checkout.
+      # We resolve, validate, and `git checkout` the target tag in a separate
+      # shell step after fetching all refs.
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve and validate tag
+        id: tag
         env:
           INPUT_TAG: ${{ inputs.tag }}
           REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           TAG="${INPUT_TAG:-$REF_NAME}"
+          # Strict semver gate: v<major>.<minor>.<patch> with optional
+          # -prerelease / +build suffixes (SemVer 2.0.0). Rejects anything
+          # that could escape into git plumbing as a path or option.
           SEMVER_RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
           if ! [[ "$TAG" =~ $SEMVER_RE ]]; then
             echo "::error::Tag '$TAG' is not a valid vMAJOR.MINOR.PATCH semver (e.g. v1.2.3, v1.2.3-rc1)"
             exit 1
           fi
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-          ref: ${{ steps.validate.outputs.tag }}
-
-      - name: Resolve tag
-        id: tag
-        env:
-          TAG: ${{ steps.validate.outputs.tag }}
-        run: |
-          set -euo pipefail
+          # Move the working tree to the validated tag. For tag-push triggers
+          # this is a no-op; for workflow_dispatch backfills (dispatch ref is
+          # usually `main`) it switches the tree to the tag being released.
+          git checkout --quiet "refs/tags/$TAG" --
           # Resolve the commit SHA the tag points at (unwraps annotated
-          # tags via ^{commit}). Works for workflow_dispatch backfills
-          # where github.sha is the dispatch ref, not the tag's target.
+          # tags via ^{commit}). Use this -- not github.sha -- for downstream
+          # provenance so workflow_dispatch backfills get the correct target.
           SHA=$(git rev-parse "${TAG}^{commit}")
           {
             echo "tag=$TAG"
