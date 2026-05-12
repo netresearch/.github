@@ -1,0 +1,240 @@
+name: Release (Composer package)
+
+# Atomic-release reusable workflow for Composer packages (plugins, libraries,
+# framework modules) distributed via Packagist. The package itself is published
+# by Packagist via webhook on tag push; this workflow only creates the GitHub
+# Release entry with auto-generated notes.
+#
+# Trigger model: signed-tag-push only (caller wires `on: push: tags: ['v*']`).
+#
+# Immutability-friendly: creates the release in a single softprops/action-gh-release@v3
+# call with no post-creation edits, matching the pattern in release-go-app.yml and
+# typo3-ci-workflows/release-typo3-extension.yml. There are no assets to upload
+# for a Composer package, so the deprecated create-release.yml split (create +
+# finalize) does not apply here.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.3.0). Defaults to github.ref_name."
+        required: false
+        type: string
+        default: ""
+      require-annotated-tag:
+        description: "Reject lightweight tags (require annotated or signed)."
+        required: false
+        type: boolean
+        default: true
+      prerelease:
+        description: "Prerelease override: 'auto' (detect -rc/-alpha/-beta/-pre suffix), 'true', or 'false'."
+        required: false
+        type: string
+        default: "auto"
+      make-latest:
+        description: "make_latest override: 'auto' (compute from semver vs existing releases), 'true', or 'false'."
+        required: false
+        type: string
+        default: "auto"
+      draft:
+        description: "Create as draft. Defaults to false (auto-publish)."
+        required: false
+        type: boolean
+        default: false
+      composer-validate:
+        description: "Run `composer validate --strict` before publishing the release. Catches malformed composer.json before Packagist sees it."
+        required: false
+        type: boolean
+        default: true
+      php-version:
+        description: "PHP version used for `composer validate` (only when composer-validate is true)."
+        required: false
+        type: string
+        default: "8.4"
+    outputs:
+      tag:
+        description: "Resolved tag name (e.g. v1.3.0)."
+        value: ${{ jobs.release.outputs.tag }}
+      version:
+        description: "Version without leading v (e.g. 1.3.0)."
+        value: ${{ jobs.release.outputs.version }}
+      release-url:
+        description: "URL of the created release."
+        value: ${{ jobs.release.outputs.release-url }}
+      sha:
+        description: "The commit SHA the tag points at (unwrapped via tag^{commit})."
+        value: ${{ jobs.release.outputs.sha }}
+      is-latest:
+        description: "Whether this release was marked as latest (true/false)."
+        value: ${{ jobs.release.outputs.is-latest }}
+      is-prerelease:
+        description: "Whether this release was marked as prerelease (true/false)."
+        value: ${{ jobs.release.outputs.is-prerelease }}
+
+# CALLER REQUIREMENTS
+# ===================
+# The caller's job-level `permissions:` block MUST grant at least:
+#
+#   jobs:
+#     release:
+#       uses: netresearch/.github/.github/workflows/release-composer-package.yml@main
+#       permissions:
+#         contents: write   # create the GitHub Release
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+      sha: ${{ steps.tag.outputs.sha }}
+      release-url: ${{ steps.create.outputs.url }}
+      is-latest: ${{ steps.flags.outputs.make_latest }}
+      is-prerelease: ${{ steps.flags.outputs.is_prerelease }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450 # v2.19.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Resolve tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          TAG="${INPUT_TAG:-$REF_NAME}"
+          # Strict semver: v<major>.<minor>.<patch> with optional
+          # -prerelease / +build suffixes (SemVer 2.0.0).
+          SEMVER_RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+          if ! [[ "$TAG" =~ $SEMVER_RE ]]; then
+            echo "::error::Tag '$TAG' is not a valid vMAJOR.MINOR.PATCH semver (e.g. v1.2.3, v1.2.3-rc1)"
+            exit 1
+          fi
+          # Resolve the commit SHA the tag points at (unwraps annotated
+          # tags via ^{commit}). Works for workflow_dispatch backfills
+          # where github.sha is the dispatch ref, not the tag's target.
+          SHA=$(git rev-parse "${TAG}^{commit}")
+          {
+            echo "tag=$TAG"
+            echo "version=${TAG#v}"
+            echo "sha=$SHA"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verify annotated tag
+        if: inputs.require-annotated-tag
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG_TYPE=$(git cat-file -t "$TAG")
+          if [ "$TAG_TYPE" != "tag" ]; then
+            echo "::error::Tag $TAG is lightweight (type: $TAG_TYPE). Only annotated/signed tags are allowed."
+            exit 1
+          fi
+          echo "Tag $TAG is annotated (type: $TAG_TYPE)"
+          if git tag -v "$TAG" 2>/dev/null; then
+            echo "Tag signature verified"
+          else
+            echo "::warning::Tag $TAG signature not verifiable (signing key not available in CI -- informational only)"
+          fi
+
+      - name: Set up PHP
+        if: inputs.composer-validate
+        uses: shivammathur/setup-php@accd6127cb78bee3e8082180cb391013d204ef9f # v2.37.0
+        with:
+          php-version: ${{ inputs.php-version }}
+          coverage: none
+          tools: composer:v2
+
+      - name: Validate composer.json
+        if: inputs.composer-validate
+        run: composer validate --strict --no-check-publish
+
+      - name: Compute prerelease and make_latest flags
+        id: flags
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          REPO: ${{ github.repository }}
+          PRERELEASE_INPUT: ${{ inputs.prerelease }}
+          MAKE_LATEST_INPUT: ${{ inputs.make-latest }}
+        run: |
+          set -euo pipefail
+
+          case "$PRERELEASE_INPUT" in
+            true|false)
+              IS_PRE="$PRERELEASE_INPUT"
+              ;;
+            auto)
+              case "$TAG" in
+                *-rc*|*-alpha*|*-beta*|*-pre*) IS_PRE=true ;;
+                *) IS_PRE=false ;;
+              esac
+              ;;
+            *)
+              echo "::error::invalid prerelease input '$PRERELEASE_INPUT' (expected: auto|true|false)"; exit 1 ;;
+          esac
+          echo "is_prerelease=$IS_PRE" >> "$GITHUB_OUTPUT"
+
+          case "$MAKE_LATEST_INPUT" in
+            true|false)
+              MAKE_LATEST="$MAKE_LATEST_INPUT"
+              ;;
+            auto)
+              if [ "$IS_PRE" = "true" ]; then
+                MAKE_LATEST=false
+              else
+                # Fail hard on API error -- silently defaulting to
+                # "no existing releases" could incorrectly stamp an old
+                # tag as latest.
+                ALL_TAGS=$(gh api "repos/$REPO/releases" --paginate --jq '.[] | select(.draft==false and .prerelease==false) | .tag_name')
+                # Filter to semver-shaped tags only; ignore non-semver
+                # release tags (e.g. "nightly", "prod") which would
+                # confuse version comparison.
+                SEMVER_RE_GREP='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+                EXISTING=$(printf '%s\n' "$ALL_TAGS" | grep -E "$SEMVER_RE_GREP" || true)
+                if [ -z "$EXISTING" ]; then
+                  MAKE_LATEST=true
+                else
+                  HIGHEST=$(printf '%s\n%s\n' "$TAG" "$EXISTING" | grep -v '^$' | sort -V -r | head -n1)
+                  if [ "$HIGHEST" = "$TAG" ]; then
+                    MAKE_LATEST=true
+                  else
+                    MAKE_LATEST=false
+                    echo "::notice::Tag $TAG is not the highest semver (highest: $HIGHEST) -- not marking as latest."
+                  fi
+                fi
+              fi
+              ;;
+            *)
+              echo "::error::invalid make-latest input '$MAKE_LATEST_INPUT' (expected: auto|true|false)"; exit 1 ;;
+          esac
+          echo "make_latest=$MAKE_LATEST" >> "$GITHUB_OUTPUT"
+          echo "Resolved: prerelease=$IS_PRE, make_latest=$MAKE_LATEST"
+
+      - name: Create GitHub Release
+        id: create
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          target_commitish: ${{ steps.tag.outputs.sha }}
+          generate_release_notes: true
+          draft: ${{ inputs.draft }}
+          prerelease: ${{ steps.flags.outputs.is_prerelease == 'true' }}
+          make_latest: ${{ steps.flags.outputs.make_latest }}
