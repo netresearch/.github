@@ -125,7 +125,7 @@ on:
         type: boolean
         default: true
       sign-artifacts:
-        description: "Per-asset cosign sign-blob → .bundle file alongside each binary/SBOM."
+        description: "Per-asset cosign sign-blob → .sigstore.json file alongside each binary/SBOM. Extension chosen so OSSF Scorecard's signed-releases probe recognises it; the content is cosign's Sigstore bundle JSON (cert + sig + Rekor inclusion proof)."
         required: false
         type: boolean
         default: true
@@ -674,7 +674,7 @@ jobs:
           files=()
           for f in *; do
             case "$f" in
-              checksums.txt|*.bundle) continue ;;
+              checksums.txt|*.sigstore.json) continue ;;
               *) [[ -f "$f" ]] && files+=("$f") ;;
             esac
           done
@@ -698,8 +698,12 @@ jobs:
           for f in *; do
             [[ -f "$f" ]] || continue
             case "$f" in
-              *.bundle) continue ;;
-              *) cosign sign-blob --yes "$f" --bundle "${f}.bundle" ;;
+              *.sigstore.json) continue ;;
+              # Use .sigstore.json (Sigstore bundle format) so OSSF Scorecard
+              # signed-releases probe recognises the signatures. The bundle
+              # content is identical to cosign's --bundle output; only the
+              # extension differs.
+              *) cosign sign-blob --yes "$f" --bundle "${f}.sigstore.json" ;;
             esac
           done
           ls -lah
@@ -750,7 +754,7 @@ jobs:
               echo ""
               echo '```bash'
               echo "cosign verify-blob \\"
-              echo "  --bundle ${APP}-linux-amd64.bundle \\"
+              echo "  --bundle ${APP}-linux-amd64.sigstore.json \\"
               echo "  --certificate-identity-regexp \"https://github.com/${OWNER}/.*\" \\"
               echo "  --certificate-oidc-issuer \"https://token.actions.githubusercontent.com\" \\"
               echo "  ${APP}-linux-amd64"
@@ -760,7 +764,7 @@ jobs:
               echo ""
               echo '```bash'
               echo "cosign verify-blob \\"
-              echo "  --bundle checksums.txt.bundle \\"
+              echo "  --bundle checksums.txt.sigstore.json \\"
               echo "  --certificate-identity-regexp \"https://github.com/${OWNER}/.*\" \\"
               echo "  --certificate-oidc-issuer \"https://token.actions.githubusercontent.com\" \\"
               echo "  checksums.txt"
