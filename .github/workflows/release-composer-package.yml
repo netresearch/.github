@@ -15,7 +15,6 @@ name: Release (Composer package)
 # stricter than release-go-app.yml, which flips draft and sets flags via a
 # follow-up `gh release edit` to accommodate asset-upload timing -- Composer
 # packages have no assets, so all flags can be set in the initial create call.
-# The deprecated create-release.yml split (create + finalize) does not apply.
 
 on:
   workflow_call:
