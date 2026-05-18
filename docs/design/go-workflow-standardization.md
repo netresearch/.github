@@ -164,13 +164,12 @@ It runs four jobs sequentially:
    the matrix's artifacts (Dockerfile expects pre-built `bin/<app>-linux-*`).
    Cosign keyless sign + attestation. Trivy SARIF upload.
 4. **release** -- downloads all binary+SBOM artifacts, per-asset
-   cosign sign-blob (`.bundle` files), generates+signs+attests
-   `checksums.txt`, composes verification block, creates the
-   release in one `softprops/action-gh-release@v3` call.
-
-Design + rationale: [`docs/superpowers/specs/2026-04-26-release-go-app-orchestrator-design.md`](../superpowers/specs/2026-04-26-release-go-app-orchestrator-design.md)
-Implementation plan: [`docs/superpowers/plans/2026-04-26-go-app-atomic-release.md`](../superpowers/plans/2026-04-26-go-app-atomic-release.md)
+   cosign sign-blob (`.sigstore.json` files -- Sigstore bundle
+   format on OSSF Scorecard's signed-releases allowlist),
+   generates+signs+attests `checksums.txt`, composes verification
+   block, creates the release in one `softprops/action-gh-release@v3`
+   call.
 
 The legacy `create-release.yml` + `finalize-release.yml` reusables
-were deprecated 2026-04-26 and will be removed once consumer
-template-drift PRs have landed.
+were deprecated 2026-04-26 and removed once consumer template-drift
+PRs had landed.

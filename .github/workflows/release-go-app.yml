@@ -5,10 +5,6 @@ name: Release (Go application)
 # softprops/action-gh-release@v3 call with all assets — compatible with
 # GitHub's release-immutability enforcement.
 #
-# Replaces the legacy create-release.yml + finalize-release.yml split, which
-# scattered writes to the release across multiple jobs and broke after
-# immutability was enforced.
-#
 # Mirrors typo3-ci-workflows/release-typo3-extension.yml and
 # skill-repo-skill/release.yml — both already proven immutability-friendly.
 
