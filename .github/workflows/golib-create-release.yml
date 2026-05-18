@@ -176,9 +176,17 @@ jobs:
       - name: Sign checksums with Cosign (keyless)
         if: inputs.cosign-sign
         run: |
+          # Cosign v3+ emits a single self-contained Sigstore bundle (cert +
+          # signature + Rekor inclusion proof) via --bundle. The legacy two-file
+          # output (--output-certificate / --output-signature) is deprecated and
+          # silently ignored when --new-bundle-format is the default.
+          #
+          # Use .sigstore.json extension so OSSF Scorecard's signed-releases
+          # probe recognises the signature (allowlist: .asc, .minisig, .sig,
+          # .sign, .sigstore, .sigstore.json). The bundle content is identical
+          # to cosign's --bundle default output; only the filename differs.
           cosign sign-blob --yes \
-            --output-certificate checksums.txt.pem \
-            --output-signature checksums.txt.sig \
+            --bundle checksums.txt.sigstore.json \
             checksums.txt
 
       - name: Verify Cosign signature
@@ -187,8 +195,7 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           cosign verify-blob \
-            --certificate checksums.txt.pem \
-            --signature checksums.txt.sig \
+            --bundle checksums.txt.sigstore.json \
             --certificate-identity-regexp "https://github.com/${REPO}/*" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             checksums.txt
@@ -218,7 +225,6 @@ jobs:
           files: |
             sbom-*.json
             checksums.txt
-            checksums.txt.sig
-            checksums.txt.pem
+            checksums.txt.sigstore.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
