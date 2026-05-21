@@ -89,6 +89,21 @@ on:
         description: "Upload SARIF to GitHub code-scanning. Disable when callers want raw Trivy text output only."
         type: boolean
         default: true
+      tolerate-pull-failure:
+        description: |
+          When true, the Trivy step is given `continue-on-error: true` —
+          the job stays green even if the image-ref can't be pulled
+          (e.g. `manifest unknown` because a rolling tag was never
+          published, or the image build for that matrix cell was
+          skipped). Workaround for callers fanning out a matrix over
+          tags where some cells point at images that may or may not
+          exist (snipe-it: rolling-variant images that the composer
+          audit blocked during the build phase). Cannot be expressed
+          via job-level `continue-on-error:` on the caller — GitHub
+          forbids that on reusable-caller jobs. Default false: a
+          legitimate pull failure correctly fails the job.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -136,6 +151,10 @@ jobs:
           password: ${{ github.token }}
 
       - name: Run Trivy vulnerability scanner
+        # `continue-on-error` is gated on the input — callers fanning a
+        # matrix over may-not-exist tags (rolling/optional builds) flip
+        # this to true. Default false: pull failures fail the job.
+        continue-on-error: ${{ inputs.tolerate-pull-failure }}
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ inputs.image-ref }}
