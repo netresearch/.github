@@ -1,0 +1,140 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# Reusable "Smoke-test Container" — build the caller's image locally
+# (amd64, --load into the docker daemon), then run
+# container-structure-test against a config file in the caller's repo.
+#
+# Scope is intentionally narrow: only the structure-test surface that's
+# shared across container repos. Consumer-specific orchestration (stack
+# boot via docker compose, init-script idempotency, HTTP probes against
+# known paths) stays in the caller's workflow — it depends on env
+# bootstrap, secret-shaped placeholders, and app-specific HTTP routes
+# that don't generalise.
+#
+# Caller pattern:
+#
+#   jobs:
+#     smoke:
+#       uses: netresearch/.github/.github/workflows/smoke-test-container.yml@main
+#       with:
+#         image-tag: snipe-it-php-fpm:test
+#         target: runtime
+#         cst-config-path: tests/container-structure-test.yaml
+#
+# Minimum (Dockerfile at root, default cst-config path, last build stage):
+#
+#   jobs:
+#     smoke:
+#       uses: netresearch/.github/.github/workflows/smoke-test-container.yml@main
+#       with:
+#         image-tag: my-app:test
+#
+# SECURITY: pinned action SHAs, harden-runner, read-only permissions,
+# `persist-credentials: false` on checkout.
+
+name: Smoke-test Container (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: "Runner label."
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Per-job timeout in minutes."
+        type: number
+        default: 20
+      context:
+        description: "Docker build context."
+        type: string
+        default: "."
+      dockerfile-path:
+        description: "Path to the Dockerfile."
+        type: string
+        default: "Dockerfile"
+      target:
+        description: "Build stage / target. Leave empty to build the final stage."
+        type: string
+        default: ""
+      build-args:
+        description: "Newline-separated KEY=VALUE build args passed to docker/build-push-action."
+        type: string
+        default: ""
+      image-tag:
+        description: "Local tag to assign the built image (used as --image arg for container-structure-test)."
+        type: string
+        required: true
+      cst-config-path:
+        description: "Path to the container-structure-test config (relative to repo root)."
+        type: string
+        default: "tests/container-structure-test.yaml"
+      cache-scope:
+        description: "GHA cache scope for buildx. Defaults to 'smoke-test'; override when multiple smoke-test jobs run in parallel and should keep caches separate."
+        type: string
+        default: "smoke-test"
+
+permissions:
+  contents: read
+
+jobs:
+  structure-test:
+    name: container-structure-test
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Build image (amd64, load locally)
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile-path }}
+          target: ${{ inputs.target }}
+          platforms: linux/amd64
+          load: true
+          tags: ${{ inputs.image-tag }}
+          build-args: ${{ inputs.build-args }}
+          cache-from: type=gha,scope=${{ inputs.cache-scope }}
+          cache-to: type=gha,scope=${{ inputs.cache-scope }},mode=max
+
+      - name: Verify container-structure-test config exists
+        env:
+          CST_CONFIG_PATH: ${{ inputs.cst-config-path }}
+        run: |
+          set -euo pipefail
+          if [ ! -f "$CST_CONFIG_PATH" ]; then
+            echo "::error::container-structure-test config not found at: $CST_CONFIG_PATH"
+            exit 1
+          fi
+
+      - name: Install container-structure-test
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/cst \
+            "https://storage.googleapis.com/container-structure-test/latest/container-structure-test-linux-amd64"
+          sudo install /tmp/cst /usr/local/bin/container-structure-test
+          container-structure-test version
+
+      - name: Run container-structure-test
+        env:
+          IMAGE_TAG: ${{ inputs.image-tag }}
+          CST_CONFIG_PATH: ${{ inputs.cst-config-path }}
+        run: |
+          container-structure-test test \
+            --image "$IMAGE_TAG" \
+            --config "$CST_CONFIG_PATH"
