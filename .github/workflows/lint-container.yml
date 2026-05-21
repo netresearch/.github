@@ -21,11 +21,16 @@
 #
 # DESIGN NOTES
 # ============
-# Hadolint runs via `hadolint/hadolint:latest-alpine` directly rather than
-# `hadolint/hadolint-action@v3.1.0`. The action bundles hadolint v2.12.0
-# (Mar 2023), which predates Docker 25's HEALTHCHECK --start-interval flag
-# and crashes with "invalid flag: --start-interval" on any Dockerfile that
-# uses it. Running the upstream image keeps us on current hadolint.
+# Hadolint runs via the upstream `hadolint/hadolint` image (pinned by
+# tag + digest below) rather than `hadolint/hadolint-action@v3.1.0`.
+# The action bundles hadolint v2.12.0 from Mar 2023, which predates
+# Docker 25's HEALTHCHECK --start-interval flag and crashes with
+# "invalid flag: --start-interval" on any Dockerfile that uses it.
+# Pinning the image by digest (rather than a mutable tag like
+# `:latest-alpine`) keeps the supply-chain story coherent with the rest
+# of this workflow — every external dependency is content-addressed.
+# Renovate's docker-tag updater bumps the digest periodically when
+# upstream cuts a new hadolint release.
 #
 # Shellcheck is OPTIONAL — `shell-scandirs` defaults to empty so repos
 # without shipped scripts (e.g. phpbu-docker) skip it cleanly.
@@ -107,9 +112,10 @@ jobs:
           else
             HADOLINT_CMD=(hadolint --failure-threshold "$HADOLINT_FAILURE_THRESHOLD" -)
           fi
+          # Pinned by digest (not a mutable tag). Bumped via Renovate.
           docker run --rm -i \
             "${CONFIG_ARGS[@]}" \
-            hadolint/hadolint:latest-alpine \
+            hadolint/hadolint:v2.12.0-alpine@sha256:3c206a451cec6d486367e758645269fd7d696c5ccb6ff59d8b03b0e45268a199 \
             "${HADOLINT_CMD[@]}" \
             < "$DOCKERFILE_PATH"
 

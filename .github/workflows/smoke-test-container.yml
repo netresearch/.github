@@ -123,10 +123,18 @@ jobs:
           fi
 
       - name: Install container-structure-test
+        # Pinned to v1.22.1 by SHA256. Fetched from the GitHub release
+        # asset, not the GCS `latest` mirror — the latter is a mutable
+        # alias that bypasses our supply-chain pinning. Bumped via
+        # Renovate (regex-managers in renovate.json).
+        env:
+          CST_VERSION: "v1.22.1"
+          CST_SHA256: "fa35e89512a8978585f76cf41397956d2e3a30c62c2ad3fb857b1597074d14ca"
         run: |
           set -euo pipefail
           curl -fsSL -o /tmp/cst \
-            "https://storage.googleapis.com/container-structure-test/latest/container-structure-test-linux-amd64"
+            "https://github.com/GoogleContainerTools/container-structure-test/releases/download/${CST_VERSION}/container-structure-test-linux-amd64"
+          echo "${CST_SHA256}  /tmp/cst" | sha256sum -c -
           sudo install /tmp/cst /usr/local/bin/container-structure-test
           container-structure-test version
 

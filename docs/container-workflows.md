@@ -65,6 +65,12 @@ jobs:
 
 ### Post-build security scan with matrix fan-out
 
+`security-container.yml` declares its own job-level `permissions:`
+(`security-events: write` for SARIF upload, `packages: read` for GHCR
+pulls, `contents: read` for checkout). The caller's top-level
+`permissions:` block applies only to OTHER jobs in the same workflow —
+keep it `contents: read` and let the reusable handle its needs.
+
 ```yaml
 # .github/workflows/security.yml
 name: security
