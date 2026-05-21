@@ -62,6 +62,41 @@ on:
         required: false
         type: string
         default: ""
+      target:
+        description: "Multi-stage build target / stage. Empty = build the default (last) stage."
+        required: false
+        type: string
+        default: ""
+      build-args:
+        description: "Newline-separated KEY=VALUE build args passed verbatim to docker/build-push-action. Use this when the Dockerfile expects ARGs (snipe-it: SNIPE_IT_VERSION, BUILD_DATE, VCS_REF, ROLLING_DEPS)."
+        required: false
+        type: string
+        default: ""
+      cache-scope:
+        description: "Optional GHA cache scope name. Set this when multiple parallel matrix calls share the same image-name but should keep their build cache separate (e.g. caller's matrix is track × composer-mode). Empty = share one global cache (current default behaviour)."
+        required: false
+        type: string
+        default: ""
+      provenance:
+        description: "Buildx provenance mode (passed to docker/build-push-action's `provenance:` input). Common values: empty (action default), 'mode=max', 'false'. Note: this is the in-image attestation, distinct from the SLSA attestation produced by `attest: true` (which uses actions/attest-build-provenance)."
+        required: false
+        type: string
+        default: ""
+      sbom:
+        description: "Generate in-image SBOM (passed to docker/build-push-action's `sbom:` input). Off by default."
+        required: false
+        type: boolean
+        default: false
+      metadata-tags:
+        description: "Caller-provided override for docker/metadata-action's `tags:` input. When set, REPLACES the reusable's default 5 patterns (ref-branch / ref-pr / semver-{version,major.minor,major}). Use this for callers with bespoke tag fan-out (e.g. snipe-it: `:8.5.0`, `:8.5`, `:8`, plus `-rolling` suffix variants)."
+        required: false
+        type: string
+        default: ""
+      metadata-labels:
+        description: "Caller-provided OCI labels (newline-separated KEY=VALUE), appended to the labels docker/metadata-action auto-generates (created/revision/source/etc.). Use this to set image.title, image.description, image.licenses overrides."
+        required: false
+        type: string
+        default: ""
     outputs:
       digest:
         description: "Digest of the pushed image (sha256:...). Empty when push=false."
@@ -145,19 +180,48 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
+      - name: Compute default metadata tag patterns
+        if: inputs.metadata-tags == ''
+        id: default_patterns
+        env:
+          SEMVER_REF: ${{ inputs.ref || github.ref_name }}
+          REF_PROVIDED: ${{ inputs.ref != '' && 'true' || 'false' }}
+          IS_TAG_PUSH: ${{ startsWith(github.ref, 'refs/tags/') && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+          if [[ "$REF_PROVIDED" == "true" || "$IS_TAG_PUSH" == "true" ]]; then
+            EN_SEMVER=true
+          else
+            EN_SEMVER=false
+          fi
+          if [[ "$REF_PROVIDED" == "true" ]]; then
+            EN_REF=false
+          else
+            EN_REF=true
+          fi
+          {
+            echo 'patterns<<EOM'
+            echo "type=ref,event=branch,enable=${EN_REF}"
+            echo "type=ref,event=pr,enable=${EN_REF}"
+            echo "type=semver,pattern={{version}},value=${SEMVER_REF},enable=${EN_SEMVER}"
+            echo "type=semver,pattern={{major}}.{{minor}},value=${SEMVER_REF},enable=${EN_SEMVER}"
+            echo "type=semver,pattern={{major}},value=${SEMVER_REF},enable=${EN_SEMVER}"
+            echo 'EOM'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Gather Docker metadata
         id: meta
         uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
-        env:
-          SEMVER_REF: ${{ inputs.ref || github.ref_name }}
         with:
           images: ${{ env.IMAGE_REF }}
-          tags: |
-            type=ref,event=branch,enable=${{ !inputs.ref }}
-            type=ref,event=pr,enable=${{ !inputs.ref }}
-            type=semver,pattern={{version}},value=${{ env.SEMVER_REF }},enable=${{ inputs.ref != '' || startsWith(github.ref, 'refs/tags/') }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ env.SEMVER_REF }},enable=${{ inputs.ref != '' || startsWith(github.ref, 'refs/tags/') }}
-            type=semver,pattern={{major}},value=${{ env.SEMVER_REF }},enable=${{ inputs.ref != '' || startsWith(github.ref, 'refs/tags/') }}
+          # Caller-supplied `metadata-tags` overrides the reusable's default 5
+          # patterns entirely. Empty (default) → fall back to the default
+          # patterns computed in the step above.
+          tags: ${{ inputs.metadata-tags != '' && inputs.metadata-tags || steps.default_patterns.outputs.patterns }}
+          # Caller-supplied `metadata-labels` are appended to the auto-
+          # generated set (created/revision/source/etc.) rather than
+          # replacing them.
+          labels: ${{ inputs.metadata-labels }}
 
       - name: Log in to ${{ inputs.registry }}
         if: inputs.push
@@ -176,12 +240,20 @@ jobs:
         with:
           context: ${{ env.BUILD_CONTEXT }}
           file: ${{ env.DOCKERFILE }}
+          target: ${{ inputs.target }}
           push: ${{ inputs.push }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: ${{ inputs.platforms }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          build-args: ${{ inputs.build-args }}
+          provenance: ${{ inputs.provenance }}
+          sbom: ${{ inputs.sbom }}
+          # cache-scope: when set, both cache-from and cache-to suffix the GHA
+          # scope so parallel matrix calls keep separate caches. When empty,
+          # the GHA action uses a single default-scope cache (backwards
+          # compatible with the pre-cache-scope reusable).
+          cache-from: type=gha${{ inputs.cache-scope != '' && format(',scope={0}', inputs.cache-scope) || '' }}
+          cache-to: type=gha,mode=max${{ inputs.cache-scope != '' && format(',scope={0}', inputs.cache-scope) || '' }}
 
       - name: Run Trivy vulnerability scanner
         id: trivy
