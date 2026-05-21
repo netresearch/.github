@@ -113,9 +113,16 @@ jobs:
             HADOLINT_CMD=(hadolint --failure-threshold "$HADOLINT_FAILURE_THRESHOLD" -)
           fi
           # Pinned by digest (not a mutable tag). Bumped via Renovate.
+          # MUST be >= v2.13 — v2.12.0 crashes with "invalid flag:
+          # --start-interval" on Dockerfiles that use Docker 25's
+          # HEALTHCHECK --start-interval=… (the original failure mode
+          # that motivated bypassing hadolint-action@v3.1.0 entirely).
+          # Verified locally: v2.14.0-alpine passes; v2.12.0-alpine
+          # fails. If you bump this, retest against a Dockerfile that
+          # has HEALTHCHECK --start-interval.
           docker run --rm -i \
             "${CONFIG_ARGS[@]}" \
-            hadolint/hadolint:v2.12.0-alpine@sha256:3c206a451cec6d486367e758645269fd7d696c5ccb6ff59d8b03b0e45268a199 \
+            hadolint/hadolint:v2.14.0-alpine@sha256:7aba693c1442eb31c0b015c129697cb3b6cb7da589d85c7562f9deb435a6657c \
             "${HADOLINT_CMD[@]}" \
             < "$DOCKERFILE_PATH"
 
