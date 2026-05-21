@@ -1,0 +1,159 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# Reusable "Security Container" — post-build Trivy CVE scan against an
+# already-published container image reference, with SARIF upload to
+# GitHub code-scanning.
+#
+# Distinct from `build-container.yml`'s build-time scan: this workflow
+# is intended to run on `schedule` or `workflow_run` AFTER the image is
+# pushed, so it picks up CVEs disclosed since the build. Callers
+# typically fan out a matrix over tags (`:latest`, `:rolling`, branch
+# tags) and call this reusable once per tag.
+#
+# Caller pattern (matrix over tags, snipe-it-style):
+#
+#   jobs:
+#     trivy:
+#       strategy:
+#         fail-fast: false
+#         matrix:
+#           tag: [latest, rolling]
+#       uses: netresearch/.github/.github/workflows/security-container.yml@main
+#       with:
+#         image-ref: ghcr.io/${{ github.repository_owner }}/snipe-it-php-fpm:${{ matrix.tag }}
+#         sarif-category: trivy-${{ matrix.tag }}
+#
+# Single-tag minimum:
+#
+#   jobs:
+#     trivy:
+#       uses: netresearch/.github/.github/workflows/security-container.yml@main
+#       with:
+#         image-ref: ghcr.io/netresearch/phpbu:latest
+#
+# DESIGN NOTES
+# ============
+# Default `exit-code: 0` (informational). The CVEs landing here are
+# typically in third-party base images / transitive dependencies the
+# consumer can't patch downstream — gating CI on them means CI is
+# permanently red. The alert surface is GitHub Security tab (via SARIF)
+# plus the daily-cron job log. Operators may pass `exit-code: 1` to
+# make scans blocking for repos that can patch.
+#
+# SECURITY: pinned action SHAs, harden-runner, read-only permissions
+# except `security-events: write` for SARIF upload.
+
+name: Security Container (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: "Runner label."
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Per-job timeout in minutes."
+        type: number
+        default: 15
+      image-ref:
+        description: "Full image reference to scan, e.g. ghcr.io/owner/img:tag. Caller fans out matrix; one ref per invocation."
+        type: string
+        required: true
+      severity:
+        description: "Comma-separated Trivy severity filter."
+        type: string
+        default: "HIGH,CRITICAL"
+      exit-code:
+        description: "Trivy exit code on findings. '0' = informational (default, matches snipe-it pattern), '1' = blocking."
+        type: string
+        default: "0"
+      ignore-unfixed:
+        description: "Pass --ignore-unfixed to Trivy (hide CVEs with no upstream fix yet)."
+        type: boolean
+        default: true
+      vuln-type:
+        description: "Trivy --vuln-type. Default 'os,library' (both base image and language packages)."
+        type: string
+        default: "os,library"
+      scanners:
+        description: "Trivy --scanners. Default 'vuln' for CVE-only; pass 'vuln,config,secret' for full surface."
+        type: string
+        default: "vuln"
+      sarif-category:
+        description: "GitHub code-scanning category for the SARIF upload (must be unique per tag in a matrix)."
+        type: string
+        default: "container-scan"
+      upload-sarif:
+        description: "Upload SARIF to GitHub code-scanning. Disable when callers want raw Trivy text output only."
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  trivy:
+    name: trivy
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      # SARIF upload to GitHub code-scanning.
+      security-events: write
+      # Required to pull from ghcr.io/<this-org>/<this-repo>. The PR
+      # 141 reviewer flagged this — without it, Trivy gets HTTP 401
+      # when the registry is GHCR and the package's visibility is
+      # private (or even public packages owned by an org that locks
+      # anonymous pulls).
+      packages: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Log in to GHCR (only when scanning a ghcr.io image)
+        # Trivy invokes a fresh docker client for each scan; it does NOT
+        # inherit any pre-existing daemon credentials. For private GHCR
+        # packages this means HTTP 401 on layer fetch. Conditional on the
+        # image-ref starting with `ghcr.io/` so callers scanning images on
+        # other registries (docker.io, internal registries) don't hit a
+        # bogus GHCR login. Other-registry callers must add their own
+        # login step in a wrapper or in the caller's workflow before
+        # invoking this reusable.
+        if: startsWith(inputs.image-ref, 'ghcr.io/')
+        uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ inputs.image-ref }}
+          format: "sarif"
+          output: "trivy-results.sarif"
+          severity: ${{ inputs.severity }}
+          exit-code: ${{ inputs.exit-code }}
+          ignore-unfixed: ${{ inputs.ignore-unfixed }}
+          limit-severities-for-sarif: "true"
+          vuln-type: ${{ inputs.vuln-type }}
+          scanners: ${{ inputs.scanners }}
+
+      - name: Upload SARIF to code-scanning
+        # Skip on merge_group: the gh-readonly-queue ref is deleted by GitHub
+        # the moment the merge completes, racing with codeql-action/upload-sarif
+        # and producing a guaranteed `ref ... not found` failure.
+        if: always() && inputs.upload-sarif && github.event_name != 'merge_group' && hashFiles('trivy-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@9e0d7b8d25671d64c341c19c0152d693099fb5ba # v4.35.5
+        with:
+          sarif_file: trivy-results.sarif
+          category: ${{ inputs.sarif-category }}

@@ -1,0 +1,150 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# Reusable "Lint Container" — Dockerfile lint (hadolint) and optional
+# shellcheck against entrypoint / helper scripts shipped in the image.
+#
+# Caller pattern (snipe-it-style — Dockerfile at repo root, scripts under
+# rootfs/usr/local/bin and bin/):
+#
+#   jobs:
+#     lint:
+#       uses: netresearch/.github/.github/workflows/lint-container.yml@main
+#       with:
+#         shell-scandirs: ./rootfs/usr/local/bin ./bin
+#
+# Minimum (Dockerfile only, no shellcheck):
+#
+#   jobs:
+#     lint:
+#       uses: netresearch/.github/.github/workflows/lint-container.yml@main
+#
+# DESIGN NOTES
+# ============
+# Hadolint runs via the upstream `hadolint/hadolint` image (pinned by
+# tag + digest below) rather than `hadolint/hadolint-action@v3.1.0`.
+# The action bundles hadolint v2.12.0 from Mar 2023, which predates
+# Docker 25's HEALTHCHECK --start-interval flag and crashes with
+# "invalid flag: --start-interval" on any Dockerfile that uses it.
+# Pinning the image by digest (rather than a mutable tag like
+# `:latest-alpine`) keeps the supply-chain story coherent with the rest
+# of this workflow — every external dependency is content-addressed.
+# Renovate's docker-tag updater bumps the digest periodically when
+# upstream cuts a new hadolint release.
+#
+# Shellcheck is OPTIONAL — `shell-scandirs` defaults to empty so repos
+# without shipped scripts (e.g. phpbu-docker) skip it cleanly.
+#
+# SECURITY: pinned action SHAs, harden-runner, read-only permissions,
+# `persist-credentials: false` on checkout.
+
+name: Lint Container (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: "Runner label."
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Per-job timeout in minutes."
+        type: number
+        default: 5
+      dockerfile-path:
+        description: "Path to the Dockerfile to lint."
+        type: string
+        default: "Dockerfile"
+      hadolint-config-path:
+        description: "Path to a hadolint config file (.hadolint.yaml). Mounted read-only into the lint container if present."
+        type: string
+        default: ".hadolint.yaml"
+      hadolint-failure-threshold:
+        description: "Hadolint --failure-threshold. One of: error, warning, info, style, ignore, none."
+        type: string
+        default: "warning"
+      shell-scandirs:
+        description: "Space-separated list of directories to scan with shellcheck (passed to action-shellcheck `scandir:`). Leave empty to skip the shellcheck job entirely."
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  hadolint:
+    name: hadolint
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: hadolint (via latest-alpine image)
+        env:
+          # All ${{ ... }} interpolation goes through env vars rather than
+          # directly into the run-script body — SonarCloud rule
+          # githubactions:S7630 (shell injection).
+          DOCKERFILE_PATH: ${{ inputs.dockerfile-path }}
+          HADOLINT_CONFIG_PATH: ${{ inputs.hadolint-config-path }}
+          HADOLINT_FAILURE_THRESHOLD: ${{ inputs.hadolint-failure-threshold }}
+        run: |
+          set -euo pipefail
+          if [ ! -f "$DOCKERFILE_PATH" ]; then
+            echo "::error::Dockerfile not found at: $DOCKERFILE_PATH"
+            exit 1
+          fi
+          # Mount the hadolint config read-only if it exists; otherwise run
+          # without one (hadolint will use its built-in defaults).
+          CONFIG_ARGS=()
+          if [ -f "$HADOLINT_CONFIG_PATH" ]; then
+            CONFIG_ARGS=(-v "${GITHUB_WORKSPACE}/${HADOLINT_CONFIG_PATH}:/.config/hadolint.yaml:ro")
+            HADOLINT_CMD=(hadolint --config /.config/hadolint.yaml --failure-threshold "$HADOLINT_FAILURE_THRESHOLD" -)
+          else
+            HADOLINT_CMD=(hadolint --failure-threshold "$HADOLINT_FAILURE_THRESHOLD" -)
+          fi
+          # Pinned by digest (not a mutable tag). Bumped via Renovate.
+          # MUST be >= v2.13 — v2.12.0 crashes with "invalid flag:
+          # --start-interval" on Dockerfiles that use Docker 25's
+          # HEALTHCHECK --start-interval=… (the original failure mode
+          # that motivated bypassing hadolint-action@v3.1.0 entirely).
+          # Verified locally: v2.14.0-alpine passes; v2.12.0-alpine
+          # fails. If you bump this, retest against a Dockerfile that
+          # has HEALTHCHECK --start-interval.
+          docker run --rm -i \
+            "${CONFIG_ARGS[@]}" \
+            hadolint/hadolint:v2.14.0-alpine@sha256:7aba693c1442eb31c0b015c129697cb3b6cb7da589d85c7562f9deb435a6657c \
+            "${HADOLINT_CMD[@]}" \
+            < "$DOCKERFILE_PATH"
+
+  shellcheck:
+    name: shellcheck
+    if: inputs.shell-scandirs != ''
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: shellcheck
+        uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
+        with:
+          scandir: ${{ inputs.shell-scandirs }}
