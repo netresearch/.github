@@ -89,6 +89,25 @@ on:
         description: "Upload SARIF to GitHub code-scanning. Disable when callers want raw Trivy text output only."
         type: boolean
         default: true
+      tolerate-pull-failure:
+        description: |
+          When true, the workflow pre-flights `docker manifest inspect`
+          against the image-ref. If the manifest is unavailable
+          (`manifest unknown` because a rolling tag was never published,
+          or the image build for that matrix cell was skipped) the
+          Trivy + SARIF-upload steps are SKIPPED and the job exits
+          green. The Trivy step itself runs with normal (non-
+          suppressed) exit semantics, so legitimate CVE findings + any
+          caller-specified `exit-code: '1'` still produce a real
+          failure. Default false: a legitimate pull failure correctly
+          fails the job. Workaround for callers fanning out a matrix
+          over tags where some cells point at images that may or may
+          not exist (snipe-it: rolling-variant images that the
+          composer audit blocked during the build phase). Cannot be
+          expressed via job-level `continue-on-error:` on the caller
+          — GitHub forbids that on reusable-caller jobs.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -135,7 +154,33 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
+      - name: Pre-flight — image manifest exists
+        # Only runs when the caller opts into tolerate-pull-failure.
+        # `docker manifest inspect` is a HEAD-style probe — no full pull —
+        # so it's cheap. The `continue-on-error: true` here ONLY affects
+        # this probe: a missing manifest does not fail the job; the next
+        # step's `if:` reads the outcome and decides whether to run Trivy.
+        # When tolerate-pull-failure is false (default), this step is
+        # skipped and the Trivy step's `if:` evaluates to true (no
+        # outcome to compare against → not 'failure' → runs normally).
+        id: manifest_check
+        if: inputs.tolerate-pull-failure
+        continue-on-error: true
+        env:
+          IMAGE_REF: ${{ inputs.image-ref }}
+        run: |
+          set -euo pipefail
+          docker manifest inspect "$IMAGE_REF" > /dev/null
+          echo "manifest available"
+
       - name: Run Trivy vulnerability scanner
+        # Runs unless the pre-flight (if it ran) reported failure.
+        # No `continue-on-error` here: Trivy's own exit semantics
+        # (caller's `exit-code` input, vuln findings, etc.) propagate
+        # normally. This was the gap Copilot flagged on PR 141 — a
+        # broad continue-on-error swallowed legitimate finding-based
+        # failures.
+        if: steps.manifest_check.outcome != 'failure'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ inputs.image-ref }}
