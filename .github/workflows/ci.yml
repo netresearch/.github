@@ -21,3 +21,10 @@ jobs:
   yaml:
     name: Lint YAML
     uses: ./.github/workflows/lint-yaml.yml
+
+  zizmor:
+    name: zizmor
+    permissions:
+      contents: read
+      security-events: write
+    uses: ./.github/workflows/zizmor.yml

@@ -1,0 +1,60 @@
+name: zizmor
+
+# Reusable zizmor (https://zizmor.sh) static analysis for GitHub Actions.
+#
+# Report-only by design: zizmor runs in SARIF mode (exit 0 regardless of
+# findings) and the results are uploaded to the repository's code-scanning
+# / Security tab, exactly like the CodeQL and Scorecard reusables. Findings
+# surface as code-scanning alerts; they do NOT fail CI. zizmor automatically
+# discovers a repo's `.github/zizmor.yml` config when present.
+#
+# Skipped on `merge_group`: the gh-readonly-queue ref is deleted the moment
+# the queue completes, which races the SARIF upload (cf. scorecard.yml).
+
+on:
+  workflow_call:
+    inputs:
+      inputs:
+        description: Whitespace-separated paths for zizmor to audit.
+        type: string
+        default: "."
+      persona:
+        description: "Audit persona: regular | pedantic | auditor."
+        type: string
+        default: regular
+      zizmor-version:
+        description: Exact zizmor version (X.Y.Z) or 'latest'.
+        type: string
+        default: "1.25.2"
+
+permissions: {}
+
+jobs:
+  analyze:
+    name: zizmor analysis
+    if: github.event_name != 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Run zizmor
+        uses: zizmorcore/zizmor-action@5f14fd08f7cf1cb1609c1e344975f152c7ee938d # v0.5.6
+        with:
+          inputs: ${{ inputs.inputs }}
+          persona: ${{ inputs.persona }}
+          version: ${{ inputs.zizmor-version }}
+          # advanced-security (default true) emits SARIF and uploads it to
+          # code scanning. zizmor exits 0 in SARIF mode, so this is report-
+          # only and never blocks CI.
