@@ -191,12 +191,13 @@ jobs:
 
       - name: Verify Cosign signature
         if: inputs.cosign-sign
-        env:
-          REPO: ${{ github.repository }}
         run: |
+          # Keyless signing inside a reusable workflow carries the REUSABLE
+          # workflow's identity (its job_workflow_ref), not the calling repo's.
+          # Verify against this workflow's identity rather than github.repository.
           cosign verify-blob \
             --bundle checksums.txt.sigstore.json \
-            --certificate-identity-regexp "https://github.com/${REPO}/*" \
+            --certificate-identity-regexp "^https://github\.com/netresearch/\.github/\.github/workflows/golib-create-release\.yml@" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             checksums.txt
 
