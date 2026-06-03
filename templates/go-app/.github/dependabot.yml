@@ -1,3 +1,38 @@
+# Managed by netresearch/.github/templates/go-app/
+#
+# Declares only the ecosystems every go-app consumer is guaranteed to have:
+# gomod, github-actions, and docker (all go-app repos ship a Dockerfile).
+#
+# npm and devcontainers are OPT-IN: a repo that actually has a package.json
+# or a devcontainer adds the block below to its own dependabot.yml and lists
+# `.github/dependabot.yml` under `intentional-drift:` in .github/template.yaml
+# so the template sync stops managing the file. Declaring an ecosystem without
+# its manifest makes the Dependabot run fail with `dependency_file_not_found`.
+#
+# Opt-in npm:
+#   - package-ecosystem: npm
+#     directory: /
+#     schedule:
+#       interval: weekly
+#       day: monday
+#     open-pull-requests-limit: 5
+#     groups:
+#       npm:
+#         patterns: ['*']
+#     cooldown:
+#       default-days: 7
+# Opt-in devcontainers:
+#   - package-ecosystem: devcontainers
+#     directory: /
+#     schedule:
+#       interval: weekly
+#       day: monday
+#     open-pull-requests-limit: 2
+#     groups:
+#       devcontainers:
+#         patterns: ['*']
+#     cooldown:
+#       default-days: 7
 version: 2
 updates:
   - package-ecosystem: gomod
@@ -32,30 +67,6 @@ updates:
     open-pull-requests-limit: 3
     groups:
       docker:
-        patterns: ['*']
-    cooldown:
-      default-days: 7
-
-  - package-ecosystem: npm
-    directory: /
-    schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 5
-    groups:
-      npm:
-        patterns: ['*']
-    cooldown:
-      default-days: 7
-
-  - package-ecosystem: devcontainers
-    directory: /
-    schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 2
-    groups:
-      devcontainers:
         patterns: ['*']
     cooldown:
       default-days: 7
