@@ -12,17 +12,27 @@
 # Opt-in npm:
 #   - package-ecosystem: npm
 #     directory: /
-#     schedule: { interval: weekly, day: monday }
+#     schedule:
+#       interval: weekly
+#       day: monday
 #     open-pull-requests-limit: 5
-#     groups: { npm: { patterns: ['*'] } }
-#     cooldown: { default-days: 7 }
+#     groups:
+#       npm:
+#         patterns: ['*']
+#     cooldown:
+#       default-days: 7
 # Opt-in devcontainers:
 #   - package-ecosystem: devcontainers
 #     directory: /
-#     schedule: { interval: weekly, day: monday }
+#     schedule:
+#       interval: weekly
+#       day: monday
 #     open-pull-requests-limit: 2
-#     groups: { devcontainers: { patterns: ['*'] } }
-#     cooldown: { default-days: 7 }
+#     groups:
+#       devcontainers:
+#         patterns: ['*']
+#     cooldown:
+#       default-days: 7
 version: 2
 updates:
   - package-ecosystem: gomod

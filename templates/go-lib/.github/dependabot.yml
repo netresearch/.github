@@ -11,10 +11,15 @@
 # so the template sync stops managing the file. Example:
 #   - package-ecosystem: docker
 #     directory: /
-#     schedule: { interval: weekly, day: monday }
+#     schedule:
+#       interval: weekly
+#       day: monday
 #     open-pull-requests-limit: 3
-#     groups: { docker: { patterns: ['*'] } }
-#     cooldown: { default-days: 7 }
+#     groups:
+#       docker:
+#         patterns: ['*']
+#     cooldown:
+#       default-days: 7
 version: 2
 updates:
   - package-ecosystem: gomod
