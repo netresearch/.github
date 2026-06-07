@@ -172,12 +172,16 @@ permissions: {}
 jobs:
   python-ci:
     name: Python ${{ matrix.python }} (${{ matrix.os }})
-    # Skip the job only when every feature is off.
+    # Skip the job only when every feature is off. The coverage-upload
+    # toggles are part of the gate (mirroring php-ci.yml) so a caller that
+    # only wants coverage uploaded isn't silently skipped.
     if: >-
       ${{
         inputs.run-lint ||
         inputs.run-type-check ||
-        inputs.run-tests
+        inputs.run-tests ||
+        inputs.upload-coverage-codecov ||
+        inputs.upload-coverage-artifact
       }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
