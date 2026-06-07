@@ -1,0 +1,256 @@
+# Reusable "Python CI" workflow for Python projects.
+#
+# Provides the union of patterns currently inlined across the netresearch
+# org's Python repos (CLI tools, libraries): checkout +
+# actions/setup-python (with pip cache) + an install step, then optional
+# lint / type-check / pytest steps with Codecov coverage upload. Matrices
+# over both OS and Python version.
+#
+# This is the test/lint counterpart to the security-only
+# `python-audit.yml` reusable (bandit + pip-audit + SBOM). A typical
+# repo calls BOTH: `python-ci.yml` for lint/type/test/coverage and
+# `python-audit.yml` for the security scan.
+#
+# Caller pattern (minimal — flake8 + pytest on one Python version):
+#
+#   name: CI
+#   on:
+#     push:
+#       branches: [main]
+#     pull_request:
+#   permissions: {}
+#   jobs:
+#     python-ci:
+#       uses: netresearch/.github/.github/workflows/python-ci.yml@main
+#
+# Caller pattern (OS x version matrix + coverage upload + custom commands):
+#
+#   jobs:
+#     python-ci:
+#       uses: netresearch/.github/.github/workflows/python-ci.yml@main
+#       with:
+#         os-versions: '["ubuntu-latest","macos-latest","windows-latest"]'
+#         python-versions: '["3.13","3.14"]'
+#         install-cmd: 'python -m pip install --upgrade pip && pip install -r requirements-dev.txt'
+#         run-type-check: true
+#         type-check-cmd: 'mypy cli_audit --ignore-missing-imports'
+#         test-cmd: 'pytest --cov=cli_audit --cov-report=xml --cov-report=term'
+#         upload-coverage-codecov: true
+#         coverage-os: 'ubuntu-latest'
+#         coverage-python-version: '3.14'
+#       secrets:
+#         CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+#
+# SECURITY: pinned action SHAs, harden-runner, read-only permissions,
+# `persist-credentials: false` on checkout, secrets passed explicitly
+# (never `secrets: inherit`). Caller-supplied commands are routed through
+# `env:` and executed with `bash -c "$VAR"` so the workflow file itself
+# carries no caller text in argument position. No untrusted github.event.*
+# input is used in `run:` blocks — all inputs come via `workflow_call`
+# from trusted callers.
+
+name: Python CI (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      os-versions:
+        description: >-
+          JSON array string of runner labels to matrix over
+          (e.g. '["ubuntu-latest"]' or
+          '["ubuntu-latest","macos-latest","windows-latest"]').
+        type: string
+        default: '["ubuntu-latest"]'
+      python-versions:
+        description: >-
+          JSON array string of Python versions to matrix over
+          (e.g. '["3.13"]' or '["3.13","3.14"]').
+        type: string
+        default: '["3.13"]'
+      timeout-minutes:
+        description: "Per-job timeout in minutes."
+        type: number
+        default: 15
+
+      cache:
+        description: "Dependency cache for actions/setup-python (pip, pipenv, poetry, or empty to disable)."
+        type: string
+        default: "pip"
+      cache-dependency-path:
+        description: "Optional path(s) to dependency files used for the setup-python cache key."
+        type: string
+        default: ""
+
+      working-directory:
+        description: "Working directory for all run steps. Useful for monorepos."
+        type: string
+        default: "."
+
+      install-cmd:
+        description: >-
+          Shell command that installs the project and its dev/test
+          dependencies. Runs after Python setup. Executed via
+          `bash -c`, so `&&` and other shell operators work.
+        type: string
+        default: 'python -m pip install --upgrade pip && pip install -e ".[dev]"'
+
+      # Lint
+      run-lint:
+        description: "Run the lint step."
+        type: boolean
+        default: true
+      lint-cmd:
+        description: "Lint command (e.g. flake8, ruff check)."
+        type: string
+        default: "flake8 ."
+
+      # Type check
+      run-type-check:
+        description: "Run the type-check step."
+        type: boolean
+        default: false
+      type-check-cmd:
+        description: "Type-check command (e.g. mypy)."
+        type: string
+        default: "mypy ."
+
+      # Tests
+      run-tests:
+        description: "Run the test step."
+        type: boolean
+        default: true
+      test-cmd:
+        description: >-
+          Test command. To upload coverage, have this write a coverage
+          report to `coverage-file` (e.g. `pytest --cov=PKG
+          --cov-report=xml`).
+        type: string
+        default: "pytest"
+
+      # Coverage — Codecov upload and/or artifact upload. Both run only on
+      # the single matrix cell matching `coverage-os` + `coverage-python-version`
+      # to avoid duplicate uploads across the matrix.
+      upload-coverage-codecov:
+        description: "Upload coverage to Codecov. Requires a test-cmd that writes `coverage-file`."
+        type: boolean
+        default: false
+      upload-coverage-artifact:
+        description: "Upload the coverage report as a workflow artifact."
+        type: boolean
+        default: false
+      coverage-artifact-name:
+        description: "Artifact name used when `upload-coverage-artifact` is true."
+        type: string
+        default: "python-coverage"
+      coverage-artifact-retention-days:
+        description: "Retention for the coverage artifact (1-90)."
+        type: number
+        default: 7
+      coverage-os:
+        description: "Runner label of the matrix cell that uploads coverage (must be present in `os-versions`)."
+        type: string
+        default: "ubuntu-latest"
+      coverage-python-version:
+        description: "Python version of the matrix cell that uploads coverage (must be present in `python-versions`)."
+        type: string
+        default: "3.13"
+      coverage-file:
+        description: "Path (relative to `working-directory`) to the coverage report uploaded to Codecov and/or as an artifact."
+        type: string
+        default: "./coverage.xml"
+      coverage-flags:
+        description: "Codecov `flags` (comma-separated)."
+        type: string
+        default: "unittests"
+    secrets:
+      CODECOV_TOKEN:
+        description: "Codecov upload token. Required for private repositories when `upload-coverage-codecov` is true."
+        required: false
+
+permissions: {}
+
+jobs:
+  python-ci:
+    name: Python ${{ matrix.python }} (${{ matrix.os }})
+    # Skip the job only when every feature is off. The coverage-upload
+    # toggles are part of the gate (mirroring php-ci.yml) so a caller that
+    # only wants coverage uploaded isn't silently skipped.
+    if: >-
+      ${{
+        inputs.run-lint ||
+        inputs.run-type-check ||
+        inputs.run-tests ||
+        inputs.upload-coverage-codecov ||
+        inputs.upload-coverage-artifact
+      }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.os-versions) }}
+        python: ${{ fromJSON(inputs.python-versions) }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Setup Python ${{ matrix.python }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ matrix.python }}
+          cache: ${{ inputs.cache }}
+          cache-dependency-path: ${{ inputs.cache-dependency-path }}
+
+      - name: Install dependencies
+        env:
+          INSTALL_CMD: ${{ inputs.install-cmd }}
+        run: bash -c "$INSTALL_CMD"
+
+      - name: Lint
+        if: ${{ inputs.run-lint }}
+        env:
+          LINT_CMD: ${{ inputs.lint-cmd }}
+        run: bash -c "$LINT_CMD"
+
+      - name: Type check
+        if: ${{ inputs.run-type-check }}
+        env:
+          TYPE_CHECK_CMD: ${{ inputs.type-check-cmd }}
+        run: bash -c "$TYPE_CHECK_CMD"
+
+      - name: Tests
+        if: ${{ inputs.run-tests }}
+        env:
+          TEST_CMD: ${{ inputs.test-cmd }}
+        run: bash -c "$TEST_CMD"
+
+      - name: Upload coverage artifact
+        if: ${{ inputs.upload-coverage-artifact && matrix.os == inputs.coverage-os && matrix.python == inputs.coverage-python-version }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.coverage-artifact-name }}
+          path: ${{ inputs.working-directory }}/${{ inputs.coverage-file }}
+          if-no-files-found: error
+          retention-days: ${{ inputs.coverage-artifact-retention-days }}
+
+      - name: Upload coverage to Codecov
+        if: ${{ inputs.upload-coverage-codecov && matrix.os == inputs.coverage-os && matrix.python == inputs.coverage-python-version }}
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ${{ inputs.coverage-file }}
+          flags: ${{ inputs.coverage-flags }}
+          working-directory: ${{ inputs.working-directory }}
+          fail_ci_if_error: false
