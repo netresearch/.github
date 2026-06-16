@@ -108,19 +108,27 @@ jobs:
 
       - name: Run audit (bun)
         if: inputs.package-manager == 'bun'
+        env:
+          AUDIT_LEVEL: ${{ inputs.audit-level }}
         run: |
           bun install --frozen-lockfile
           npm i --package-lock-only
-          npm audit --audit-level=${{ inputs.audit-level }}
+          npm audit --audit-level="$AUDIT_LEVEL"
 
       - name: Run audit (pnpm)
         if: inputs.package-manager == 'pnpm'
-        run: pnpm audit --audit-level=${{ inputs.audit-level }}
+        env:
+          AUDIT_LEVEL: ${{ inputs.audit-level }}
+        run: pnpm audit --audit-level="$AUDIT_LEVEL"
 
       - name: Run audit (npm)
         if: inputs.package-manager == 'npm'
-        run: npm audit --audit-level=${{ inputs.audit-level }}
+        env:
+          AUDIT_LEVEL: ${{ inputs.audit-level }}
+        run: npm audit --audit-level="$AUDIT_LEVEL"
 
       - name: Run audit (yarn)
         if: inputs.package-manager == 'yarn'
-        run: yarn npm audit --severity ${{ inputs.audit-level }}
+        env:
+          AUDIT_LEVEL: ${{ inputs.audit-level }}
+        run: yarn npm audit --severity "$AUDIT_LEVEL"
