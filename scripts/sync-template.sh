@@ -4,7 +4,7 @@
 # Usage:
 #   scripts/sync-template.sh <template> <owner/repo> [--pr|--no-pr] [--branch <name>]
 #
-# Templates: go-app | go-lib
+# Templates: go-app | go-lib | typo3-extension | skill
 #
 # Behavior:
 #   1. Clones <owner/repo> via SSH into a temp worktree.
@@ -35,8 +35,8 @@ while [ $# -gt 0 ]; do
 done
 
 case "$TEMPLATE" in
-  go-app|go-lib) ;;
-  *) echo "unknown template: $TEMPLATE (want go-app|go-lib)" >&2; exit 2 ;;
+  go-app|go-lib|typo3-extension|skill) ;;
+  *) echo "unknown template: $TEMPLATE (want go-app|go-lib|typo3-extension|skill)" >&2; exit 2 ;;
 esac
 
 # Resolve script dir → project root (templates/ lives here).
