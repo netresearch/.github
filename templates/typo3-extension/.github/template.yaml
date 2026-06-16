@@ -2,13 +2,14 @@
 # Drift from the template is blocking CI in this repo (check-template-drift.yml).
 # Record explicit exceptions under intentional-drift[] to unblock.
 #
-# All per-extension CI values (the PHP/TYPO3 test matrix and the release
-# metadata archive-prefix/package-name/extension-key) live in
-# `.github/typo3-ci.json`, NOT in the workflows — so ci.yml and release.yml
-# stay byte-identical and fully drift-enforced across every extension.
-# typo3-ci.json is listed under intentional-drift below: the template sync
-# creates it once (with placeholder values) and never overwrites it, and the
-# drift check ignores it. Fill in this repo's real values after the first sync.
+# Split-file model: the security/quality jobs (elevated permissions) live in the
+# byte-identical, drift-enforced checks.yml. The two files below are
+# per-extension and are NOT byte-governed:
+#   - .github/workflows/ci.yml      — the test matrix `with:` block (php/typo3
+#     versions, matrix-exclude, functional-tests, db, remove-dev-deps, coverage)
+#   - .github/workflows/release.yml — archive-prefix / package-name / extension-key
+# Customize those two in-repo; everything else stays in sync with the template.
 template: typo3-extension
 intentional-drift:
-  - .github/typo3-ci.json
+  - .github/workflows/ci.yml
+  - .github/workflows/release.yml
