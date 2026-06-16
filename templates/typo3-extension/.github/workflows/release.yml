@@ -1,0 +1,22 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions: {}
+
+jobs:
+  release:
+    uses: netresearch/typo3-ci-workflows/.github/workflows/release-typo3-extension.yml@main
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    with:
+      archive-prefix: my-extension
+      package-name: netresearch/my-extension
+      extension-key: my_extension
+    secrets:
+      TYPO3_TER_ACCESS_TOKEN: ${{ secrets.TYPO3_TER_ACCESS_TOKEN }}

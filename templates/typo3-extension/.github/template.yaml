@@ -1,0 +1,10 @@
+# Managed by netresearch/.github/templates/typo3-extension/
+# Drift from the template is blocking CI in this repo (check-template-drift.yml).
+# Record explicit exceptions under intentional-drift[] to unblock.
+#
+# The release.yml `with:` block (archive-prefix, package-name, extension-key)
+# is per-extension. A consumer overrides those three values and lists
+# `.github/workflows/release.yml` under intentional-drift[] so the template
+# sync stops managing that file.
+template: typo3-extension
+intentional-drift: []
