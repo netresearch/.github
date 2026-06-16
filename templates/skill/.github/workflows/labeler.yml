@@ -1,7 +1,10 @@
 name: Labeler
 
 on:
-  pull_request_target:
+  # labeler only applies labels via the reusable using the base-repo token; it
+  # never checks out or runs PR head code. pull_request_target is required to
+  # label fork PRs.
+  pull_request_target: # zizmor: ignore[dangerous-triggers]
     types: [opened, synchronize, reopened]
 
 permissions: {}
