@@ -18,6 +18,24 @@ on:
           Thanks for your first pull request! We are excited to have you contribute.
           A maintainer will review your PR soon. Please ensure all CI checks pass.
 
+# CALLER REQUIREMENTS
+# ===================
+# When calling this reusable workflow, the caller's job-level
+# `permissions:` block MUST grant at least this full set, otherwise
+# the run fails with `startup_failure` before any job executes
+# (GitHub rejects the workflow at startup when the reusable declares
+# a permission the caller did not grant). NOTE: setting ANY scope in a
+# `permissions:` block forces every UNLISTED scope to `none`, and a job
+# that omits `permissions:` inherits the repository default
+# (default_workflow_permissions) — so a repo hardened to `read` will
+# startup-fail here unless these scopes are granted explicitly.
+#
+#   jobs:
+#     greeting:
+#       uses: netresearch/.github/.github/workflows/greetings.yml@main
+#       permissions:
+#         issues: write
+#         pull-requests: write
 permissions: {}
 
 jobs:
