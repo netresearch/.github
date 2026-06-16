@@ -80,6 +80,23 @@ on:
         type: string
         default: "bunx prettier --check ."
 
+# CALLER REQUIREMENTS
+# ===================
+# When calling this reusable workflow, the caller's job-level
+# `permissions:` block MUST grant at least this full set, otherwise
+# the run fails with `startup_failure` before any job executes
+# (GitHub rejects the workflow at startup when the reusable declares
+# a permission the caller did not grant). NOTE: setting ANY scope in a
+# `permissions:` block forces every UNLISTED scope to `none`, and a job
+# that omits `permissions:` inherits the repository default
+# (default_workflow_permissions) — so a repo hardened to `read` will
+# startup-fail here unless these scopes are granted explicitly.
+#
+#   jobs:
+#     type-check:
+#       uses: netresearch/.github/.github/workflows/ts-check.yml@main
+#       permissions:
+#         contents: read
 permissions:
   contents: read
 
