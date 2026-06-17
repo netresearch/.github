@@ -131,4 +131,17 @@ jobs:
         if: inputs.package-manager == 'yarn'
         env:
           AUDIT_LEVEL: ${{ inputs.audit-level }}
-        run: yarn npm audit --severity "$AUDIT_LEVEL"
+        run: |
+          # `yarn npm audit` is a Yarn Berry (v2+) command. On Yarn Classic
+          # (v1) it is parsed as `yarn run npm audit` and fails with
+          # "Command npm not found"; v1's own `yarn audit` exits with a
+          # severity bitmask and `--level` only filters display, so it cannot
+          # gate cleanly on a minimum severity. Detect the active major
+          # version and, for v1, audit via npm's clean `--audit-level`
+          # semantics against a synthesized lockfile (as the bun path does).
+          if [ "$(yarn --version | cut -d. -f1)" -ge 2 ]; then
+            yarn npm audit --severity "$AUDIT_LEVEL"
+          else
+            npm i --package-lock-only
+            npm audit --audit-level="$AUDIT_LEVEL"
+          fi
