@@ -112,7 +112,10 @@ jobs:
           AUDIT_LEVEL: ${{ inputs.audit-level }}
         run: |
           bun install --frozen-lockfile
-          npm i --package-lock-only
+          # --ignore-scripts: don't run the consumer's prepare/postinstall
+          # hooks (e.g. husky) during lockfile synthesis — they need a full
+          # install and would fail with exit 127.
+          npm i --package-lock-only --ignore-scripts
           npm audit --audit-level="$AUDIT_LEVEL"
 
       - name: Run audit (pnpm)
@@ -142,6 +145,8 @@ jobs:
           if [ "$(yarn --version | cut -d. -f1)" -ge 2 ]; then
             yarn npm audit --severity "$AUDIT_LEVEL"
           else
-            npm i --package-lock-only
+            # --ignore-scripts: skip the consumer's prepare/postinstall hooks
+            # (e.g. husky) during lockfile synthesis — they need a full install.
+            npm i --package-lock-only --ignore-scripts
             npm audit --audit-level="$AUDIT_LEVEL"
           fi
