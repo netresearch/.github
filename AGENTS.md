@@ -32,5 +32,5 @@ template is detected and reconciled by dedicated tooling:
 
 The reusable workflows under `.github/workflows/*.yml` are consumed across the org. Reference convention:
 
-- **Intra-org callers reference these by `@main` (or a published `@vN` interface tag), never a full-length SHA.** These workflows live in this same org and are kept correct here; SHA-pinning freezes callers on a stale revision and creates per-repo Renovate churn for no security gain.
+- **Intra-org callers reference these by `@main` (or a published `@vN` interface tag), never a full-length SHA.** These workflows live in this same org and are kept correct here; SHA-pinning freezes callers on a stale revision and creates per-repo Renovate churn for no security gain. Example: `uses: netresearch/.github/.github/workflows/go-check.yml@main` — note the doubled `.github/.github`, since the org repo is literally named `.github`.
 - SonarCloud's "pin GitHub Actions to a full-length commit SHA" hotspot is **advisory and wrong for first-party intra-org reusables** — mark it *Safe* rather than SHA-pinning. (SHA-pinning is still correct for third-party, non-org actions.)
