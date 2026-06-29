@@ -463,7 +463,7 @@ jobs:
           bash -euo pipefail -c "$PRE_BUILD_CMD"
 
       - name: Run gosec
-        uses: securego/gosec@f88a0781159d73052ba792962e624749904783d6 # master
+        uses: securego/gosec@11023e51e1f46c4ea63315bdb7670f073442168f # master
         with:
           # `-no-fail` keeps the CI step green; findings flow into the
           # Security tab via the SARIF upload below. Treat code scanning
