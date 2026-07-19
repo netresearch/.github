@@ -1,0 +1,114 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# Reusable "Deploy to GitHub Pages" — centralizes the
+# configure-pages + upload-pages-artifact + deploy-pages trio that is
+# currently inlined across modularer-ki-stack-page,
+# claude-code-marketplace and netresearch.github.io.
+#
+# The site BUILD stays in the caller (it is repo-specific: Node/Jekyll/
+# custom generators, README fetches, OG-image generation, etc.). The
+# caller's build job uploads the generated site as an ordinary artifact
+# (actions/upload-artifact); this reusable downloads that artifact,
+# packages it into the special `github-pages` artifact and deploys it to
+# the `github-pages` environment.
+#
+# Why a regular-artifact handoff instead of the caller running
+# `actions/upload-pages-artifact` itself: reusable workflows run as
+# separate jobs on fresh runners and do NOT share a filesystem with the
+# caller's build job. The only cross-job channel is an artifact. So the
+# caller uploads the built directory once (upload-artifact), and this
+# reusable owns the whole Pages trio from there.
+
+name: Deploy to GitHub Pages
+
+on:
+  workflow_call:
+    inputs:
+      artifact-name:
+        description: "Name of the ordinary artifact (actions/upload-artifact) the caller's build job produced, containing the built site. This reusable downloads it before deploying."
+        required: false
+        type: string
+        default: "github-pages-site"
+      artifact-path:
+        description: "Directory the built site is downloaded to and published from. Must match the layout the caller uploaded (the artifact's contents land directly here). Default fits Jekyll/11ty/Astro `_site` output; use `./public` for Hugo/Gatsby."
+        required: false
+        type: string
+        default: "./_site"
+      enablement:
+        description: "Pass `enablement: true` to actions/configure-pages so it turns on GitHub Pages for the repo via the API if it is not already enabled. Leave false when Pages is pre-enabled or the token cannot manage Pages settings (see caller requirements)."
+        required: false
+        type: boolean
+        default: false
+    outputs:
+      page_url:
+        description: "The deployed GitHub Pages URL (from actions/deploy-pages)."
+        value: ${{ jobs.deploy.outputs.page_url }}
+
+# CALLER REQUIREMENTS
+# ===================
+# The caller's job that `uses:` this reusable MUST grant at least the
+# permission set below, otherwise GitHub rejects the workflow at startup
+# (`startup_failure`) before any job runs — the caller cannot grant a
+# reusable a permission it does not itself hold.
+#
+#   jobs:
+#     deploy:
+#       uses: netresearch/.github/.github/workflows/pages-deploy.yml@main
+#       needs: build
+#       permissions:
+#         pages: write
+#         id-token: write
+#         contents: read
+#       with:
+#         artifact-name: github-pages-site
+#         artifact-path: ./_site
+#
+# Notes on `enablement: true`:
+#   - Requires the GITHUB_TOKEN to be allowed to manage Pages settings.
+#     On some org policies (or when Pages is disabled org-wide) the
+#     configure step's API call fails — keep it false and enable Pages
+#     once in the repo Settings instead.
+#   - On private/internal repos GitHub Pages needs an appropriate plan;
+#     enablement will fail where Pages is not available for the repo.
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to GitHub Pages
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+      contents: read
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Download built site
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ inputs.artifact-path }}
+
+      - name: Configure Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+        with:
+          enablement: ${{ inputs.enablement }}
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ${{ inputs.artifact-path }}
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
