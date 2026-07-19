@@ -213,22 +213,38 @@ jobs:
             echo 'EOM'
           } >> "$GITHUB_OUTPUT"
 
-      - name: Resolve provenance mode
+      - name: Resolve attestation modes
         id: prov
         env:
           PROVENANCE: ${{ inputs.provenance }}
           ATTEST: ${{ inputs.attest }}
+          SBOM: ${{ inputs.sbom }}
           PUSH: ${{ inputs.push }}
         run: |
           set -euo pipefail
-          if [[ -n "$PROVENANCE" ]]; then
+          if [[ "$PUSH" != "true" ]]; then
+            # No registry push (validation / --load): the docker exporter used
+            # by --load cannot attach attestations, and a bake file may hardcode
+            # provenance/sbom per target. Force them OFF explicitly — an empty
+            # value does NOT override a bake-file attest declaration, but
+            # "false" does — so callers can pass attest/sbom: true
+            # unconditionally and PR/validation builds still succeed.
+            MODE="false"
+            SBOM_OUT="false"
+          elif [[ -n "$PROVENANCE" ]]; then
             MODE="$PROVENANCE"
-          elif [[ "$ATTEST" == "true" && "$PUSH" == "true" ]]; then
+            SBOM_OUT="$SBOM"
+          elif [[ "$ATTEST" == "true" ]]; then
             MODE="mode=max"
+            SBOM_OUT="$SBOM"
           else
             MODE=""
+            SBOM_OUT="$SBOM"
           fi
-          echo "mode=${MODE}" >> "$GITHUB_OUTPUT"
+          {
+            echo "mode=${MODE}"
+            echo "sbom=${SBOM_OUT}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Log in to ${{ inputs.registry }}
         if: inputs.push
@@ -247,7 +263,7 @@ jobs:
           set: ${{ steps.bakeset.outputs.set }}
           push: ${{ inputs.push }}
           load: ${{ inputs.load }}
-          sbom: ${{ inputs.sbom }}
+          sbom: ${{ steps.prov.outputs.sbom }}
           provenance: ${{ steps.prov.outputs.mode }}
 
       - name: Enumerate produced images
@@ -314,6 +330,14 @@ jobs:
               --severity "$SEVERITY" \
               --scanners vuln,secret \
               "$ref"
+            # Give each image's SARIF a distinct category (automationDetails.id).
+            # codeql-action/upload-sarif rejects multiple runs sharing one
+            # category, which happens when more than one target is scanned.
+            tmp="$(mktemp)"
+            jq --arg cat "container-scan-${i}" \
+              '.runs[].automationDetails.id = $cat' \
+              "trivy-results/scan-${i}.sarif" > "$tmp"
+            mv "$tmp" "trivy-results/scan-${i}.sarif"
             echo "::endgroup::"
           done <<< "$SCAN_REFS"
           echo "count=${i}" >> "$GITHUB_OUTPUT"
@@ -325,8 +349,10 @@ jobs:
         if: inputs.scan && (inputs.push || inputs.load) && github.event_name != 'merge_group' && steps.trivy.outputs.count != '0'
         uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
         with:
+          # No `category` here: each SARIF carries its own distinct category
+          # (automationDetails.id set in the scan step) so multi-target scans
+          # don't collide.
           sarif_file: "trivy-results"
-          category: "container-scan"
 
       - name: Install Cosign
         if: inputs.sign && inputs.push
