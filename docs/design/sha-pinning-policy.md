@@ -46,7 +46,7 @@ everything else is hash-pinned.
 | --- | --- | --- |
 | **GitHub** (platform) | How refs are written | Org-owned reusable workflows are called `…@main`; third-party actions carry `@<sha> # <version>`. |
 | **zizmor** | Enforcement (audit) | `.github/zizmor.yml` `unpinned-uses` policy — authoritative. |
-| **Renovate** | Dependency updates | Not pinned by default; repos that opt into `helpers:pinGitHubActionDigests` must exempt `netresearch/**`. |
+| **Renovate** | Dependency updates | Not pinned by default; repos opt into the `:pinning` sub-preset, which pins third-party actions and exempts `netresearch/**`. |
 | **SonarCloud** | Secondary audit | Rule `githubactions:S7637` flags external actions without a SHA. |
 | **OpenSSF Scorecard** | Score signal | `Pinned-Dependencies` check; org-owned ref-pins lower the sub-score by design. |
 
@@ -90,25 +90,24 @@ which sets base policy (`config:recommended`, stability delay, deny-lists) and
 does **not** pin actions by default. Pinning is enforcement (zizmor), not a
 default source of update PRs.
 
-A repo that wants Renovate to maintain third-party SHA pins opts in with
-`helpers:pinGitHubActionDigests`. That preset pins **all** actions, org-owned
-included, so such a repo must re-exempt `netresearch/**`:
+A repo that wants Renovate to maintain third-party SHA pins extends the
+`:pinning` sub-preset:
 
 ```json
 {
-  "description": "Do not pin org-internal reusable workflows (use @main)",
-  "matchManagers": ["github-actions"],
-  "matchPackageNames": ["netresearch/**"],
-  "pinDigests": false
+  "extends": ["github>netresearch/renovate-config:pinning"]
 }
 ```
 
-**This exemption must live in the repo's own `packageRules`, not only in the
-shared preset.** Renovate applies the last matching rule, and an opt-in repo
-extends `helpers:pinGitHubActionDigests` *after* the shared preset — so a
-`netresearch/**` exemption placed only in the shared config is overridden by the
-later preset and has no effect. The shared preset documents the policy; the
-repo-level rule enforces it. Repos on the org default (no pinning) need nothing.
+The sub-preset bundles `helpers:pinGitHubActionDigests` with the
+`netresearch/**` exemption applied **after** it, so the exemption always wins —
+Renovate applies the last matching `packageRule`, and the exemption is the last
+one in the preset. Repos must **not** extend `helpers:pinGitHubActionDigests`
+directly: that pins **all** actions, org-owned included, and a `netresearch/**`
+exemption placed only in the shared `default` preset would be overridden by the
+later `helpers:pinGitHubActionDigests` and have no effect. The `:pinning`
+sub-preset exists precisely so the exemption cannot be omitted or ordered wrong.
+Repos on the org default (no pinning) need nothing.
 
 ### SonarCloud
 
@@ -130,11 +129,11 @@ does not apply to our own repositories.
 
 - One policy, five tools, no drift: ownership decides ref-pin vs. hash-pin, and
   zizmor is the enforcement of record.
-- A repo that opts into Renovate action-pinning **must** carry the
-  `netresearch/**` exemption in its own `renovate.json` `packageRules`. Without
-  it, Renovate re-pins org-owned workflows (the July 2026 incident). Reference
-  implementation:
-  [`netresearch/pagerangers-skill`](https://github.com/netresearch/pagerangers-skill/blob/main/renovate.json).
+- A repo that wants Renovate action-pinning extends the `:pinning` sub-preset,
+  which carries the `netresearch/**` exemption. Extending
+  `helpers:pinGitHubActionDigests` directly re-pins org-owned workflows (the
+  July 2026 incident:
+  [sdk-api-universal-messenger#38](https://github.com/netresearch/sdk-api-universal-messenger/pull/38)/[#40](https://github.com/netresearch/sdk-api-universal-messenger/pull/40)).
 - The Scorecard `Pinned-Dependencies` sub-score is intentionally below 10 on
   repos that consume org-owned reusable workflows.
 - SonarCloud `githubactions:S7637` findings on `netresearch/*` are triaged as
@@ -144,6 +143,7 @@ does not apply to our own repositories.
 
 1. Third-party `uses:` → `@<sha> # <version>`.
 2. Org-owned `uses:` → `@main`.
-3. If (and only if) the repo opts into `helpers:pinGitHubActionDigests`, add the
-   `netresearch/**` `pinDigests: false` rule to its own `packageRules`.
+3. If the repo wants Renovate to maintain third-party SHA pins, extend
+   `github>netresearch/renovate-config:pinning` — never
+   `helpers:pinGitHubActionDigests` directly.
 4. Keep `.github/zizmor.yml` `unpinned-uses` policies aligned with this ADR.
