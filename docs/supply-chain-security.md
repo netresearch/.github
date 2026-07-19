@@ -8,6 +8,9 @@
 | 2. Dependency review | `dependency-review-action` | All repos (org-wide default) | On every PR |
 | 3. Package audit | `pnpm audit` / `composer audit` | Repos with audit workflow | On every PR |
 | 4. Version deny-list | Renovate org preset `packageRules` | All repos with Renovate | Before PR creation |
+| 5. Action SHA-pinning | zizmor `unpinned-uses` (external → hash-pin, `netresearch/*` → ref-pin) | All repos with the zizmor audit | On every PR |
+
+See [SHA-Pinning Policy (ADR)](design/sha-pinning-policy.md) for how external actions are hash-pinned while org-owned reusable workflows track `@main`, and how zizmor, Renovate, SonarCloud and Scorecard implement it.
 
 ## Incident Response Playbook
 
