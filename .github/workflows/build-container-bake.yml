@@ -287,6 +287,10 @@ jobs:
       - name: Install Trivy
         if: inputs.scan && (inputs.push || inputs.load)
         uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          # Pin the Trivy CLI version (setup-trivy defaults to "latest",
+          # which zizmor flags as an unpinned external tool).
+          version: v0.72.0
 
       - name: Scan images with Trivy
         id: trivy
