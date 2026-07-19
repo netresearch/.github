@@ -1,0 +1,345 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# Reusable "Build Container (Bake)" — bake-aware, multi-target container
+# build / scan / sign for repos that drive their build with a
+# docker-bake.hcl (phpbu-docker, moodle-docker, glpi-docker-compose-stack,
+# docker-ftp-server).
+#
+# This is the multi-target sibling of `build-container.yml`. Where
+# build-container.yml wraps a single docker/build-push-action call (one
+# Dockerfile, one image, one digest), this workflow wraps docker/bake-action
+# and builds every target the bake file defines in one pass, with a shared
+# GHA cache and the tag fan-out computed *inside* the HCL (`variable` blocks
+# + per-target `tags`). Scan and sign then enumerate the images bake
+# produced by parsing `docker buildx bake --print`.
+#
+# Injecting build-time values (version, build date, git sha) into the HCL:
+# HCL `variable` blocks are populated from the process environment, which a
+# reusable workflow cannot receive from its caller directly. Use
+# `pre-build-command` to compute them after checkout and export them to
+# $GITHUB_ENV (they then persist into the bake, print, scan and sign steps),
+# and/or `bake-set` to override target fields (tags, platforms, args). See
+# the caller example at the bottom.
+#
+# Caller pattern (phpbu-docker build.yml — version from composer.lock):
+#
+#   jobs:
+#     build:
+#       uses: netresearch/.github/.github/workflows/build-container-bake.yml@main
+#       permissions:
+#         contents: read
+#         packages: write
+#         security-events: write
+#         id-token: write
+#       with:
+#         targets: minimal,full
+#         push: ${{ github.event_name != 'pull_request' }}
+#         sign: true
+#         attest: true
+#         sbom: true
+#         pre-build-command: |
+#           V=$(jq -r '.packages[] | select(.name=="phpbu/phpbu") | .version' app/composer.lock)
+#           {
+#             echo "PHPBU_VERSION=$V"
+#             echo "PHPBU_MINOR=$(echo "$V" | cut -d. -f1,2)"
+#             echo "PHPBU_MAJOR=$(echo "$V" | cut -d. -f1)"
+#             echo "BUILD_DATE=$(date -u +%Y-%m-%d)"
+#             echo "GIT_SHA=$(git rev-parse --short HEAD)"
+#           } >> "$GITHUB_ENV"
+
+name: Build Container (Bake)
+
+on:
+  workflow_call:
+    inputs:
+      bake-file:
+        description: "Path to the bake definition (docker/bake-action `files`). Repeat with newlines for multiple files."
+        required: false
+        type: string
+        default: "docker-bake.hcl"
+      targets:
+        description: "Comma- or newline-separated bake targets/groups to build. Empty = the bake file's `default` group."
+        required: false
+        type: string
+        default: ""
+      ref:
+        description: "Git ref to checkout and build. Empty = the caller's github.ref."
+        required: false
+        type: string
+        default: ""
+      platforms:
+        description: "Comma-separated platforms. When set, overrides every target's platform via `--set *.platform=...`. Empty = use the platforms declared in the bake file."
+        required: false
+        type: string
+        default: ""
+      registry:
+        description: "Container registry to log in to for push. The image *names* come from the bake file; this only controls the login host."
+        required: false
+        type: string
+        default: "ghcr.io"
+      push:
+        description: "Push built images to the registry. Set false for validation-only builds (e.g. on pull_request)."
+        required: false
+        type: boolean
+        default: true
+      load:
+        description: "Load built images into the local docker daemon. Required to scan on non-push (pull_request) runs, since Trivy then reads the local image. Ignored when push=true (registry images are scanned by ref)."
+        required: false
+        type: boolean
+        default: false
+      scan:
+        description: "Run Trivy over the produced images (one scan per target, first tag) and upload SARIF. Requires push=true OR load=true so the image is resolvable."
+        required: false
+        type: boolean
+        default: true
+      trivy-severity:
+        description: "Trivy severity filter."
+        required: false
+        type: string
+        default: "CRITICAL,HIGH"
+      sign:
+        description: "Cosign keyless (OIDC) sign every tag bake produced. Requires push=true (signatures are written to the registry)."
+        required: false
+        type: boolean
+        default: false
+      attest:
+        description: "Emit SLSA build provenance as a buildx in-image attestation (`provenance=mode=max`). This is the bake-native SLSA path — NOT actions/attest-build-provenance — because bake produces N images with N digests. Ignored when `provenance` is set explicitly. Requires push=true."
+        required: false
+        type: boolean
+        default: false
+      sbom:
+        description: "Generate in-image SBOM for every target (docker/bake-action `sbom`). Requires push=true to be attached in the registry."
+        required: false
+        type: boolean
+        default: false
+      provenance:
+        description: "Explicit buildx provenance mode passed to docker/bake-action `provenance` (e.g. 'mode=max', 'false'). When set, takes precedence over `attest`. Empty = derive from `attest`."
+        required: false
+        type: string
+        default: ""
+      cache-scope:
+        description: "Optional GHA cache scope suffix. Set when parallel matrix calls share targets but must keep separate caches. Empty = one shared cache."
+        required: false
+        type: string
+        default: ""
+      bake-set:
+        description: "Extra newline-separated bake `--set` overrides (KEY=VALUE), forwarded verbatim to docker/bake-action `set`. Use for target-field overrides the HCL does not expose as env variables (e.g. `minimal.tags=...`, `*.args.FOO=bar`). Applied on top of the reusable's cache/platform overrides."
+        required: false
+        type: string
+        default: ""
+      pre-build-command:
+        description: "Shell command(s) run after checkout and before bake. Primary use: compute build-time values and export them to $GITHUB_ENV so the HCL `variable` blocks pick them up (version, BUILD_DATE, GIT_SHA)."
+        required: false
+        type: string
+        default: ""
+    outputs:
+      bake-metadata:
+        description: "Raw docker/bake-action metadata JSON (per-target build results incl. containerimage.digest)."
+        value: ${{ jobs.bake.outputs.metadata }}
+      tags:
+        description: "Newline-separated list of all image tags bake produced (from `bake --print`). Empty when the print step is skipped."
+        value: ${{ jobs.bake.outputs.tags }}
+
+permissions:
+  contents: read
+  packages: write
+  security-events: write
+  id-token: write
+
+jobs:
+  bake:
+    name: Build Container (Bake)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+      id-token: write
+    outputs:
+      metadata: ${{ steps.bake.outputs.metadata }}
+      tags: ${{ steps.images.outputs.tags }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+
+      - name: Run pre-build command
+        if: inputs.pre-build-command != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRE_BUILD_CMD: ${{ inputs.pre-build-command }}
+        run: |
+          set -euo pipefail
+          echo "::group::pre-build-command"
+          bash -euo pipefail -c "$PRE_BUILD_CMD"
+          echo "::endgroup::"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Compose bake --set overrides
+        id: bakeset
+        env:
+          PLATFORMS: ${{ inputs.platforms }}
+          CACHE_SCOPE: ${{ inputs.cache-scope }}
+          EXTRA_SET: ${{ inputs.bake-set }}
+        run: |
+          set -euo pipefail
+          SCOPE_SUFFIX=""
+          if [[ -n "$CACHE_SCOPE" ]]; then
+            SCOPE_SUFFIX=",scope=${CACHE_SCOPE}"
+          fi
+          {
+            echo 'set<<EOM'
+            echo "*.cache-from=type=gha${SCOPE_SUFFIX}"
+            echo "*.cache-to=type=gha,mode=max${SCOPE_SUFFIX}"
+            if [[ -n "$PLATFORMS" ]]; then
+              echo "*.platform=${PLATFORMS}"
+            fi
+            if [[ -n "$EXTRA_SET" ]]; then
+              printf '%s\n' "$EXTRA_SET"
+            fi
+            echo 'EOM'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Resolve provenance mode
+        id: prov
+        env:
+          PROVENANCE: ${{ inputs.provenance }}
+          ATTEST: ${{ inputs.attest }}
+          PUSH: ${{ inputs.push }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$PROVENANCE" ]]; then
+            MODE="$PROVENANCE"
+          elif [[ "$ATTEST" == "true" && "$PUSH" == "true" ]]; then
+            MODE="mode=max"
+          else
+            MODE=""
+          fi
+          echo "mode=${MODE}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to ${{ inputs.registry }}
+        if: inputs.push
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build with Bake
+        id: bake
+        uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
+        with:
+          files: ${{ inputs.bake-file }}
+          targets: ${{ inputs.targets }}
+          set: ${{ steps.bakeset.outputs.set }}
+          push: ${{ inputs.push }}
+          load: ${{ inputs.load }}
+          sbom: ${{ inputs.sbom }}
+          provenance: ${{ steps.prov.outputs.mode }}
+
+      - name: Enumerate produced images
+        id: images
+        if: inputs.scan || inputs.sign
+        env:
+          BAKE_FILE: ${{ inputs.bake-file }}
+          TARGETS: ${{ inputs.targets }}
+          SET_LINES: ${{ steps.bakeset.outputs.set }}
+        run: |
+          set -euo pipefail
+          # Rebuild the --set flag list (tags can be overridden via bake-set,
+          # so the print must use the same overrides the build used).
+          SET_ARGS=()
+          while IFS= read -r line; do
+            [[ -n "$line" ]] && SET_ARGS+=(--set "$line")
+          done <<< "$SET_LINES"
+          FILE_ARGS=()
+          while IFS= read -r f; do
+            [[ -n "$f" ]] && FILE_ARGS+=(-f "$f")
+          done <<< "$BAKE_FILE"
+          # shellcheck disable=SC2206
+          TARGET_ARGS=(${TARGETS//,/ })
+          PRINT=$(docker buildx bake "${FILE_ARGS[@]}" "${TARGET_ARGS[@]}" "${SET_ARGS[@]}" --print)
+          # All tags (for signing) and one ref per target (for scanning).
+          SIGN_TAGS=$(echo "$PRINT" | jq -r '.target | to_entries[] | .value.tags[]?' | sort -u)
+          SCAN_REFS=$(echo "$PRINT" | jq -r '.target | to_entries[] | .value.tags[0] // empty' | sort -u)
+          {
+            echo 'tags<<EOM'
+            echo "$SIGN_TAGS"
+            echo 'EOM'
+            echo 'scan_refs<<EOM'
+            echo "$SCAN_REFS"
+            echo 'EOM'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install Trivy
+        if: inputs.scan && (inputs.push || inputs.load)
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          # Pin the Trivy CLI version (setup-trivy defaults to "latest",
+          # which zizmor flags as an unpinned external tool).
+          version: v0.72.0
+
+      - name: Scan images with Trivy
+        id: trivy
+        if: inputs.scan && (inputs.push || inputs.load)
+        env:
+          SCAN_REFS: ${{ steps.images.outputs.scan_refs }}
+          SEVERITY: ${{ inputs.trivy-severity }}
+        run: |
+          set -euo pipefail
+          mkdir -p trivy-results
+          i=0
+          while IFS= read -r ref; do
+            [[ -z "$ref" ]] && continue
+            i=$((i + 1))
+            echo "::group::Trivy $ref"
+            # Report-only (no exit-code): findings surface via SARIF/code-scanning,
+            # they do not fail the build — matches build-container.yml.
+            trivy image \
+              --format sarif \
+              --output "trivy-results/scan-${i}.sarif" \
+              --severity "$SEVERITY" \
+              --scanners vuln,secret \
+              "$ref"
+            echo "::endgroup::"
+          done <<< "$SCAN_REFS"
+          echo "count=${i}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Trivy results to GitHub Security
+        # Skip on merge_group: the gh-readonly-queue ref is deleted the moment
+        # the merge completes, racing codeql-action/upload-sarif into a
+        # guaranteed `ref ... not found` failure. Push/PR runs have stable refs.
+        if: inputs.scan && (inputs.push || inputs.load) && github.event_name != 'merge_group' && steps.trivy.outputs.count != '0'
+        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
+        with:
+          sarif_file: "trivy-results"
+          category: "container-scan"
+
+      - name: Install Cosign
+        if: inputs.sign && inputs.push
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign images with Cosign (keyless OIDC)
+        if: inputs.sign && inputs.push
+        env:
+          SIGN_TAGS: ${{ steps.images.outputs.tags }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r tag; do
+            [[ -z "$tag" ]] && continue
+            echo "Signing $tag"
+            cosign sign --yes "$tag"
+          done <<< "$SIGN_TAGS"
