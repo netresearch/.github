@@ -330,6 +330,14 @@ jobs:
               --severity "$SEVERITY" \
               --scanners vuln,secret \
               "$ref"
+            # Give each image's SARIF a distinct category (automationDetails.id).
+            # codeql-action/upload-sarif rejects multiple runs sharing one
+            # category, which happens when more than one target is scanned.
+            tmp="$(mktemp)"
+            jq --arg cat "container-scan-${i}" \
+              '.runs[].automationDetails.id = $cat' \
+              "trivy-results/scan-${i}.sarif" > "$tmp"
+            mv "$tmp" "trivy-results/scan-${i}.sarif"
             echo "::endgroup::"
           done <<< "$SCAN_REFS"
           echo "count=${i}" >> "$GITHUB_OUTPUT"
@@ -341,8 +349,10 @@ jobs:
         if: inputs.scan && (inputs.push || inputs.load) && github.event_name != 'merge_group' && steps.trivy.outputs.count != '0'
         uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
         with:
+          # No `category` here: each SARIF carries its own distinct category
+          # (automationDetails.id set in the scan step) so multi-target scans
+          # don't collide.
           sarif_file: "trivy-results"
-          category: "container-scan"
 
       - name: Install Cosign
         if: inputs.sign && inputs.push
