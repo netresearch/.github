@@ -4,10 +4,13 @@ name: CodeQL
 #
 # The `languages` input accepts one of:
 #   - `auto` — in-repo detection: always includes `go`; adds
-#     `javascript-typescript` when a `package.json` exists or any
-#     `.ts` / `.tsx` / `.mts` source is present in the first 4 levels
-#     of the tree. This is the preferred value for Go repos since it
-#     picks up JS/TS tooling automatically.
+#     `javascript-typescript` when a `package.json` exists OR any
+#     `.js` / `.jsx` / `.mjs` / `.cjs` / `.ts` / `.tsx` / `.mts` / `.cts`
+#     source is present in the first 4 levels of the tree (ignoring
+#     `node_modules/` and `vendor/`). A `package.json` is NOT required —
+#     repos with a hand-written plain-JS frontend still get scanned. This
+#     is the preferred value for Go repos since it picks up JS/TS
+#     automatically.
 #   - a single CodeQL language, e.g. `go`
 #   - a comma-separated list, e.g. `go,javascript-typescript`
 #
@@ -102,11 +105,21 @@ jobs:
         run: |
           set -euo pipefail
           # `auto` triggers in-repo detection: Go is assumed, plus JS/TS if
-          # there's a package.json or any TS source. Explicit lists still
-          # win — pass `languages: go` or `languages: go,javascript-typescript`.
+          # there's a package.json OR any JS/TS source file. A package.json is
+          # NOT required — repos with hand-written .js (no build step / no
+          # node_modules, e.g. a plain static frontend) still get scanned.
+          # Explicit lists still win — pass `languages: go` or
+          # `languages: go,javascript-typescript`.
           if [ "$LANGUAGES" = "auto" ]; then
             langs="go"
-            if [ -f package.json ] || [ -n "$(find . -maxdepth 4 -type f \( -name '*.ts' -o -name '*.tsx' -o -name '*.mts' \) 2>/dev/null | head -1)" ]; then
+            # Prune node_modules/vendor/.git (not our source; huge and deep),
+            # then look for any first-party JS/TS file. maxdepth 8 reaches
+            # nested layouts like internal/web/static/js/*.js (depth 5).
+            if [ -f package.json ] || [ -n "$(find . -maxdepth 8 \
+                \( -type d \( -name node_modules -o -name vendor -o -name .git \) -prune \) -o \
+                \( -type f \( -name '*.js' -o -name '*.jsx' -o -name '*.mjs' -o -name '*.cjs' \
+                   -o -name '*.ts' -o -name '*.tsx' -o -name '*.mts' -o -name '*.cts' \) -print \) \
+                2>/dev/null | head -1)" ]; then
               langs="${langs},javascript-typescript"
             fi
             LANGUAGES="$langs"
