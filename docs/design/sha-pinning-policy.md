@@ -46,7 +46,7 @@ everything else is hash-pinned.
 | --- | --- | --- |
 | **GitHub** (platform) | How refs are written | Org-owned reusable workflows are called `…@main`; third-party actions carry `@<sha> # <version>`. |
 | **zizmor** | Enforcement (audit) | `.github/zizmor.yml` `unpinned-uses` policy — authoritative. |
-| **Renovate** | Dependency updates | Pinning disabled by default org-wide; opt-in repos must exempt `netresearch/**`. |
+| **Renovate** | Dependency updates | Not pinned by default; repos that opt into `helpers:pinGitHubActionDigests` must exempt `netresearch/**`. |
 | **SonarCloud** | Secondary audit | Rule `githubactions:S7637` flags external actions without a SHA. |
 | **OpenSSF Scorecard** | Score signal | `Pinned-Dependencies` check; org-owned ref-pins lower the sub-score by design. |
 
@@ -84,18 +84,11 @@ An external action left on a tag fails the audit; an org-owned workflow on
 
 ### Renovate — no pinning by default, exempt org-owned when opted in
 
-The org default in
-[`netresearch/renovate-config`](https://github.com/netresearch/renovate-config)
-disables pin/digest updates entirely — pinning is enforcement (zizmor), not a
-source of update PRs, and unattended pin PRs are noise:
-
-```json
-{
-  "description": "Disable all pinning - creates noise ...",
-  "matchUpdateTypes": ["pin", "digest"],
-  "enabled": false
-}
-```
+GitHub repos extend the shared preset
+[`github>netresearch/renovate-config`](https://github.com/netresearch/renovate-config),
+which sets base policy (`config:recommended`, stability delay, deny-lists) and
+does **not** pin actions by default. Pinning is enforcement (zizmor), not a
+default source of update PRs.
 
 A repo that wants Renovate to maintain third-party SHA pins opts in with
 `helpers:pinGitHubActionDigests`. That preset pins **all** actions, org-owned
