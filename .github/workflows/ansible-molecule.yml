@@ -1,0 +1,231 @@
+# Reusable "Ansible Molecule" workflow for Ansible roles.
+#
+# checkout + actions/setup-python (with pip cache) + pip install molecule
+# (plus any extra packages) + optional `ansible-galaxy install -r
+# <requirements>` + `molecule <command> [-s <scenario>]`.
+#
+# Centralizes the inline molecule jobs previously copied across the org's
+# Ansible role repos, so the pinned action versions (checkout,
+# setup-python) are bumped once here by Renovate instead of per-repo.
+#
+# Caller pattern (full `molecule test`):
+#
+#   name: Molecule
+#   on:
+#     push:
+#     pull_request:
+#   permissions: {}
+#   jobs:
+#     molecule:
+#       uses: netresearch/.github/.github/workflows/ansible-molecule.yml@main
+#       permissions:
+#         contents: read
+#       with:
+#         molecule-env: |
+#           ANSIBLE_ALLOW_BROKEN_CONDITIONALS=true
+#
+# Caller pattern (converge one scenario and assert a secret never leaks):
+#
+#   jobs:
+#     no-log-leak:
+#       uses: netresearch/.github/.github/workflows/ansible-molecule.yml@main
+#       permissions:
+#         contents: read
+#       with:
+#         command: converge
+#         scenario: no-log-leak
+#         destroy-after: true
+#         assert-output-absent: CANARY_DEPLOY_TOKEN_must_not_appear
+#         molecule-env: |
+#           ANSIBLE_ALLOW_BROKEN_CONDITIONALS=true
+#           ANSIBLE_FORCE_COLOR=0
+#
+# SECURITY: pinned action SHAs, harden-runner, read-only permissions,
+# `persist-credentials: false` on checkout. Caller-supplied packages and
+# the molecule command/scenario are passed through argument vectors (never
+# re-interpreted by the shell); `molecule-env` lines are appended verbatim
+# to $GITHUB_ENV and MUST be single-line KEY=VALUE pairs from the caller's
+# committed workflow (a trusted source). No `github.event.*` data is used.
+
+name: Ansible Molecule (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: "Runner label."
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Per-job timeout in minutes."
+        type: number
+        default: 60
+      python-version:
+        description: "Python version for actions/setup-python."
+        type: string
+        default: "3.x"
+      cache:
+        description: "Dependency cache for actions/setup-python (pip, pipenv, poetry, or empty to disable)."
+        type: string
+        default: "pip"
+      cache-dependency-path:
+        description: "Optional path(s) to dependency files for the setup-python cache key."
+        type: string
+        default: ""
+      pip-packages:
+        description: >-
+          Space-separated pip packages to install. Version specifiers must
+          be single tokens (e.g. 'requests<2.32.0').
+        type: string
+        default: "ansible molecule molecule-docker"
+      galaxy-requirements:
+        description: >-
+          Optional path to an Ansible Galaxy requirements file. When set,
+          `ansible-galaxy install -r <path>` runs before molecule.
+        type: string
+        default: ""
+      working-directory:
+        description: "Working directory for the run steps."
+        type: string
+        default: "."
+      command:
+        description: "Molecule subcommand to run (e.g. test, converge, verify)."
+        type: string
+        default: "test"
+      scenario:
+        description: "Optional molecule scenario name. When set, `-s <scenario>` is appended."
+        type: string
+        default: ""
+      molecule-env:
+        description: >-
+          Optional newline-separated KEY=VALUE pairs exported to the job
+          environment before molecule runs (e.g. ANSIBLE_ALLOW_BROKEN_CONDITIONALS=true).
+        type: string
+        default: ""
+      destroy-after:
+        description: >-
+          Run `molecule destroy` in an always() cleanup step. Needed for
+          commands that do not self-destroy (e.g. converge); `test` already
+          destroys on its own.
+        type: boolean
+        default: false
+      assert-output-absent:
+        description: >-
+          Optional fixed string that MUST NOT appear in the molecule
+          output. When set, output is captured and the job fails if the
+          string appears; it also fails if the molecule run itself did not
+          succeed, so the guard cannot pass vacuously. Use to assert a
+          no_log credential never leaks into play output.
+        type: string
+        default: ""
+
+# CALLER REQUIREMENTS
+# ===================
+# The caller's job-level `permissions:` block MUST grant at least
+# `contents: read`, otherwise the run fails with `startup_failure` before
+# any job executes. Setting ANY scope forces every unlisted scope to
+# `none`, and a job that omits `permissions:` inherits the repository
+# default — so a repo hardened to `read` still needs this granted
+# explicitly:
+#
+#   jobs:
+#     molecule:
+#       uses: netresearch/.github/.github/workflows/ansible-molecule.yml@main
+#       permissions:
+#         contents: read
+permissions: {}
+
+jobs:
+  molecule:
+    name: molecule ${{ inputs.command }}${{ inputs.scenario != '' && format(' ({0})', inputs.scenario) || '' }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Python ${{ inputs.python-version }}
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: ${{ inputs.cache }}
+          cache-dependency-path: ${{ inputs.cache-dependency-path }}
+
+      - name: Install packages
+        env:
+          PIP_PACKAGES: ${{ inputs.pip-packages }}
+        run: |
+          python3 -m pip install --upgrade pip
+          # shellcheck disable=SC2086  # intended word-splitting of the package list
+          printf '%s\n' $PIP_PACKAGES | xargs -r python3 -m pip install
+
+      - name: Install Galaxy requirements
+        if: ${{ inputs.galaxy-requirements != '' }}
+        env:
+          GALAXY_REQUIREMENTS: ${{ inputs.galaxy-requirements }}
+        run: ansible-galaxy install -r "$GALAXY_REQUIREMENTS"
+
+      - name: Export molecule environment
+        if: ${{ inputs.molecule-env != '' }}
+        env:
+          MOLECULE_ENV: ${{ inputs.molecule-env }}
+        run: |
+          # Each non-empty line is a KEY=VALUE pair from the caller's
+          # committed workflow; append it verbatim to the job environment.
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            printf '%s\n' "$line" >> "$GITHUB_ENV"
+          done <<< "$MOLECULE_ENV"
+
+      - name: Run molecule
+        env:
+          MOLECULE_COMMAND: ${{ inputs.command }}
+          MOLECULE_SCENARIO: ${{ inputs.scenario }}
+          ASSERT_ABSENT: ${{ inputs.assert-output-absent }}
+        run: |
+          args=("$MOLECULE_COMMAND")
+          if [ -n "$MOLECULE_SCENARIO" ]; then
+            args+=("-s" "$MOLECULE_SCENARIO")
+          fi
+          if [ -z "$ASSERT_ABSENT" ]; then
+            molecule "${args[@]}"
+            exit $?
+          fi
+          # Capture output to assert a secret never leaked, then require the
+          # run itself to have succeeded so the guard is not vacuous.
+          set +e
+          out="$(molecule "${args[@]}" 2>&1)"; rc=$?
+          set -e
+          printf '%s\n' "$out"
+          if printf '%s' "$out" | grep -qF -- "$ASSERT_ABSENT"; then
+            echo "::error::forbidden string appeared in molecule output"
+            exit 1
+          fi
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::molecule run failed (rc=$rc); the output guard did not exercise the target path"
+            exit 1
+          fi
+          echo "ok: forbidden string never appeared in molecule output"
+
+      - name: Destroy
+        if: ${{ always() && inputs.destroy-after }}
+        env:
+          MOLECULE_SCENARIO: ${{ inputs.scenario }}
+        run: |
+          if [ -n "$MOLECULE_SCENARIO" ]; then
+            molecule destroy -s "$MOLECULE_SCENARIO" || true
+          else
+            molecule destroy || true
+          fi
