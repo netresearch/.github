@@ -124,6 +124,9 @@ on:
       CODECOV_TOKEN:
         description: "Codecov upload token. Required for private repositories when `coverage-upload` is true."
         required: false
+      GITLEAKS_LICENSE:
+        description: "gitleaks-action license key (required for org repositories). Forwarded to the gitleaks job."
+        required: false
 
 # CALLER REQUIREMENTS
 # ===================
@@ -221,6 +224,8 @@ jobs:
     permissions:
       contents: read
       security-events: write
+    secrets:
+      GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 
   dependency-review:
     name: Dependency Review
