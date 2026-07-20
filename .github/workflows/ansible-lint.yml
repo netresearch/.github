@@ -1,0 +1,174 @@
+# Reusable "Ansible Lint" workflow for Ansible roles and collections.
+#
+# checkout + actions/setup-python (with pip cache) + pip install
+# ansible-lint (plus any extra packages) + optional
+# `ansible-galaxy install -r <requirements>` + `ansible-lint`.
+#
+# Centralizes the inline ansible-lint jobs previously copied across the
+# org's Ansible role repos, so the pinned action versions (checkout,
+# setup-python) are bumped once here by Renovate instead of per-repo.
+#
+# Caller pattern (minimal):
+#
+#   name: CI
+#   on:
+#     push:
+#       branches: [main, master]
+#     pull_request:
+#   permissions: {}
+#   jobs:
+#     ansible-lint:
+#       uses: netresearch/.github/.github/workflows/ansible-lint.yml@main
+#       permissions:
+#         contents: read
+#
+# Caller pattern (Galaxy requirements + extra tools + non-blocking):
+#
+#   jobs:
+#     ansible-lint:
+#       uses: netresearch/.github/.github/workflows/ansible-lint.yml@main
+#       permissions:
+#         contents: read
+#       with:
+#         pip-packages: "ansible ansible-lint yamllint"
+#         galaxy-requirements: "requirements.yml"
+#         soft-fail: true
+#
+# SECURITY: pinned action SHAs, harden-runner, read-only permissions,
+# `persist-credentials: false` on checkout. Caller-supplied package lists
+# and lint args are passed to pip/ansible-lint through argument vectors
+# (word-split, never re-interpreted by the shell) and are never expanded
+# into `run:` script text. All inputs arrive via `workflow_call` from
+# trusted callers.
+
+name: Ansible Lint (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: "Runner label."
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Per-job timeout in minutes."
+        type: number
+        default: 10
+      python-version:
+        description: "Python version for actions/setup-python."
+        type: string
+        default: "3.x"
+      cache:
+        description: >-
+          Dependency cache for actions/setup-python (pip, pipenv, poetry).
+          Empty by default because Ansible role repos usually ship no pip
+          lockfile — enabling pip cache without one makes setup-python fail
+          ("no file matched **/requirements.txt or **/pyproject.toml"). Set
+          this together with `cache-dependency-path` only when a lockfile exists.
+        type: string
+        default: ""
+      cache-dependency-path:
+        description: "Path(s) to dependency files for the setup-python cache key. Required when `cache` is set."
+        type: string
+        default: ""
+      pip-packages:
+        description: >-
+          Space-separated pip packages to install before linting. Version
+          specifiers must be single tokens (e.g. 'ansible-lint>=6').
+        type: string
+        default: "ansible-lint"
+      galaxy-requirements:
+        description: >-
+          Optional path to an Ansible Galaxy requirements file. When set,
+          `ansible-galaxy install -r <path>` runs before linting.
+        type: string
+        default: ""
+      working-directory:
+        description: "Working directory for the run steps."
+        type: string
+        default: "."
+      ansible-lint-args:
+        description: "Arguments passed to ansible-lint (e.g. '.' or '--profile production .')."
+        type: string
+        default: "."
+      soft-fail:
+        description: >-
+          When true, ansible-lint findings are logged but do not fail the
+          job (mirrors a per-repo `continue-on-error: true`). Default false.
+        type: boolean
+        default: false
+
+# CALLER REQUIREMENTS
+# ===================
+# The caller's job-level `permissions:` block MUST grant at least
+# `contents: read`, otherwise the run fails with `startup_failure` before
+# any job executes. Setting ANY scope forces every unlisted scope to
+# `none`, and a job that omits `permissions:` inherits the repository
+# default — so a repo hardened to `read` still needs this granted
+# explicitly:
+#
+#   jobs:
+#     ansible-lint:
+#       uses: netresearch/.github/.github/workflows/ansible-lint.yml@main
+#       permissions:
+#         contents: read
+permissions: {}
+
+jobs:
+  ansible-lint:
+    name: ansible-lint
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Python ${{ inputs.python-version }}
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: ${{ inputs.cache }}
+          cache-dependency-path: ${{ inputs.cache-dependency-path }}
+
+      - name: Install packages
+        env:
+          PIP_PACKAGES: ${{ inputs.pip-packages }}
+        run: |
+          python3 -m pip install --upgrade pip
+          # shellcheck disable=SC2086  # intended word-splitting of the package list
+          printf '%s\n' $PIP_PACKAGES | xargs -r python3 -m pip install
+
+      - name: Install Galaxy requirements
+        if: ${{ inputs.galaxy-requirements != '' }}
+        env:
+          GALAXY_REQUIREMENTS: ${{ inputs.galaxy-requirements }}
+        run: ansible-galaxy install -r "$GALAXY_REQUIREMENTS"
+
+      - name: Run ansible-lint
+        env:
+          ANSIBLE_LINT_ARGS: ${{ inputs.ansible-lint-args }}
+          SOFT_FAIL: ${{ inputs.soft-fail }}
+        run: |
+          set +e
+          # shellcheck disable=SC2086  # intended word-splitting of the args list
+          ansible-lint $ANSIBLE_LINT_ARGS
+          STATUS=$?
+          set -e
+          if [ "$STATUS" -eq 0 ]; then exit 0; fi
+          if [ "$SOFT_FAIL" = "true" ]; then
+            echo "::warning::ansible-lint reported findings. Non-blocking because soft-fail=true; set soft-fail=false after cleanup."
+            exit 0
+          fi
+          exit "$STATUS"
