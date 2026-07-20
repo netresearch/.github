@@ -1,0 +1,177 @@
+# Reusable "Python Build" workflow — builds a Python distribution
+# (sdist + wheel), validates it, and uploads it as a workflow artifact.
+#
+# Complements python-ci.yml (lint/type/test) and python-audit.yml
+# (bandit/pip-audit/SBOM): this is the "produce and check the dist" step
+# that CI build jobs across the org inline (checkout + setup-python +
+# `pip install build twine` + `python -m build` + `twine check`).
+#
+# Caller pattern (pip):
+#
+#   jobs:
+#     build:
+#       uses: netresearch/.github/.github/workflows/python-build.yml@main
+#       permissions:
+#         contents: read
+#
+# Caller pattern (uv):
+#
+#   jobs:
+#     build:
+#       uses: netresearch/.github/.github/workflows/python-build.yml@main
+#       permissions:
+#         contents: read
+#       with:
+#         package-manager: uv
+#         install-cmd: "uv sync --frozen"
+#         build-cmd: "uv build"
+#         check-cmd: "uvx twine check dist/*"
+#
+# SECURITY: pinned action SHAs, harden-runner, read-only permissions,
+# `persist-credentials: false` on checkout. Caller-supplied commands are
+# routed through `env:` and executed with `bash -c "$VAR"`; no
+# github.event.* data reaches a run block. Inputs arrive via
+# `workflow_call` from trusted callers.
+
+name: Python Build (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: "Runner label."
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Per-job timeout in minutes."
+        type: number
+        default: 15
+      package-manager:
+        description: >-
+          Python package manager: 'pip', 'poetry', or 'uv'. With 'uv',
+          astral-sh/setup-uv runs before Python setup and the setup-python
+          pip cache is disabled (mirrors python-ci.yml).
+        type: string
+        default: "pip"
+      python-version:
+        description: "Python version for actions/setup-python."
+        type: string
+        default: "3.13"
+      cache:
+        description: "actions/setup-python cache (pip/pipenv/poetry, or empty). Ignored when package-manager is 'uv'."
+        type: string
+        default: "pip"
+      cache-dependency-path:
+        description: "Optional dependency-file path(s) for the setup-python cache key."
+        type: string
+        default: ""
+      working-directory:
+        description: "Working directory for all run steps."
+        type: string
+        default: "."
+      install-cmd:
+        description: "Command that installs the build tooling. Executed via bash -c."
+        type: string
+        default: "python -m pip install --upgrade pip build twine"
+      build-cmd:
+        description: "Command that builds the distribution into `dist/`. Executed via bash -c."
+        type: string
+        default: "python -m build"
+      check-cmd:
+        description: "Command that validates the built distribution. Empty to skip. Executed via bash -c."
+        type: string
+        default: "twine check dist/*"
+      upload-artifact:
+        description: "Upload the built distribution as a workflow artifact."
+        type: boolean
+        default: true
+      artifact-name:
+        description: "Name of the uploaded distribution artifact."
+        type: string
+        default: "dist"
+      artifact-path:
+        description: "Path (relative to working-directory) uploaded as the artifact."
+        type: string
+        default: "dist/"
+      artifact-retention-days:
+        description: "Retention for the distribution artifact (1-90)."
+        type: number
+        default: 7
+
+# CALLER REQUIREMENTS
+# ===================
+# The caller's job-level `permissions:` block MUST grant at least
+# `contents: read`, otherwise the run fails with `startup_failure`.
+#
+#   jobs:
+#     build:
+#       uses: netresearch/.github/.github/workflows/python-build.yml@main
+#       permissions:
+#         contents: read
+permissions: {}
+
+jobs:
+  python-build:
+    name: python-build
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        if: ${{ inputs.package-manager == 'uv' }}
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+
+      - name: Setup Python ${{ inputs.python-version }} (uv)
+        if: ${{ inputs.package-manager == 'uv' }}
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Setup Python ${{ inputs.python-version }}
+        if: ${{ inputs.package-manager != 'uv' }}
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: ${{ inputs.cache }}
+          cache-dependency-path: ${{ inputs.cache-dependency-path }}
+
+      - name: Install build tooling
+        env:
+          INSTALL_CMD: ${{ inputs.install-cmd }}
+        run: bash -c "$INSTALL_CMD"
+
+      - name: Build distribution
+        env:
+          BUILD_CMD: ${{ inputs.build-cmd }}
+        run: bash -c "$BUILD_CMD"
+
+      - name: Check distribution
+        if: ${{ inputs.check-cmd != '' }}
+        env:
+          CHECK_CMD: ${{ inputs.check-cmd }}
+        run: bash -c "$CHECK_CMD"
+
+      - name: Upload distribution artifact
+        if: ${{ inputs.upload-artifact }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ inputs.working-directory }}/${{ inputs.artifact-path }}
+          if-no-files-found: error
+          retention-days: ${{ inputs.artifact-retention-days }}
