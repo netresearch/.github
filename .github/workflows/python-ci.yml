@@ -41,6 +41,19 @@
 #       secrets:
 #         CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 #
+# Caller pattern (uv project — ruff + mypy + pytest):
+#
+#   jobs:
+#     python-ci:
+#       uses: netresearch/.github/.github/workflows/python-ci.yml@main
+#       with:
+#         package-manager: uv
+#         install-cmd: 'uv sync --frozen --extra dev'
+#         lint-cmd: 'uv run ruff check --no-fix . && uv run ruff format --check .'
+#         run-type-check: true
+#         type-check-cmd: 'uv run mypy'
+#         test-cmd: 'uv run pytest --cov=src --cov-report=xml'
+#
 # SECURITY: pinned action SHAs, harden-runner, read-only permissions,
 # `persist-credentials: false` on checkout, secrets passed explicitly
 # (never `secrets: inherit`). Caller-supplied commands are routed through
@@ -72,8 +85,19 @@ on:
         type: number
         default: 15
 
+      package-manager:
+        description: >-
+          Python package manager: 'pip', 'poetry', or 'uv'. With 'uv',
+          astral-sh/setup-uv runs (with its own dependency cache) before
+          Python setup, and the actions/setup-python pip cache is disabled
+          (uv projects have no requirements.txt/pyproject pip lockfile for
+          setup-python to hash). Your install/lint/test commands then use
+          uv (e.g. install-cmd 'uv sync --frozen --extra dev', lint-cmd
+          'uv run ruff check .'). 'pip'/'poetry' keep the setup-python cache.
+        type: string
+        default: "pip"
       cache:
-        description: "Dependency cache for actions/setup-python (pip, pipenv, poetry, or empty to disable)."
+        description: "Dependency cache for actions/setup-python (pip, pipenv, poetry, or empty to disable). Ignored when package-manager is 'uv'."
         type: string
         default: "pip"
       cache-dependency-path:
@@ -206,7 +230,35 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Validate package-manager input
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package-manager }}
+        run: |
+          case "$PACKAGE_MANAGER" in
+            uv|pip|poetry) : ;;
+            *)
+              echo "::error title=Invalid package-manager::Unsupported package-manager '$PACKAGE_MANAGER'. Expected one of: uv, pip, poetry."
+              exit 1
+              ;;
+          esac
+
+      - name: Install uv
+        if: ${{ inputs.package-manager == 'uv' }}
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+
+      # Two variants: uv brings its own cache and uv projects have no pip
+      # lockfile for setup-python to hash, so the uv variant omits the pip
+      # cache. Only one runs per the package-manager input.
+      - name: Setup Python ${{ matrix.python }} (uv)
+        if: ${{ inputs.package-manager == 'uv' }}
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ matrix.python }}
+
       - name: Setup Python ${{ matrix.python }}
+        if: ${{ inputs.package-manager != 'uv' }}
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: ${{ matrix.python }}
