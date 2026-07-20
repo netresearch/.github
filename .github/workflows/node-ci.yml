@@ -82,8 +82,16 @@ on:
         type: string
         default: ""
 
+      enable-type-check:
+        description: "Run the type-check step in the TS job. Disable for plain-JS packages with no type/build layer."
+        type: boolean
+        default: true
       enable-format-check:
         description: "Run the Prettier format check in the TS job."
+        type: boolean
+        default: true
+      enable-gitleaks:
+        description: "Run the gitleaks secret-scanning job. Disable where a GITLEAKS_LICENSE is unavailable."
         type: boolean
         default: true
       enable-test:
@@ -159,6 +167,7 @@ jobs:
       lint-cmd: ${{ inputs.lint-cmd }}
       type-check-cmd: ${{ inputs.type-check-cmd }}
       format-check-cmd: ${{ inputs.format-check-cmd }}
+      enable-type-check: ${{ inputs.enable-type-check }}
       enable-format-check: ${{ inputs.enable-format-check }}
       pre-command: ${{ inputs.pre-command }}
 
@@ -213,6 +222,7 @@ jobs:
 
   gitleaks:
     name: Secret Scanning
+    if: ${{ inputs.enable-gitleaks }}
     uses: netresearch/.github/.github/workflows/gitleaks.yml@main
     permissions:
       contents: read
