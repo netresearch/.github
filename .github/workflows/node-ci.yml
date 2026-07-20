@@ -167,11 +167,10 @@ jobs:
       enable-format-check: ${{ inputs.enable-format-check }}
       pre-command: ${{ inputs.pre-command }}
 
-  # TODO: flip to @main once this PR merges (leaf not yet on main).
   test:
     name: Test
     if: ${{ inputs.enable-test }}
-    uses: netresearch/.github/.github/workflows/node-test.yml@feat/node-gold-standard
+    uses: netresearch/.github/.github/workflows/node-test.yml@main
     permissions:
       contents: read
     with:
@@ -184,11 +183,10 @@ jobs:
     secrets:
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
-  # TODO: flip to @main once this PR merges (leaf not yet on main).
   build:
     name: Build
     if: ${{ inputs.enable-build }}
-    uses: netresearch/.github/.github/workflows/node-build.yml@feat/node-gold-standard
+    uses: netresearch/.github/.github/workflows/node-build.yml@main
     permissions:
       contents: read
     with:
