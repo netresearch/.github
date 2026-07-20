@@ -1,0 +1,161 @@
+# Reusable "Node.js build" workflow (LEAF).
+#
+# Runs a package-manager-agnostic build job, with an optional upload of the
+# build output as a workflow artifact.
+#
+# Caller pattern:
+#
+#   jobs:
+#     build:
+#       uses: netresearch/.github/.github/workflows/node-build.yml@main
+#       with:
+#         build-cmd: "bun run build:lib"
+#         upload-artifact: true
+#         artifact-path: "dist/"
+#
+# SECURITY: caller-supplied commands are routed through `env:` and run via
+# `bash -c "$VAR"`, so the caller can't break out of argument position via
+# quoting/metacharacters. Third-party actions are SHA-pinned, harden-runner
+# is enabled, and checkout uses `persist-credentials: false`.
+
+name: Node.js Build (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: "Runner label."
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Per-job timeout in minutes."
+        type: number
+        default: 15
+
+      package-manager:
+        description: "Package manager to use (one of: bun, npm, pnpm, yarn)."
+        type: string
+        default: "bun"
+      node-version:
+        description: "Node.js version."
+        type: string
+        default: "24"
+      bun-version:
+        description: "Bun version passed to oven-sh/setup-bun (when package-manager is bun)."
+        type: string
+        default: "latest"
+
+      install-cmd:
+        description: "Dependency install command."
+        type: string
+        default: "bun install --frozen-lockfile"
+      build-cmd:
+        description: "Build command."
+        type: string
+        default: "bun run build"
+      pre-command:
+        description: "Optional shell command to run after install but before the build command."
+        type: string
+        default: ""
+
+      upload-artifact:
+        description: "Upload the build output as a workflow artifact."
+        type: boolean
+        default: false
+      artifact-name:
+        description: "Artifact name used when `upload-artifact` is true."
+        type: string
+        default: "dist"
+      artifact-path:
+        description: "Path(s) uploaded when `upload-artifact` is true."
+        type: string
+        default: "dist/"
+      artifact-retention-days:
+        description: "Retention for the artifact (1-90)."
+        type: number
+        default: 7
+
+# CALLER REQUIREMENTS
+# ===================
+# When calling this reusable workflow, the caller's job-level
+# `permissions:` block MUST grant at least this full set, otherwise
+# the run fails with `startup_failure` before any job executes
+# (GitHub rejects the workflow at startup when the reusable declares
+# a permission the caller did not grant). NOTE: setting ANY scope in a
+# `permissions:` block forces every UNLISTED scope to `none`, and a job
+# that omits `permissions:` inherits the repository default
+# (default_workflow_permissions) — so a repo hardened to `read` will
+# startup-fail here unless these scopes are granted explicitly.
+#
+#   jobs:
+#     build:
+#       uses: netresearch/.github/.github/workflows/node-build.yml@main
+#       permissions:
+#         contents: read
+permissions: {}
+
+jobs:
+  node-build:
+    name: build
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Validate package-manager input
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package-manager }}
+        run: |
+          case "$PACKAGE_MANAGER" in
+            bun|npm|pnpm|yarn) : ;;
+            *)
+              echo "::error title=Invalid package-manager::Unsupported package-manager '$PACKAGE_MANAGER'. Expected one of: bun, npm, pnpm, yarn."
+              exit 1
+              ;;
+          esac
+
+      - name: Set up Bun
+        if: ${{ inputs.package-manager == 'bun' }}
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ inputs.bun-version }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Pre-command
+        if: ${{ inputs.pre-command != '' }}
+        env:
+          PRE_COMMAND: ${{ inputs.pre-command }}
+        run: bash -c "$PRE_COMMAND"
+
+      - name: Install dependencies
+        env:
+          INSTALL_CMD: ${{ inputs.install-cmd }}
+        run: bash -c "$INSTALL_CMD"
+
+      - name: Build
+        env:
+          BUILD_CMD: ${{ inputs.build-cmd }}
+        run: bash -c "$BUILD_CMD"
+
+      - name: Upload build artifact
+        if: ${{ inputs.upload-artifact }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ inputs.artifact-path }}
+          if-no-files-found: error
+          retention-days: ${{ inputs.artifact-retention-days }}

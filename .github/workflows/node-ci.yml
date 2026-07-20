@@ -1,0 +1,231 @@
+# Reusable "Node.js CI" gold-standard workflow (META).
+#
+# Composes the granular Node.js/TypeScript reusables into one CI entry
+# point: TS lint/type/format checks, tests (+ optional coverage), build,
+# dependency audit, CodeQL, secret scanning, and dependency review. Each
+# job calls a single-purpose reusable so consumers get one call site.
+#
+# Caller pattern:
+#
+#   name: CI
+#   on:
+#     push:
+#       branches: [main]
+#     pull_request:
+#   permissions: {}
+#   jobs:
+#     node-ci:
+#       uses: netresearch/.github/.github/workflows/node-ci.yml@main
+#       permissions:
+#         actions: read
+#         contents: read
+#         security-events: write
+#         pull-requests: write
+#       with:
+#         coverage-upload: true
+#         build-artifact-path: "dist/"
+#       secrets:
+#         CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+#
+# SECURITY: secrets are forwarded explicitly (CODECOV_TOKEN, GITLEAKS_LICENSE),
+# never via `secrets: inherit`. Composed first-party reusables track `@main`
+# by policy (see .github/zizmor.yml); third-party actions inside those leaves
+# are SHA-pinned.
+
+name: Node.js CI (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      package-manager:
+        description: "Package manager to use (one of: bun, npm, pnpm, yarn)."
+        type: string
+        default: "bun"
+      node-version:
+        description: "Node.js version (also the coverage-upload matrix cell)."
+        type: string
+        default: "24"
+      test-matrix:
+        description: >-
+          JSON array string of Node.js versions to matrix the test job over
+          (e.g. '["20","22"]'). When empty, a single-element matrix of
+          [node-version] is used.
+        type: string
+        default: ""
+
+      install-cmd:
+        description: "Dependency install command."
+        type: string
+        default: "bun install --frozen-lockfile"
+      lint-cmd:
+        description: "Lint command."
+        type: string
+        default: "bun run lint"
+      type-check-cmd:
+        description: "Type-check command."
+        type: string
+        default: "bun run build"
+      format-check-cmd:
+        description: "Format-check command."
+        type: string
+        default: "bunx prettier --check ."
+      test-cmd:
+        description: "Test command."
+        type: string
+        default: "bun run test:coverage"
+      build-cmd:
+        description: "Build command."
+        type: string
+        default: "bun run build:lib"
+      pre-command:
+        description: "Optional shell command to run after install but before the TS checks."
+        type: string
+        default: ""
+
+      enable-format-check:
+        description: "Run the Prettier format check in the TS job."
+        type: boolean
+        default: true
+      enable-test:
+        description: "Run the test job."
+        type: boolean
+        default: true
+      enable-build:
+        description: "Run the build job."
+        type: boolean
+        default: true
+      build-artifact-path:
+        description: >-
+          Path(s) to upload as a build artifact. When non-empty, the build
+          job uploads this path; when empty, no artifact is uploaded.
+        type: string
+        default: ""
+
+      coverage-upload:
+        description: "Upload test coverage to Codecov (in the test job)."
+        type: boolean
+        default: false
+      audit-level:
+        description: >-
+          Minimum severity to fail on for both the dependency audit and the
+          dependency-review job (low, moderate, high, critical).
+        type: string
+        default: "high"
+      codeql-languages:
+        description: "CodeQL language(s) to analyze."
+        type: string
+        default: "javascript-typescript"
+    secrets:
+      CODECOV_TOKEN:
+        description: "Codecov upload token. Required for private repositories when `coverage-upload` is true."
+        required: false
+      GITLEAKS_LICENSE:
+        description: "gitleaks-action license key (required for org repositories). Forwarded to the gitleaks job."
+        required: false
+
+# CALLER REQUIREMENTS
+# ===================
+# This meta-reusable composes leaves that need SARIF-upload and PR-write
+# scopes, so its caller must grant the UNION of every composed job's
+# requirements. When calling this reusable workflow, the caller's job-level
+# `permissions:` block MUST grant at least this full set, otherwise the run
+# fails with `startup_failure` before any job executes (GitHub rejects the
+# workflow at startup when a nested reusable declares a permission the
+# caller did not grant). NOTE: setting ANY scope in a `permissions:` block
+# forces every UNLISTED scope to `none`, and a job that omits `permissions:`
+# inherits the repository default (default_workflow_permissions) — so a repo
+# hardened to `read` will startup-fail here unless these scopes are granted
+# explicitly. Secrets are forwarded explicitly (CODECOV_TOKEN); never use
+# `secrets: inherit`.
+#
+#   jobs:
+#     node-ci:
+#       uses: netresearch/.github/.github/workflows/node-ci.yml@main
+#       permissions:
+#         actions: read
+#         contents: read
+#         security-events: write
+#         pull-requests: write
+permissions: {}
+
+jobs:
+  ts:
+    name: TS Check
+    uses: netresearch/.github/.github/workflows/ts-check.yml@main
+    permissions:
+      contents: read
+    with:
+      install-cmd: ${{ inputs.install-cmd }}
+      lint-cmd: ${{ inputs.lint-cmd }}
+      type-check-cmd: ${{ inputs.type-check-cmd }}
+      format-check-cmd: ${{ inputs.format-check-cmd }}
+      enable-format-check: ${{ inputs.enable-format-check }}
+      pre-command: ${{ inputs.pre-command }}
+
+  test:
+    name: Test
+    if: ${{ inputs.enable-test }}
+    uses: netresearch/.github/.github/workflows/node-test.yml@main
+    permissions:
+      contents: read
+    with:
+      package-manager: ${{ inputs.package-manager }}
+      node-version: ${{ inputs.node-version }}
+      test-matrix: ${{ inputs.test-matrix }}
+      install-cmd: ${{ inputs.install-cmd }}
+      test-cmd: ${{ inputs.test-cmd }}
+      coverage-upload: ${{ inputs.coverage-upload }}
+    secrets:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  build:
+    name: Build
+    if: ${{ inputs.enable-build }}
+    uses: netresearch/.github/.github/workflows/node-build.yml@main
+    permissions:
+      contents: read
+    with:
+      package-manager: ${{ inputs.package-manager }}
+      node-version: ${{ inputs.node-version }}
+      install-cmd: ${{ inputs.install-cmd }}
+      build-cmd: ${{ inputs.build-cmd }}
+      upload-artifact: ${{ inputs.build-artifact-path != '' }}
+      artifact-path: ${{ inputs.build-artifact-path }}
+
+  node-audit:
+    name: Node.js Audit
+    uses: netresearch/.github/.github/workflows/node-audit.yml@main
+    permissions:
+      contents: read
+    with:
+      package-manager: ${{ inputs.package-manager }}
+      audit-level: ${{ inputs.audit-level }}
+
+  codeql:
+    name: CodeQL
+    uses: netresearch/.github/.github/workflows/codeql.yml@main
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    with:
+      languages: ${{ inputs.codeql-languages }}
+
+  gitleaks:
+    name: Secret Scanning
+    uses: netresearch/.github/.github/workflows/gitleaks.yml@main
+    permissions:
+      contents: read
+      security-events: write
+    secrets:
+      GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+  dependency-review:
+    name: Dependency Review
+    if: ${{ github.event_name == 'pull_request' }}
+    uses: netresearch/.github/.github/workflows/dependency-review.yml@main
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      fail-on-severity: ${{ inputs.audit-level }}

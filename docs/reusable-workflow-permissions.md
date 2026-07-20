@@ -66,7 +66,8 @@ truth; this table is the index.)
 | `release-composer-package.yml` | `contents: write` |
 | `ghcr-retention.yml` | `packages: write` |
 | `security-container.yml` | `contents: read`, `security-events: write`, `packages: read` |
-| `lint-*.yml` / `php-ci.yml` / `python-*.yml` / `ansible-lint.yml` / `ansible-molecule.yml` / `ts-check.yml` / `node-audit.yml` / `sonarqube.yml` / `smoke-test-container.yml` / `lint-container.yml` / `check-template-drift.yml` | `contents: read` |
+| `node-ci.yml` | `actions: read`, `contents: read`, `security-events: write`, `pull-requests: write` |
+| `lint-*.yml` / `php-ci.yml` / `python-*.yml` / `ansible-lint.yml` / `ansible-molecule.yml` / `ts-check.yml` / `node-audit.yml` / `node-test.yml` / `node-build.yml` / `sonarqube.yml` / `smoke-test-container.yml` / `lint-container.yml` / `check-template-drift.yml` | `contents: read` |
 
 ### `netresearch/typo3-ci-workflows`
 
