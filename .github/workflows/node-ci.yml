@@ -27,15 +27,10 @@
 #       secrets:
 #         CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 #
-# SECURITY: secrets are forwarded explicitly (CODECOV_TOKEN), never via
-# `secrets: inherit`. Composed first-party reusables track `@main` by
-# policy (see .github/zizmor.yml); third-party actions inside those leaves
+# SECURITY: secrets are forwarded explicitly (CODECOV_TOKEN, GITLEAKS_LICENSE),
+# never via `secrets: inherit`. Composed first-party reusables track `@main`
+# by policy (see .github/zizmor.yml); third-party actions inside those leaves
 # are SHA-pinned.
-#
-# TODO: flip the node-test.yml and node-build.yml refs below from
-# @feat/node-gold-standard to @main once this PR merges (those two leaves
-# do not exist on main yet; they are pinned to this feature branch so the
-# pilot consumer can validate the composed workflow before merge).
 
 name: Node.js CI (reusable)
 
