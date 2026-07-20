@@ -59,11 +59,16 @@ on:
         type: string
         default: "3.x"
       cache:
-        description: "Dependency cache for actions/setup-python (pip, pipenv, poetry, or empty to disable)."
+        description: >-
+          Dependency cache for actions/setup-python (pip, pipenv, poetry).
+          Empty by default because Ansible role repos usually ship no pip
+          lockfile — enabling pip cache without one makes setup-python fail
+          ("no file matched **/requirements.txt or **/pyproject.toml"). Set
+          this together with `cache-dependency-path` only when a lockfile exists.
         type: string
-        default: "pip"
+        default: ""
       cache-dependency-path:
-        description: "Optional path(s) to dependency files for the setup-python cache key."
+        description: "Path(s) to dependency files for the setup-python cache key. Required when `cache` is set."
         type: string
         default: ""
       pip-packages:
