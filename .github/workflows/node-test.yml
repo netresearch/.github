@@ -164,6 +164,10 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
 
+      - name: Enable Corepack
+        if: ${{ inputs.package-manager == 'pnpm' || inputs.package-manager == 'yarn' }}
+        run: corepack enable
+
       - name: Pre-command
         if: ${{ inputs.pre-command != '' }}
         env:
