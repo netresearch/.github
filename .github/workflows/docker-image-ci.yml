@@ -1,0 +1,274 @@
+# Reusable "Docker image CI" gold-standard workflow (META).
+#
+# Composes the granular container reusables into one CI entry point:
+# Dockerfile lint (+ optional shellcheck), YAML / Markdown / compose lint,
+# a validation-only image build with Trivy scanning, optional
+# container-structure-test smoke test, CodeQL, secret scanning and
+# dependency review. Each job calls a single-purpose reusable so consumers
+# get one call site.
+#
+# This is the CI gate — it does NOT push, sign or attest. The companion
+# publish workflow (build-container.yml, called directly on tag/release)
+# owns multi-arch push + cosign + SLSA attestation. Here the build is
+# `push: false` (validation-only), single-arch for speed.
+#
+# Caller pattern:
+#
+#   name: CI
+#   on:
+#     push:
+#       branches: [main]
+#     pull_request:
+#   permissions: {}
+#   jobs:
+#     docker-ci:
+#       uses: netresearch/.github/.github/workflows/docker-image-ci.yml@main
+#       permissions:
+#         contents: read
+#         packages: write
+#         security-events: write
+#         id-token: write
+#         attestations: write
+#         actions: read
+#         pull-requests: write
+#       with:
+#         image-name: my-app
+#         lint-compose: true
+#         enable-smoke-test: true
+#         smoke-image-tag: my-app:ci
+#       secrets:
+#         GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+#
+# SECURITY: secrets are forwarded explicitly (GITLEAKS_LICENSE), never via
+# `secrets: inherit`. Composed first-party reusables track `@main` by policy
+# (see .github/zizmor.yml); third-party actions inside those leaves are
+# SHA-pinned.
+
+name: Docker Image CI (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: "Image name without registry prefix (e.g. my-app). Passed to build-container for the validation build."
+        required: true
+        type: string
+      dockerfile:
+        description: "Path to the Dockerfile (build + smoke-test)."
+        type: string
+        default: "./Dockerfile"
+      context:
+        description: "Docker build context (build + smoke-test)."
+        type: string
+        default: "."
+      platforms:
+        description: "Build platforms for the validation build. Single-arch by default for CI speed; the publish workflow does multi-arch."
+        type: string
+        default: "linux/amd64"
+
+      lint-container:
+        description: "Run the Dockerfile lint (hadolint) job."
+        type: boolean
+        default: true
+      shell-scandirs:
+        description: "Space-separated directories to scan with shellcheck (forwarded to lint-container). Empty skips shellcheck."
+        type: string
+        default: ""
+      lint-yaml:
+        description: "Run the YAML lint job."
+        type: boolean
+        default: true
+      lint-markdown:
+        description: "Run the Markdown lint job."
+        type: boolean
+        default: false
+      lint-compose:
+        description: "Run the docker compose config-validation job."
+        type: boolean
+        default: false
+      compose-files:
+        description: "Space-separated compose files to validate (forwarded to lint-compose)."
+        type: string
+        default: "compose.yml"
+      env-substitutions:
+        description: "Newline-separated KEY=VALUE placeholder pairs for compose validation (forwarded to lint-compose)."
+        type: string
+        default: ""
+
+      enable-codeql:
+        description: "Run the CodeQL job."
+        type: boolean
+        default: false
+      codeql-languages:
+        description: "CodeQL language(s) to analyze (forwarded to codeql)."
+        type: string
+        default: "actions"
+      enable-gitleaks:
+        description: "Run the gitleaks secret-scanning job."
+        type: boolean
+        default: true
+
+      enable-smoke-test:
+        description: "Run the container-structure-test smoke-test job."
+        type: boolean
+        default: false
+      smoke-image-tag:
+        description: "Local tag for the smoke-test build (forwarded to smoke-test-container). Empty defaults to `<image-name>:ci`."
+        type: string
+        default: ""
+      smoke-cst-config-path:
+        description: "Path to the container-structure-test config (forwarded to smoke-test-container)."
+        type: string
+        default: "tests/container-structure-test.yaml"
+      smoke-target:
+        description: "Build stage / target for the smoke-test build. Empty builds the final stage."
+        type: string
+        default: ""
+      smoke-build-args:
+        description: "Newline-separated KEY=VALUE build args for the smoke-test build (forwarded to smoke-test-container)."
+        type: string
+        default: ""
+
+      trivy-severity:
+        description: "Trivy severity filter for the build's vulnerability scan (forwarded to build-container)."
+        type: string
+        default: "CRITICAL,HIGH"
+    secrets:
+      GITLEAKS_LICENSE:
+        description: "Deprecated / accepted for backwards compatibility (betterleaks needs no license). Forwarded to the gitleaks job."
+        required: false
+
+# CALLER REQUIREMENTS
+# ===================
+# This meta-reusable composes leaves that need SARIF-upload, PR-write and
+# container-build scopes, so its caller must grant the UNION of every
+# composed job's requirements. When calling this reusable workflow, the
+# caller's job-level `permissions:` block MUST grant at least this full set,
+# otherwise the run fails with `startup_failure` before any job executes
+# (GitHub rejects the workflow at startup when a nested reusable declares a
+# permission the caller did not grant). NOTE: setting ANY scope in a
+# `permissions:` block forces every UNLISTED scope to `none`, and a job that
+# omits `permissions:` inherits the repository default
+# (default_workflow_permissions) — so a repo hardened to `read` will
+# startup-fail here unless these scopes are granted explicitly. Secrets are
+# forwarded explicitly (GITLEAKS_LICENSE); never use `secrets: inherit`.
+#
+# IMPORTANT — packages/id-token/attestations are REQUIRED even though this
+# CI meta sets `push: false`, `sign: false`, `attest: false`. The `build`
+# job of build-container.yml STATICALLY declares
+# `packages: write`, `id-token: write`, `attestations: write`; the caller
+# chain must grant them regardless of the runtime inputs, or the run
+# startup-fails. (See docs/reusable-workflow-permissions.md §1.)
+#
+#   jobs:
+#     docker-ci:
+#       uses: netresearch/.github/.github/workflows/docker-image-ci.yml@main
+#       permissions:
+#         contents: read
+#         packages: write
+#         security-events: write
+#         id-token: write
+#         attestations: write
+#         actions: read
+#         pull-requests: write
+permissions: {}
+
+jobs:
+  lint-container:
+    name: Lint Container
+    if: ${{ inputs.lint-container }}
+    uses: netresearch/.github/.github/workflows/lint-container.yml@main
+    permissions:
+      contents: read
+    with:
+      dockerfile-path: ${{ inputs.dockerfile }}
+      shell-scandirs: ${{ inputs.shell-scandirs }}
+
+  lint-yaml:
+    name: Lint YAML
+    if: ${{ inputs.lint-yaml }}
+    uses: netresearch/.github/.github/workflows/lint-yaml.yml@main
+    permissions:
+      contents: read
+
+  lint-markdown:
+    name: Lint Markdown
+    if: ${{ inputs.lint-markdown }}
+    uses: netresearch/.github/.github/workflows/lint-markdown.yml@main
+    permissions:
+      contents: read
+
+  lint-compose:
+    name: Lint Compose
+    if: ${{ inputs.lint-compose }}
+    uses: netresearch/.github/.github/workflows/lint-compose.yml@main
+    permissions:
+      contents: read
+    with:
+      compose-files: ${{ inputs.compose-files }}
+      env-substitutions: ${{ inputs.env-substitutions }}
+
+  build:
+    name: Build (validation)
+    uses: netresearch/.github/.github/workflows/build-container.yml@main
+    # build-container's `build` job statically declares the full set below,
+    # so the caller must grant it even though push/sign/attest are false.
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+      id-token: write
+      attestations: write
+    with:
+      image-name: ${{ inputs.image-name }}
+      dockerfile: ${{ inputs.dockerfile }}
+      context: ${{ inputs.context }}
+      platforms: ${{ inputs.platforms }}
+      push: false
+      scan: true
+      trivy-severity: ${{ inputs.trivy-severity }}
+      sign: false
+      attest: false
+
+  smoke-test:
+    name: Smoke Test
+    if: ${{ inputs.enable-smoke-test }}
+    uses: netresearch/.github/.github/workflows/smoke-test-container.yml@main
+    permissions:
+      contents: read
+    with:
+      image-tag: ${{ inputs.smoke-image-tag != '' && inputs.smoke-image-tag || format('{0}:ci', inputs.image-name) }}
+      context: ${{ inputs.context }}
+      dockerfile-path: ${{ inputs.dockerfile }}
+      target: ${{ inputs.smoke-target }}
+      build-args: ${{ inputs.smoke-build-args }}
+      cst-config-path: ${{ inputs.smoke-cst-config-path }}
+
+  codeql:
+    name: CodeQL
+    if: ${{ inputs.enable-codeql }}
+    uses: netresearch/.github/.github/workflows/codeql.yml@main
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    with:
+      languages: ${{ inputs.codeql-languages }}
+
+  gitleaks:
+    name: Secret Scanning
+    if: ${{ inputs.enable-gitleaks }}
+    uses: netresearch/.github/.github/workflows/gitleaks.yml@main
+    permissions:
+      contents: read
+      security-events: write
+    secrets:
+      GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+  dependency-review:
+    name: Dependency Review
+    if: ${{ github.event_name == 'pull_request' }}
+    uses: netresearch/.github/.github/workflows/dependency-review.yml@main
+    permissions:
+      contents: read
+      pull-requests: write

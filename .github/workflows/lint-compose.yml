@@ -1,0 +1,163 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# Reusable "Lint Compose" — validates docker compose configuration by
+# running `docker compose config --quiet` over one or more compose files.
+# Catches interpolation errors, malformed YAML and unknown keys before
+# they reach a deploy.
+#
+# Caller pattern:
+#
+#   jobs:
+#     compose:
+#       uses: netresearch/.github/.github/workflows/lint-compose.yml@main
+#       with:
+#         compose-files: "compose.yml compose.prod.yml"
+#         env-substitutions: |
+#           MYSQL_ROOT_PASSWORD=placeholder
+#           APP_SECRET=placeholder
+#
+# Minimum (single compose.yml at repo root, .env.example copied if present):
+#
+#   jobs:
+#     compose:
+#       uses: netresearch/.github/.github/workflows/lint-compose.yml@main
+#
+# DESIGN NOTES
+# ============
+# `docker compose config` interpolates ${VAR} references from the process
+# environment and a `.env` file in the working directory. Repos that ship
+# a `.env.example` get it copied to `.env` (env-from-example) so committed
+# placeholders resolve. `env-substitutions` then fills any still-empty
+# `KEY=` assignments with a placeholder value, so validation passes WITHOUT
+# real secrets — the value only has to be non-empty for interpolation to
+# succeed. Each compose file is validated independently so a per-file parse
+# error is attributed to the right file.
+#
+# SECURITY: pinned action SHAs, harden-runner, read-only permissions,
+# `persist-credentials: false` on checkout. All caller strings are routed
+# through `env:` (never interpolated into a `run:` body) to prevent shell
+# injection (SonarCloud githubactions:S7630).
+
+name: Lint Compose (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: "Runner label."
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Per-job timeout in minutes."
+        type: number
+        default: 5
+      compose-files:
+        description: "Space-separated list of compose files. Each is validated independently with `docker compose -f <file> config --quiet`."
+        type: string
+        default: "compose.yml"
+      env-from-example:
+        description: "Copy `.env.example` to `.env` (when the example file exists) before validating, so committed placeholders resolve."
+        type: boolean
+        default: true
+      env-substitutions:
+        description: >-
+          Newline-separated KEY=VALUE pairs. For each pair, an empty
+          assignment (`KEY=`) in `.env` is replaced with `KEY=VALUE`, so
+          `docker compose config` interpolation passes without real
+          secrets. The value only needs to be non-empty.
+        type: string
+        default: ""
+
+# CALLER REQUIREMENTS
+# ===================
+# When calling this reusable workflow, the caller's job-level
+# `permissions:` block MUST grant at least this full set, otherwise
+# the run fails with `startup_failure` before any job executes
+# (GitHub rejects the workflow at startup when the reusable declares
+# a permission the caller did not grant). NOTE: setting ANY scope in a
+# `permissions:` block forces every UNLISTED scope to `none`, and a job
+# that omits `permissions:` inherits the repository default
+# (default_workflow_permissions) — so a repo hardened to `read` will
+# startup-fail here unless these scopes are granted explicitly.
+#
+#   jobs:
+#     lint-compose:
+#       uses: netresearch/.github/.github/workflows/lint-compose.yml@main
+#       permissions:
+#         contents: read
+permissions:
+  contents: read
+
+jobs:
+  compose-config:
+    name: docker compose config
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Prepare .env
+        env:
+          # All caller-supplied strings pass through env vars (never inlined
+          # into the run body) — SonarCloud githubactions:S7630.
+          ENV_FROM_EXAMPLE: ${{ inputs.env-from-example }}
+          ENV_SUBSTITUTIONS: ${{ inputs.env-substitutions }}
+        run: |
+          set -euo pipefail
+          if [ "$ENV_FROM_EXAMPLE" = "true" ] && [ -f .env.example ]; then
+            cp .env.example .env
+            echo "Copied .env.example -> .env"
+          fi
+          if [ -n "$ENV_SUBSTITUTIONS" ]; then
+            touch .env
+            subs_file="$(mktemp)"
+            printf '%s\n' "$ENV_SUBSTITUTIONS" > "$subs_file"
+            # For each "KEY=VALUE" line, fill an empty "KEY=" assignment in
+            # .env with the placeholder value. awk exact-matches the line so
+            # VALUE metacharacters can't leak into a sed pattern.
+            while IFS= read -r sub; do
+              [ -z "$sub" ] && continue
+              case "$sub" in
+                *=*) ;;
+                *) continue ;;
+              esac
+              key="${sub%%=*}"
+              val="${sub#*=}"
+              tmp="$(mktemp)"
+              awk -v k="$key" -v v="$val" '$0 == k"=" { print k"="v; next } { print }' .env > "$tmp"
+              mv "$tmp" .env
+            done < "$subs_file"
+            rm -f "$subs_file"
+          fi
+
+      - name: Validate compose configuration
+        env:
+          COMPOSE_FILES: ${{ inputs.compose-files }}
+        run: |
+          set -euo pipefail
+          docker compose version
+          read -ra files <<< "$COMPOSE_FILES"
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::No compose files provided (input 'compose-files' is empty)."
+            exit 1
+          fi
+          for f in "${files[@]}"; do
+            if [ ! -f "$f" ]; then
+              echo "::error::Compose file not found: $f"
+              exit 1
+            fi
+            echo "::group::docker compose -f $f config --quiet"
+            docker compose -f "$f" config --quiet
+            echo "::endgroup::"
+          done
