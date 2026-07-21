@@ -1,0 +1,278 @@
+# Reusable "Python app CI" gold-standard workflow (META).
+#
+# Composes the granular Python reusables into one CI entry point for a
+# Python *application* (CLI tool, service): lint / type-check / tests
+# (+ optional Codecov upload), an optional distribution build, the
+# security audit (pip-audit + bandit + CycloneDX SBOM), plus opt-in
+# CodeQL, secret scanning, dependency review, zizmor and Scorecard. Each
+# job calls a single-purpose reusable so consumers get one call site.
+#
+# This is the Python counterpart to node-ci.yml. It defaults to a `uv`
+# project on Python 3.14; every command is a pass-through input, so
+# pip/poetry projects override install-cmd / lint-cmd / test-cmd etc.
+#
+# Caller pattern (uv project, defaults):
+#
+#   name: CI
+#   on:
+#     push:
+#       branches: [main]
+#     pull_request:
+#   permissions: {}
+#   jobs:
+#     python-app-ci:
+#       uses: netresearch/.github/.github/workflows/python-app-ci.yml@main
+#       permissions:
+#         actions: read
+#         contents: read
+#         security-events: write
+#         pull-requests: write
+#         id-token: write
+#       with:
+#         coverage-upload: true
+#       secrets:
+#         CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+#
+# SECURITY: secrets are forwarded explicitly (CODECOV_TOKEN,
+# GITLEAKS_LICENSE), never via `secrets: inherit`. Composed first-party
+# reusables track `@main` by policy (see .github/zizmor.yml); third-party
+# actions inside those leaves are SHA-pinned.
+
+name: Python app CI (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      package-manager:
+        description: "Python package manager: 'uv', 'pip', or 'poetry'."
+        type: string
+        default: "uv"
+      python-version:
+        description: "Python version for the build and audit jobs."
+        type: string
+        default: "3.14"
+      python-versions:
+        description: >-
+          JSON array string of Python versions the ci job matrices over
+          (e.g. '["3.13","3.14"]').
+        type: string
+        default: '["3.14"]'
+      os-versions:
+        description: >-
+          JSON array string of runner labels the ci job matrices over
+          (e.g. '["ubuntu-latest","windows-latest"]').
+        type: string
+        default: '["ubuntu-latest"]'
+
+      install-cmd:
+        description: "Command that installs the project and its dev/test dependencies."
+        type: string
+        default: "uv sync --frozen --extra dev"
+
+      # Lint
+      run-lint:
+        description: "Run the lint step in the ci job."
+        type: boolean
+        default: true
+      lint-cmd:
+        description: "Lint command."
+        type: string
+        default: "uv run ruff check ."
+
+      # Type check
+      run-type-check:
+        description: "Run the type-check step in the ci job."
+        type: boolean
+        default: true
+      type-check-cmd:
+        description: "Type-check command."
+        type: string
+        default: "uv run mypy"
+
+      # Tests
+      run-tests:
+        description: "Run the test step in the ci job."
+        type: boolean
+        default: true
+      test-cmd:
+        description: "Test command. Write a coverage XML to enable coverage-upload."
+        type: string
+        default: "uv run pytest --cov --cov-report=xml"
+      coverage-upload:
+        description: "Upload coverage to Codecov (in the ci job)."
+        type: boolean
+        default: false
+
+      # Build
+      enable-build:
+        description: "Run the distribution build job."
+        type: boolean
+        default: true
+      build-cmd:
+        description: "Command that builds the distribution into `dist/`."
+        type: string
+        default: "uv build"
+      check-cmd:
+        description: "Command that validates the built distribution."
+        type: string
+        default: "uvx twine check dist/*"
+
+      # Audit
+      python-version-file:
+        description: "Python version file for the audit job (.python-version, pyproject.toml)."
+        type: string
+        default: "pyproject.toml"
+      run-bandit:
+        description: "Run the bandit static-analysis security scan in the audit job."
+        type: boolean
+        default: true
+
+      # Opt-in security scanners
+      enable-codeql:
+        description: "Run the CodeQL analysis job."
+        type: boolean
+        default: false
+      codeql-languages:
+        description: "CodeQL language(s) to analyze."
+        type: string
+        default: "python"
+      enable-gitleaks:
+        description: "Run the gitleaks secret-scanning job."
+        type: boolean
+        default: true
+      enable-scorecard:
+        description: "Run the OpenSSF Scorecard job."
+        type: boolean
+        default: false
+      enable-zizmor:
+        description: "Run the zizmor GitHub Actions static-analysis job."
+        type: boolean
+        default: false
+    secrets:
+      CODECOV_TOKEN:
+        description: "Codecov upload token. Required for private repositories when `coverage-upload` is true."
+        required: false
+      GITLEAKS_LICENSE:
+        description: "Deprecated / accepted for backwards compatibility; forwarded to the gitleaks job."
+        required: false
+
+# CALLER REQUIREMENTS
+# ===================
+# This meta-reusable composes leaves that need SARIF-upload, PR-write and
+# OIDC scopes, so its caller must grant the UNION of every composed job's
+# requirements. When calling this reusable workflow, the caller's job-level
+# `permissions:` block MUST grant at least this full set, otherwise the run
+# fails with `startup_failure` before any job executes (GitHub rejects the
+# workflow at startup when a nested reusable declares a permission the
+# caller did not grant). NOTE: setting ANY scope in a `permissions:` block
+# forces every UNLISTED scope to `none`, and a job that omits `permissions:`
+# inherits the repository default (default_workflow_permissions) — so a repo
+# hardened to `read` will startup-fail here unless these scopes are granted
+# explicitly. Secrets are forwarded explicitly (CODECOV_TOKEN,
+# GITLEAKS_LICENSE); never use `secrets: inherit`.
+#
+# id-token: write is only consumed when enable-scorecard is true; the other
+# scopes cover codeql/gitleaks/zizmor (security-events), dependency-review
+# (pull-requests) and scorecard/codeql (actions). Grant the full union so
+# toggling a scanner on never re-introduces a latent startup-failure.
+#
+#   jobs:
+#     python-app-ci:
+#       uses: netresearch/.github/.github/workflows/python-app-ci.yml@main
+#       permissions:
+#         actions: read
+#         contents: read
+#         security-events: write
+#         pull-requests: write
+#         id-token: write
+permissions: {}
+
+jobs:
+  ci:
+    name: CI
+    uses: netresearch/.github/.github/workflows/python-ci.yml@main
+    permissions:
+      contents: read
+    with:
+      package-manager: ${{ inputs.package-manager }}
+      os-versions: ${{ inputs.os-versions }}
+      python-versions: ${{ inputs.python-versions }}
+      install-cmd: ${{ inputs.install-cmd }}
+      run-lint: ${{ inputs.run-lint }}
+      lint-cmd: ${{ inputs.lint-cmd }}
+      run-type-check: ${{ inputs.run-type-check }}
+      type-check-cmd: ${{ inputs.type-check-cmd }}
+      run-tests: ${{ inputs.run-tests }}
+      test-cmd: ${{ inputs.test-cmd }}
+      upload-coverage-codecov: ${{ inputs.coverage-upload }}
+    secrets:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  build:
+    name: Build
+    if: ${{ inputs.enable-build }}
+    uses: netresearch/.github/.github/workflows/python-build.yml@main
+    permissions:
+      contents: read
+    with:
+      package-manager: ${{ inputs.package-manager }}
+      python-version: ${{ inputs.python-version }}
+      build-cmd: ${{ inputs.build-cmd }}
+      check-cmd: ${{ inputs.check-cmd }}
+
+  audit:
+    name: Audit
+    uses: netresearch/.github/.github/workflows/python-audit.yml@main
+    permissions:
+      contents: read
+    with:
+      python-version-file: ${{ inputs.python-version-file }}
+      package-manager: ${{ inputs.package-manager }}
+      run-bandit: ${{ inputs.run-bandit }}
+
+  codeql:
+    name: CodeQL
+    if: ${{ inputs.enable-codeql }}
+    uses: netresearch/.github/.github/workflows/codeql.yml@main
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    with:
+      languages: ${{ inputs.codeql-languages }}
+
+  gitleaks:
+    name: Secret Scanning
+    if: ${{ inputs.enable-gitleaks }}
+    uses: netresearch/.github/.github/workflows/gitleaks.yml@main
+    permissions:
+      contents: read
+      security-events: write
+    secrets:
+      GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+  dependency-review:
+    name: Dependency Review
+    if: ${{ github.event_name == 'pull_request' }}
+    uses: netresearch/.github/.github/workflows/dependency-review.yml@main
+    permissions:
+      contents: read
+      pull-requests: write
+
+  zizmor:
+    name: zizmor
+    if: ${{ inputs.enable-zizmor }}
+    uses: netresearch/.github/.github/workflows/zizmor.yml@main
+    permissions:
+      contents: read
+      security-events: write
+
+  scorecard:
+    name: Scorecard
+    if: ${{ inputs.enable-scorecard }}
+    uses: netresearch/.github/.github/workflows/scorecard.yml@main
+    permissions:
+      contents: read
+      security-events: write
+      id-token: write
+      actions: read
