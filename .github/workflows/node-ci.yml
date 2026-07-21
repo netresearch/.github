@@ -163,6 +163,8 @@ jobs:
     permissions:
       contents: read
     with:
+      package-manager: ${{ inputs.package-manager }}
+      node-version: ${{ inputs.node-version }}
       install-cmd: ${{ inputs.install-cmd }}
       lint-cmd: ${{ inputs.lint-cmd }}
       type-check-cmd: ${{ inputs.type-check-cmd }}

@@ -1,17 +1,35 @@
 # Reusable "TypeScript / frontend check" workflow.
 #
 # Jobs (each can be toggled via inputs):
-#   - type-check   : bun install + tsc / bun run js:build
-#   - lint         : eslint via `bun run lint`
-#   - format-check : `bunx prettier --check .`
+#   - type-check   : install + tsc / build (default: `bun run js:build`)
+#   - lint         : eslint (default: `bun run lint`)
+#   - format-check : prettier (default: `bunx prettier --check .`)
 #
-# Caller pattern:
+# Package-manager aware: the default `package-manager: bun` keeps the
+# original setup-bun path. Set `package-manager` to npm/pnpm/yarn (and
+# pass the matching `install-cmd`/`*-cmd` inputs) to run the checks under
+# Node.js via actions/setup-node instead (corepack is enabled for
+# pnpm/yarn).
+#
+# Caller pattern (bun, default):
 #
 #   jobs:
 #     ts:
 #       uses: netresearch/.github/.github/workflows/ts-check.yml@main
 #       with:
 #         install-args: "--frozen-lockfile"
+#
+# Caller pattern (yarn):
+#
+#   jobs:
+#     ts:
+#       uses: netresearch/.github/.github/workflows/ts-check.yml@main
+#       with:
+#         package-manager: yarn
+#         install-cmd: "yarn install --immutable"
+#         lint-cmd: "yarn lint"
+#         type-check-cmd: "yarn build"
+#         format-check-cmd: "yarn prettier --check ."
 #
 # SECURITY: caller-supplied commands are routed through `env:` so the
 # caller can't break out of argument position via quoting/metacharacters.
@@ -30,8 +48,16 @@ on:
         type: number
         default: 10
 
+      package-manager:
+        description: "Package manager to use (one of: bun, npm, pnpm, yarn). Default 'bun' preserves the original setup-bun path."
+        type: string
+        default: "bun"
+      node-version:
+        description: "Node.js version passed to actions/setup-node (used when package-manager is not bun)."
+        type: string
+        default: "24"
       bun-version:
-        description: "Bun version passed to oven-sh/setup-bun."
+        description: "Bun version passed to oven-sh/setup-bun (when package-manager is bun)."
         type: string
         default: "latest"
       install-cmd:
@@ -119,6 +145,18 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Validate package-manager input
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package-manager }}
+        run: |
+          case "$PACKAGE_MANAGER" in
+            bun|npm|pnpm|yarn) : ;;
+            *)
+              echo "::error title=Invalid package-manager::Unsupported package-manager '$PACKAGE_MANAGER'. Expected one of: bun, npm, pnpm, yarn."
+              exit 1
+              ;;
+          esac
+
       - name: Set up Go
         if: ${{ inputs.setup-go }}
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -127,9 +165,20 @@ jobs:
           cache: true
 
       - name: Set up Bun
+        if: ${{ inputs.package-manager == 'bun' }}
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: ${{ inputs.bun-version }}
+
+      - name: Set up Node.js
+        if: ${{ inputs.package-manager != 'bun' }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Enable Corepack
+        if: ${{ inputs.package-manager == 'pnpm' || inputs.package-manager == 'yarn' }}
+        run: corepack enable
 
       - name: Install dependencies
         env:
@@ -165,6 +214,18 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Validate package-manager input
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package-manager }}
+        run: |
+          case "$PACKAGE_MANAGER" in
+            bun|npm|pnpm|yarn) : ;;
+            *)
+              echo "::error title=Invalid package-manager::Unsupported package-manager '$PACKAGE_MANAGER'. Expected one of: bun, npm, pnpm, yarn."
+              exit 1
+              ;;
+          esac
+
       - name: Set up Go
         if: ${{ inputs.setup-go }}
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -173,9 +234,20 @@ jobs:
           cache: true
 
       - name: Set up Bun
+        if: ${{ inputs.package-manager == 'bun' }}
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: ${{ inputs.bun-version }}
+
+      - name: Set up Node.js
+        if: ${{ inputs.package-manager != 'bun' }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Enable Corepack
+        if: ${{ inputs.package-manager == 'pnpm' || inputs.package-manager == 'yarn' }}
+        run: corepack enable
 
       - name: Install dependencies
         env:
@@ -211,10 +283,33 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Validate package-manager input
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package-manager }}
+        run: |
+          case "$PACKAGE_MANAGER" in
+            bun|npm|pnpm|yarn) : ;;
+            *)
+              echo "::error title=Invalid package-manager::Unsupported package-manager '$PACKAGE_MANAGER'. Expected one of: bun, npm, pnpm, yarn."
+              exit 1
+              ;;
+          esac
+
       - name: Set up Bun
+        if: ${{ inputs.package-manager == 'bun' }}
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: ${{ inputs.bun-version }}
+
+      - name: Set up Node.js
+        if: ${{ inputs.package-manager != 'bun' }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Enable Corepack
+        if: ${{ inputs.package-manager == 'pnpm' || inputs.package-manager == 'yarn' }}
+        run: corepack enable
 
       - name: Install dependencies
         env:
