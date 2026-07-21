@@ -1,0 +1,231 @@
+# Reusable "Python release" workflow — publishes a Python package on a
+# version tag: build → optional TestPyPI → PyPI via OIDC Trusted
+# Publishing → optional GitHub Release.
+#
+# PyPI upload uses pypa/gh-action-pypi-publish with OpenID Connect
+# (Trusted Publishing) — NO API token is passed. The publish job runs in
+# a GitHub Environment (`pypi-environment`) so PyPI can bind the OIDC
+# identity to a specific repo + workflow + environment, and so the
+# environment's deployment protection rules gate the privileged upload.
+#
+# ┌─────────────────────────────────────────────────────────────────────┐
+# │ PREREQUISITE — Trusted Publishing MUST be configured first.         │
+# │ Before this workflow can go green, a maintainer configures the      │
+# │ publisher on PyPI (project → Publishing → Add a GitHub publisher):  │
+# │   owner/repo, workflow filename (the *caller's* release.yml), and   │
+# │   the environment name passed as `pypi-environment` (default        │
+# │   "pypi"). TestPyPI is configured separately on test.pypi.org.      │
+# │ Internal apps that never publish to PyPI set `publish-pypi: false`  │
+# │ (and `publish-testpypi: false`) for a GitHub-Release-only run.      │
+# └─────────────────────────────────────────────────────────────────────┘
+#
+# Caller pattern (PyPI + GitHub Release via OIDC):
+#
+#   name: Release
+#   on:
+#     push:
+#       tags: ['v*.*.*']
+#   permissions: {}
+#   jobs:
+#     release:
+#       uses: netresearch/.github/.github/workflows/python-release.yml@main
+#       permissions:
+#         contents: write
+#         id-token: write
+#
+# Caller pattern (internal app — GitHub Release only, no PyPI):
+#
+#   jobs:
+#     release:
+#       uses: netresearch/.github/.github/workflows/python-release.yml@main
+#       permissions:
+#         contents: write
+#         id-token: write
+#       with:
+#         publish-pypi: false
+#
+# SECURITY: pinned action SHAs, harden-runner, least-privilege per-job
+# permissions, `persist-credentials: false` on checkout. Caller-supplied
+# commands are routed through `env:` and executed with `bash -c "$VAR"`;
+# the release tag is read from `github.ref_name` via `env:` (never
+# interpolated into a run block). No `github.event.*` data reaches a run
+# block. Inputs arrive via `workflow_call` from trusted callers.
+
+name: Python Release (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      package-manager:
+        description: "Python package manager used for the build: 'uv', 'pip', or 'poetry'."
+        type: string
+        default: "uv"
+      python-version:
+        description: "Python version for actions/setup-python."
+        type: string
+        default: "3.14"
+      install-cmd:
+        description: "Optional command that installs build tooling before the build. Empty to skip (uv build is self-contained)."
+        type: string
+        default: ""
+      build-cmd:
+        description: "Command that builds the distribution into `dist/`. Executed via bash -c."
+        type: string
+        default: "uv build"
+      publish-pypi:
+        description: "Publish the built distribution to PyPI via OIDC Trusted Publishing."
+        type: boolean
+        default: true
+      publish-testpypi:
+        description: "Publish the built distribution to TestPyPI (test.pypi.org) via OIDC Trusted Publishing."
+        type: boolean
+        default: false
+      create-github-release:
+        description: "Create a GitHub Release for the tag with auto-generated notes."
+        type: boolean
+        default: true
+      pypi-environment:
+        description: >-
+          Name of the GitHub Environment the publish job runs in. Must match
+          the environment configured on PyPI's Trusted Publisher for this
+          repo. Its deployment protection rules gate the PyPI upload.
+        type: string
+        default: "pypi"
+
+# CALLER REQUIREMENTS
+# ===================
+# When calling this reusable workflow, the caller's job-level
+# `permissions:` block MUST grant at least this full set, otherwise
+# the run fails with `startup_failure` before any job executes
+# (GitHub rejects the workflow at startup when the reusable declares
+# a permission the caller did not grant). NOTE: setting ANY scope in a
+# `permissions:` block forces every UNLISTED scope to `none`, and a job
+# that omits `permissions:` inherits the repository default
+# (default_workflow_permissions) — so a repo hardened to `read` will
+# startup-fail here unless these scopes are granted explicitly.
+#
+#   - contents: write     — create the GitHub Release
+#   - id-token: write     — OIDC identity for PyPI Trusted Publishing
+#
+#   jobs:
+#     release:
+#       uses: netresearch/.github/.github/workflows/python-release.yml@main
+#       permissions:
+#         contents: write
+#         id-token: write
+permissions: {}
+
+jobs:
+  build:
+    name: Build distribution
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        if: ${{ inputs.package-manager == 'uv' }}
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+
+      - name: Setup Python ${{ inputs.python-version }} (uv)
+        if: ${{ inputs.package-manager == 'uv' }}
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Setup Python ${{ inputs.python-version }}
+        if: ${{ inputs.package-manager != 'uv' }}
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install build tooling
+        if: ${{ inputs.install-cmd != '' }}
+        env:
+          INSTALL_CMD: ${{ inputs.install-cmd }}
+        run: bash -c "$INSTALL_CMD"
+
+      - name: Build distribution
+        env:
+          BUILD_CMD: ${{ inputs.build-cmd }}
+        run: bash -c "$BUILD_CMD"
+
+      - name: Upload distribution artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    if: ${{ inputs.publish-pypi || inputs.publish-testpypi }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Environment gate is on the publish job ONLY — its deployment
+    # protection rules guard the privileged OIDC upload, not the build or
+    # the GitHub Release.
+    environment: ${{ inputs.pypi-environment }}
+    permissions:
+      id-token: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Download distribution artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to TestPyPI
+        if: ${{ inputs.publish-testpypi }}
+        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+
+      - name: Publish to PyPI
+        if: ${{ inputs.publish-pypi }}
+        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1
+
+  github-release:
+    name: Create GitHub Release
+    needs: build
+    if: ${{ inputs.create-github-release }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" --generate-notes

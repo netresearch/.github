@@ -67,7 +67,9 @@ truth; this table is the index.)
 | `ghcr-retention.yml` | `packages: write` |
 | `security-container.yml` | `contents: read`, `security-events: write`, `packages: read` |
 | `node-ci.yml` | `actions: read`, `contents: read`, `security-events: write`, `pull-requests: write` |
-| `lint-*.yml` / `php-ci.yml` / `python-*.yml` / `ansible-lint.yml` / `ansible-molecule.yml` / `ts-check.yml` / `node-audit.yml` / `node-test.yml` / `node-build.yml` / `sonarqube.yml` / `smoke-test-container.yml` / `lint-container.yml` / `check-template-drift.yml` | `contents: read` |
+| `python-app-ci.yml` | `actions: read`, `contents: read`, `security-events: write`, `pull-requests: write`, `id-token: write` |
+| `python-release.yml` | `contents: write`, `id-token: write` |
+| `lint-*.yml` / `php-ci.yml` / `python-ci.yml` / `python-build.yml` / `python-audit.yml` / `ansible-lint.yml` / `ansible-molecule.yml` / `ts-check.yml` / `node-audit.yml` / `node-test.yml` / `node-build.yml` / `sonarqube.yml` / `smoke-test-container.yml` / `lint-container.yml` / `check-template-drift.yml` | `contents: read` |
 
 ### `netresearch/typo3-ci-workflows`
 
