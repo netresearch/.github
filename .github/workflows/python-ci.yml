@@ -218,6 +218,7 @@ jobs:
         python: ${{ fromJSON(inputs.python-versions) }}
     defaults:
       run:
+        shell: bash
         working-directory: ${{ inputs.working-directory }}
     steps:
       - name: Harden Runner
