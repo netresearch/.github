@@ -44,10 +44,27 @@
 # pages-deploy.yml's default — so the two halves line up with no extra
 # wiring.
 #
+# Hidden files: actions/upload-artifact drops dotfiles unless told
+# otherwise, so a site that ships a `.nojekyll` marker (or a
+# `.well-known/` directory) loses it on the way to the deploy half and
+# Pages starts Jekyll-processing the output. Set `include-hidden-files:
+# true` for those sites.
+#
 # SECURITY: pinned action SHAs, harden-runner, least-privilege
 # permissions, `persist-credentials: false` on checkout. The caller's
 # build command is routed through `env:` and executed with `bash -c
 # "$VAR"` — never interpolated into the run block.
+#
+# SECURITY — why the token is opt-in: `build-command` is arbitrary
+# caller-supplied shell that in practice runs a third-party dependency
+# tree (npm lifecycle scripts, Python build backends). Exporting
+# `github.token` unconditionally would hand a live credential to every
+# one of those processes in every consumer, including consumers that
+# never asked for API access — and harden-runner runs in `audit` mode
+# here, so egress is recorded, not blocked. `expose-github-token`
+# therefore defaults to false: the token reaches the build environment
+# only where a maintainer wrote the input, and it stays capped at this
+# job's `contents: read` scope.
 
 name: Build site for GitHub Pages (reusable)
 
@@ -103,6 +120,29 @@ on:
         required: false
         type: string
         default: ""
+      include-hidden-files:
+        description: >-
+          Upload dotfiles/hidden files (`.nojekyll`, `.well-known/`, …) as
+          part of the artifact. actions/upload-artifact drops them by
+          default, which silently strips a site's `.nojekyll` marker and lets
+          Pages Jekyll-process the result. Off by default, which is exactly
+          the upload-artifact default this workflow relied on before.
+        required: false
+        type: boolean
+        default: false
+      expose-github-token:
+        description: >-
+          Export this workflow's own `github.token` to the pre-build and
+          build commands as GITHUB_TOKEN and GH_TOKEN, for a build that
+          queries the GitHub API (a generator shelling out to `gh api`, for
+          instance). Opt-in on purpose — see the SECURITY note in the header.
+          The token is scoped by this job's `contents: read` permission, so
+          it grants public reads and no write access to the calling
+          repository. Left off, both variables are defined empty, which `gh`
+          and Octokit treat as absent.
+        required: false
+        type: boolean
+        default: false
 
 # CALLER REQUIREMENTS
 # ===================
@@ -156,6 +196,8 @@ jobs:
           PRE_BUILD_CMD: ${{ inputs.pre-build-command }}
           PAGES_BASE_PATH: ${{ steps.pages.outputs.base_path }}
           PAGES_ORIGIN: ${{ steps.pages.outputs.origin }}
+          GITHUB_TOKEN: ${{ inputs.expose-github-token && github.token || '' }}
+          GH_TOKEN: ${{ inputs.expose-github-token && github.token || '' }}
         run: bash -euo pipefail -c "$PRE_BUILD_CMD"
 
       - name: Build site
@@ -163,6 +205,8 @@ jobs:
           BUILD_CMD: ${{ inputs.build-command }}
           PAGES_BASE_PATH: ${{ steps.pages.outputs.base_path }}
           PAGES_ORIGIN: ${{ steps.pages.outputs.origin }}
+          GITHUB_TOKEN: ${{ inputs.expose-github-token && github.token || '' }}
+          GH_TOKEN: ${{ inputs.expose-github-token && github.token || '' }}
         run: bash -euo pipefail -c "$BUILD_CMD"
 
       - name: Upload built site
@@ -171,3 +215,4 @@ jobs:
           name: ${{ inputs.artifact-name }}
           path: ${{ inputs.artifact-path }}
           if-no-files-found: error
+          include-hidden-files: ${{ inputs.include-hidden-files }}
