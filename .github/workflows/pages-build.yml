@@ -99,10 +99,35 @@
 # token, so a consumer whose API call and site build share a phase gives
 # the token to both. That is coarser than an `env:` on a single hand-written
 # step; where that matters, split the work so the API call is the only
-# thing in its phase, or keep the step in the consumer. The token stays
-# capped at this job's `contents: read` scope either way (a reusable's job
-# `permissions:` cannot be raised by the caller), so it grants public reads
-# and no write access to the calling repository.
+# thing in its phase, or keep the step in the consumer.
+#
+# WHAT THE EXPOSED TOKEN ACTUALLY IS — stated precisely, because an earlier
+# revision of this file described it as merely "public reads", which is wrong.
+#
+# It is the CALLING repository's GITHUB_TOKEN for this run (a reusable
+# workflow runs in the caller's repository context; `github.token` here is not
+# a token for netresearch/.github), capped at this job's `contents: read`.
+# The cap is real: GitHub only lets permissions be maintained or reduced
+# through a reusable-workflow chain, never elevated, so a caller cannot widen
+# it. At `contents: read` the token cannot push, tag, cut a release, comment,
+# publish a package, deploy Pages or dispatch a workflow, and it dies when the
+# job finishes.
+#
+# But `contents: read` is not "public reads". It is an authenticated
+# credential granting read access to the CALLING repository — its files,
+# commit history, branches, tags and release assets — and on a private or
+# internal repository that is private source code, not public data. It also
+# functions as a git credential
+# (`https://x-access-token:$TOKEN@github.com/<owner>/<repo>`), so it clones
+# what the repository contains, including history.
+#
+# The risk this input therefore accepts: anything running in the selected
+# phase — including third-party code that phase pulls in — can read the token
+# and send it off the runner. harden-runner is in `audit` mode here, so that
+# egress is recorded, not blocked, and log masking hides the literal value but
+# not a transformed one. Read-only and short-lived is why this is defensible;
+# it is not the same as harmless. That is why the default is `none`, why the
+# phase is opt-in, and why the dependency-install phase should stay unselected.
 
 name: Build site for GitHub Pages (reusable)
 
@@ -182,9 +207,12 @@ on:
           install — where third-party lifecycle scripts execute — token-free:
           put the install in `pre-build-command` and select `build`. In a
           phase that is not selected, neither variable is defined at all.
-          The token is scoped by this job's `contents: read` permission, so
-          it grants public reads and no write access to the calling
-          repository. See the SECURITY note in the header.
+          Capped at this job's `contents: read` — it cannot write anything to
+          the calling repository — but that is still a live credential that
+          reads the CALLING repository (files, commit history, branches, tags,
+          releases; private source on a private repo) and is visible to
+          everything running in the selected phase. See the SECURITY note in
+          the header.
         required: false
         type: string
         default: "none"
