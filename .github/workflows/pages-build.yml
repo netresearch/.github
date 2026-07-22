@@ -44,10 +44,89 @@
 # pages-deploy.yml's default — so the two halves line up with no extra
 # wiring.
 #
+# Hidden files: dotfiles are dropped TWICE on the way to Pages — once by
+# actions/upload-artifact here, and again by actions/upload-pages-artifact
+# in the deploy half, which tars with `--exclude=.[^/]*` unless told
+# otherwise. A site that ships a `.nojekyll` marker (or a `.well-known/`
+# directory) therefore needs `include-hidden-files: true` on BOTH calls:
+#
+#     build:
+#       uses: …/pages-build.yml@main
+#       with:
+#         include-hidden-files: true
+#     deploy:
+#       uses: …/pages-deploy.yml@main
+#       with:
+#         include-hidden-files: true
+#
+# Setting it on this half alone is a no-op end-to-end: the marker reaches
+# the artifact and is stripped again during Pages packaging.
+#
+# Asymmetry worth knowing before turning it on here: actions/upload-pages-artifact
+# (the deploy half) excludes `.git` and `.github` unconditionally, at any
+# setting. actions/upload-artifact — this half — does NOT; it has no such
+# carve-out, so `include-hidden-files: true` uploads everything hidden under
+# `artifact-path`. That is harmless when `artifact-path` is a generated output
+# directory (`_site`, `public`, `dist`), which is the normal case. Keep
+# `artifact-path` pointed at the build output rather than the repository root.
+#
 # SECURITY: pinned action SHAs, harden-runner, least-privilege
 # permissions, `persist-credentials: false` on checkout. The caller's
 # build command is routed through `env:` and executed with `bash -c
 # "$VAR"` — never interpolated into the run block.
+#
+# SECURITY — why the token is opt-in AND per-phase: `pre-build-command`
+# and `build-command` are arbitrary caller-supplied shell that in practice
+# run a third-party dependency tree (npm lifecycle scripts, Python build
+# backends) — and the dependency-install phase, typically `pre-build-command`,
+# is exactly where that third-party code executes. Exporting `github.token`
+# to both phases unconditionally would hand a live credential to every one
+# of those processes in every consumer, including consumers that never
+# asked for API access — and harden-runner runs in `audit` mode here, so
+# egress is recorded, not blocked.
+#
+# `expose-github-token` therefore names the single phase that gets the
+# token (`none` | `pre-build` | `build` | `both`) and defaults to `none`.
+# A build that queries the API can keep its install step token-free by
+# putting the install in `pre-build-command` and selecting `build`. When a
+# phase is not selected, GITHUB_TOKEN / GH_TOKEN are not defined in it at
+# all — not defined-but-empty — so the caller's command sees exactly the
+# environment it saw before this input existed.
+#
+# Residual, stated rather than glossed: the granularity is per PHASE, not
+# per command. Everything inside the selected phase's shell sees the
+# token, so a consumer whose API call and site build share a phase gives
+# the token to both. That is coarser than an `env:` on a single hand-written
+# step; where that matters, split the work so the API call is the only
+# thing in its phase, or keep the step in the consumer.
+#
+# WHAT THE EXPOSED TOKEN ACTUALLY IS — stated precisely, because an earlier
+# revision of this file described it as merely "public reads", which is wrong.
+#
+# It is the CALLING repository's GITHUB_TOKEN for this run (a reusable
+# workflow runs in the caller's repository context; `github.token` here is not
+# a token for netresearch/.github), capped at this job's `contents: read`.
+# The cap is real: GitHub only lets permissions be maintained or reduced
+# through a reusable-workflow chain, never elevated, so a caller cannot widen
+# it. At `contents: read` the token cannot push, tag, cut a release, comment,
+# publish a package, deploy Pages or dispatch a workflow, and it dies when the
+# job finishes.
+#
+# But `contents: read` is not "public reads". It is an authenticated
+# credential granting read access to the CALLING repository — its files,
+# commit history, branches, tags and release assets — and on a private or
+# internal repository that is private source code, not public data. It also
+# functions as a git credential
+# (`https://x-access-token:$TOKEN@github.com/<owner>/<repo>`), so it clones
+# what the repository contains, including history.
+#
+# The risk this input therefore accepts: anything running in the selected
+# phase — including third-party code that phase pulls in — can read the token
+# and send it off the runner. harden-runner is in `audit` mode here, so that
+# egress is recorded, not blocked, and log masking hides the literal value but
+# not a transformed one. Read-only and short-lived is why this is defensible;
+# it is not the same as harmless. That is why the default is `none`, why the
+# phase is opt-in, and why the dependency-install phase should stay unselected.
 
 name: Build site for GitHub Pages (reusable)
 
@@ -103,6 +182,39 @@ on:
         required: false
         type: string
         default: ""
+      include-hidden-files:
+        description: >-
+          Upload dotfiles/hidden files (`.nojekyll`, `.well-known/`, …) as
+          part of the artifact. actions/upload-artifact drops them by
+          default, which silently strips a site's `.nojekyll` marker. NOTE:
+          this only gets them into the artifact — pages-deploy.yml strips
+          them again during Pages packaging unless its own
+          `include-hidden-files` input is also set. Both halves or neither.
+          Off by default, which is exactly the upload-artifact default this
+          workflow relied on before.
+        required: false
+        type: boolean
+        default: false
+      expose-github-token:
+        description: >-
+          Which build phase — if any — gets this workflow's own
+          `github.token` as GITHUB_TOKEN and GH_TOKEN, for a build that
+          queries the GitHub API (a generator shelling out to `gh api`, for
+          instance). One of `none` (default), `pre-build`, `build`, `both`;
+          any other value fails the run. Deliberately per-phase rather than
+          all-or-nothing so an API-using build can keep its dependency
+          install — where third-party lifecycle scripts execute — token-free:
+          put the install in `pre-build-command` and select `build`. In a
+          phase that is not selected, neither variable is defined at all.
+          Capped at this job's `contents: read` — it cannot write anything to
+          the calling repository — but that is still a live credential that
+          reads the CALLING repository (files, commit history, branches, tags,
+          releases; private source on a private repo) and is visible to
+          everything running in the selected phase. See the SECURITY note in
+          the header.
+        required: false
+        type: string
+        default: "none"
 
 # CALLER REQUIREMENTS
 # ===================
@@ -130,6 +242,22 @@ jobs:
         with:
           egress-policy: audit
 
+      # `workflow_call` has no enum input type, so the value is checked here:
+      # anything other than none / pre-build / build / both fails the run. The
+      # check is unconditional — it does not skip the default — so the shell
+      # `case` is the only thing that decides which values are accepted.
+      - name: Validate expose-github-token
+        env:
+          EXPOSE_TOKEN: ${{ inputs.expose-github-token }}
+        run: |
+          case "$EXPOSE_TOKEN" in
+            none|pre-build|build|both) ;;
+            *)
+              echo "::error::expose-github-token must be one of: none, pre-build, build, both (got '${EXPOSE_TOKEN}')"
+              exit 1
+              ;;
+          esac
+
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -156,14 +284,33 @@ jobs:
           PRE_BUILD_CMD: ${{ inputs.pre-build-command }}
           PAGES_BASE_PATH: ${{ steps.pages.outputs.base_path }}
           PAGES_ORIGIN: ${{ steps.pages.outputs.origin }}
-        run: bash -euo pipefail -c "$PRE_BUILD_CMD"
+          # Internal carrier: empty unless this phase was selected. Exported
+          # under the well-known names only when non-empty, then unset — so an
+          # unselected phase leaves GITHUB_TOKEN / GH_TOKEN genuinely undefined
+          # rather than defined-but-empty, and PAGES_GH_TOKEN never reaches the
+          # caller's command either.
+          PAGES_GH_TOKEN: ${{ (inputs.expose-github-token == 'pre-build' || inputs.expose-github-token == 'both') && github.token || '' }}
+        run: |
+          if [ -n "$PAGES_GH_TOKEN" ]; then
+            export GITHUB_TOKEN="$PAGES_GH_TOKEN" GH_TOKEN="$PAGES_GH_TOKEN"
+          fi
+          unset PAGES_GH_TOKEN
+          bash -euo pipefail -c "$PRE_BUILD_CMD"
 
       - name: Build site
         env:
           BUILD_CMD: ${{ inputs.build-command }}
           PAGES_BASE_PATH: ${{ steps.pages.outputs.base_path }}
           PAGES_ORIGIN: ${{ steps.pages.outputs.origin }}
-        run: bash -euo pipefail -c "$BUILD_CMD"
+          # See the note on the pre-build step: carrier variable, exported
+          # under the well-known names only when this phase was selected.
+          PAGES_GH_TOKEN: ${{ (inputs.expose-github-token == 'build' || inputs.expose-github-token == 'both') && github.token || '' }}
+        run: |
+          if [ -n "$PAGES_GH_TOKEN" ]; then
+            export GITHUB_TOKEN="$PAGES_GH_TOKEN" GH_TOKEN="$PAGES_GH_TOKEN"
+          fi
+          unset PAGES_GH_TOKEN
+          bash -euo pipefail -c "$BUILD_CMD"
 
       - name: Upload built site
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -171,3 +318,4 @@ jobs:
           name: ${{ inputs.artifact-name }}
           path: ${{ inputs.artifact-path }}
           if-no-files-found: error
+          include-hidden-files: ${{ inputs.include-hidden-files }}
