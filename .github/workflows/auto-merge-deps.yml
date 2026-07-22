@@ -20,6 +20,19 @@ on:
           auto-detector can't see.
         type: string
         default: ""
+      allow-release-please:
+        description: >-
+          When true, ALSO auto-merge release-please release PRs, i.e. PRs
+          opened by `github-actions[bot]` that carry the
+          `autorelease: pending` label. Those PRs are deliberately NOT
+          approved by this workflow: GITHUB_TOKEN cannot approve a PR
+          opened by `github-actions[bot]` (self-approval), so the approval
+          has to come from elsewhere (a PAT-based approve step, e.g. in
+          pr-quality.yml, or a human). The label check keeps the scope to
+          release PRs — other `github-actions[bot]` PRs are ignored.
+          Default false = dependabot + renovate only, unchanged.
+        type: boolean
+        default: false
 
 # CALLER REQUIREMENTS
 # ===================
@@ -39,6 +52,17 @@ on:
 #       permissions:
 #         contents: write
 #         pull-requests: write
+#
+# Repos that also want their release-please PRs merged automatically opt in:
+#
+#   jobs:
+#     auto-merge:
+#       uses: netresearch/.github/.github/workflows/auto-merge-deps.yml@main
+#       with:
+#         allow-release-please: true
+#       permissions:
+#         contents: write
+#         pull-requests: write
 permissions: {}
 
 jobs:
@@ -46,7 +70,16 @@ jobs:
     name: Auto-merge dependency PRs
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    if: github.event.pull_request.user.login == 'dependabot[bot]' || github.event.pull_request.user.login == 'renovate[bot]'
+    # `user.login`, not `actor`: the actor can change on synchronize/rerun.
+    # The release-please arm only opens when the caller opts in via
+    # `allow-release-please` — with the input unset it is `false`, so the
+    # condition reduces to the original dependabot||renovate check.
+    if: >-
+      github.event.pull_request.user.login == 'dependabot[bot]' ||
+      github.event.pull_request.user.login == 'renovate[bot]' ||
+      (inputs.allow-release-please &&
+       github.event.pull_request.user.login == 'github-actions[bot]' &&
+       contains(github.event.pull_request.labels.*.name, 'autorelease: pending'))
     permissions:
       contents: write
       pull-requests: write
@@ -57,6 +90,11 @@ jobs:
           egress-policy: audit
 
       - name: Approve PR
+        # Skipped for `github-actions[bot]` (release-please) PRs: GITHUB_TOKEN
+        # cannot approve a PR its own app opened, the API call would just fail.
+        # No-op for every caller that does not set `allow-release-please`,
+        # because the job condition above then never admits that author.
+        if: github.event.pull_request.user.login != 'github-actions[bot]'
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -70,9 +108,14 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Enable auto-merge
+        # `safe-updates-only` is a Dependabot semver gate; it must not swallow
+        # release-please PRs (they have no dependabot metadata, so every
+        # metadata clause below would be false and the merge silently skipped).
+        # Unreachable unless `allow-release-please` is set.
         if: >-
           !inputs.safe-updates-only ||
           github.event.pull_request.user.login == 'renovate[bot]' ||
+          github.event.pull_request.user.login == 'github-actions[bot]' ||
           steps.metadata.outputs.update-type == 'version-update:semver-minor' ||
           steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
           (steps.metadata.outputs.package-ecosystem == 'docker' &&
