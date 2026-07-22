@@ -1,0 +1,173 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# Reusable "Build site for GitHub Pages" — the BUILD half that pairs with
+# pages-deploy.yml. It owns checkout + Pages config + toolchain setup +
+# the build + artifact upload, so a Pages consumer needs NO step-level
+# action of its own: its workflow becomes two reusable calls
+# (build → deploy) with zero direct `uses:` on any step.
+#
+# This exists because pages-deploy.yml deliberately leaves the site build
+# to the caller, which forced every Pages consumer to inline
+# actions/checkout + a toolchain setup + actions/upload-artifact. Those
+# inlined copies are exactly what the "actions live only in shared
+# workflows" policy forbids (and each one generates its own Renovate bump
+# PR). The build stays configurable through `build-command` instead.
+#
+# Pages base path / origin: when `configure-pages` is on (default) the
+# actions/configure-pages outputs are exported to the build as
+# PAGES_BASE_PATH and PAGES_ORIGIN, so a static-site generator can emit
+# correct absolute URLs without the caller running the action itself.
+#
+# Caller pattern (uv-built site, e.g. t3x-nr-llm landing page):
+#
+#   jobs:
+#     build:
+#       uses: netresearch/.github/.github/workflows/pages-build.yml@main
+#       permissions:
+#         contents: read
+#       with:
+#         setup-uv: true
+#         artifact-path: landingpage/public
+#         build-command: >-
+#           NRLLM_BASE="$PAGES_BASE_PATH" NRLLM_ORIGIN="$PAGES_ORIGIN"
+#           uv run landingpage/build/build.py
+#     deploy:
+#       needs: build
+#       uses: netresearch/.github/.github/workflows/pages-deploy.yml@main
+#       permissions:
+#         pages: write
+#         id-token: write
+#         contents: read
+#
+# The artifact name defaults to `github-pages-site`, which is also
+# pages-deploy.yml's default — so the two halves line up with no extra
+# wiring.
+#
+# SECURITY: pinned action SHAs, harden-runner, least-privilege
+# permissions, `persist-credentials: false` on checkout. The caller's
+# build command is routed through `env:` and executed with `bash -c
+# "$VAR"` — never interpolated into the run block.
+
+name: Build site for GitHub Pages (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      build-command:
+        description: >-
+          Command that builds the site into `artifact-path`. Executed via
+          `bash -euo pipefail -c`. PAGES_BASE_PATH / PAGES_ORIGIN are in the
+          environment when `configure-pages` is enabled.
+        required: true
+        type: string
+      artifact-path:
+        description: "Directory the build writes the finished site to; uploaded as the artifact."
+        required: true
+        type: string
+      artifact-name:
+        description: >-
+          Name of the uploaded artifact. Keep in sync with the
+          pages-deploy.yml caller (both default to `github-pages-site`).
+        required: false
+        type: string
+        default: "github-pages-site"
+      configure-pages:
+        description: >-
+          Run actions/configure-pages and export its outputs to the build as
+          PAGES_BASE_PATH / PAGES_ORIGIN. Turn off for a generator that does
+          not need the deployed base path.
+        required: false
+        type: boolean
+        default: true
+      setup-uv:
+        description: "Install uv (astral-sh/setup-uv) before the build."
+        required: false
+        type: boolean
+        default: false
+      setup-node:
+        description: "Install Node.js (actions/setup-node) before the build."
+        required: false
+        type: boolean
+        default: false
+      node-version:
+        description: "Node.js version when `setup-node` is enabled."
+        required: false
+        type: string
+        default: "24"
+      pre-build-command:
+        description: >-
+          Optional command run after toolchain setup and before
+          `build-command` (dependency install, codegen). Executed via
+          `bash -euo pipefail -c`.
+        required: false
+        type: string
+        default: ""
+
+# CALLER REQUIREMENTS
+# ===================
+# The calling job needs only `contents: read` — the build neither pushes
+# nor deploys. The privileged Pages scopes (`pages: write`,
+# `id-token: write`) belong on the pages-deploy.yml call, not here.
+#
+#   jobs:
+#     build:
+#       uses: netresearch/.github/.github/workflows/pages-build.yml@main
+#       permissions:
+#         contents: read
+permissions: {}
+
+jobs:
+  build:
+    name: Build site
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Configure Pages
+        id: pages
+        if: ${{ inputs.configure-pages }}
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      - name: Set up uv
+        if: ${{ inputs.setup-uv }}
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+
+      - name: Set up Node.js
+        if: ${{ inputs.setup-node }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Run pre-build command
+        if: ${{ inputs.pre-build-command != '' }}
+        env:
+          PRE_BUILD_CMD: ${{ inputs.pre-build-command }}
+          PAGES_BASE_PATH: ${{ steps.pages.outputs.base_path }}
+          PAGES_ORIGIN: ${{ steps.pages.outputs.origin }}
+        run: bash -euo pipefail -c "$PRE_BUILD_CMD"
+
+      - name: Build site
+        env:
+          BUILD_CMD: ${{ inputs.build-command }}
+          PAGES_BASE_PATH: ${{ steps.pages.outputs.base_path }}
+          PAGES_ORIGIN: ${{ steps.pages.outputs.origin }}
+        run: bash -euo pipefail -c "$BUILD_CMD"
+
+      - name: Upload built site
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ inputs.artifact-path }}
+          if-no-files-found: error
