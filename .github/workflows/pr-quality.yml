@@ -30,6 +30,21 @@ on:
         type: boolean
         default: true
 
+      auto-approve-require-write:
+        description: >-
+          Stricter authorization for auto-approval. When true, the
+          `author_association` gate is replaced by an explicit collaborator
+          permission lookup
+          (`GET /repos/{repo}/collaborators/{author}/permission`) and the PR is
+          only approved when that permission is `admin` or `write`.
+          Rationale: `author_association == MEMBER` matches ANY member of the
+          owning organisation, including members who hold only read access on
+          this repository. Defaults to false so existing callers keep the
+          historical association-based behaviour unchanged.
+        required: false
+        type: boolean
+        default: false
+
       auto-approve-message:
         description: >-
           Body text posted with the auto-approval review. Supports standard
@@ -116,11 +131,19 @@ jobs:
     needs: quality-gate
     # Skip (not fail) for fork PRs — auto-approve only applies to same-repo
     # branches. Fork PRs always fail because GITHUB_TOKEN lacks permission.
+    #
+    # The author_association pre-filter applies only in the default mode. With
+    # `auto-approve-require-write: true` the collaborator-permission step below
+    # is the sole authority — it is strictly narrower than the association
+    # check, so nothing it admits would have been rejected here.
     if: >-
       inputs.auto-approve-maintainers
       && github.event.pull_request.draft == false
       && github.event.pull_request.head.repo.full_name == github.repository
-      && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+      && (
+        inputs.auto-approve-require-write
+        || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+      )
     permissions:
       contents: read
       pull-requests: write
@@ -130,7 +153,29 @@ jobs:
         with:
           egress-policy: audit
 
+      # Only runs when the caller opted into the stricter mode. Skipped
+      # (and therefore without effect) for every caller that does not pass
+      # `auto-approve-require-write: true`.
+      - name: Check author repository permission
+        id: check-permission
+        if: inputs.auto-approve-require-write
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Fails closed: a non-collaborator author (HTTP 404) or any API
+          # error resolves to "none", which skips the approval step below.
+          PERMISSION=$(gh api "repos/$REPO/collaborators/$PR_AUTHOR/permission" --jq '.permission' 2>/dev/null || echo "none")
+          echo "Author '$PR_AUTHOR' resolved repository permission: $PERMISSION"
+          echo "permission=$PERMISSION" >> "$GITHUB_OUTPUT"
+
       - name: Auto-approve PR
+        # Default mode (input false/unset): approve unconditionally, exactly as
+        # before. Strict mode: require admin or write on this repository.
+        if: >-
+          inputs.auto-approve-require-write == false
+          || contains(fromJSON('["admin","write"]'), steps.check-permission.outputs.permission)
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           CONTROLS_PATH: ${{ inputs.security-controls-path }}
