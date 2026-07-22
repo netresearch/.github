@@ -1,0 +1,171 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# Reusable "Attest container image" — emits a GitHub-issued, Sigstore-backed
+# SLSA build-provenance attestation (actions/attest-build-provenance) for
+# every image a bake run produced, and optionally pushes it to the registry
+# alongside the image.
+#
+# WHY THIS IS A SEPARATE REUSABLE, not an input on build-container-bake.yml
+# ========================================================================
+# attest-build-provenance requires `attestations: write`. A called workflow's
+# job permissions are validated STATICALLY at workflow startup — before any
+# job-level `if:` is evaluated — so declaring that scope on the bake job would
+# make every existing caller fail with `startup_failure` until it granted the
+# new scope. Keeping attestation in its own reusable means only the repos that
+# actually want it grant the extra scope; existing build-container-bake
+# callers are completely unaffected.
+#
+# NOTE: this is NOT the same thing as build-container-bake's `attest:` input.
+# That input sets buildx `provenance=mode=max`, an in-image BuildKit
+# attestation. This workflow produces a GitHub-issued attestation, signed via
+# Sigstore and verifiable with `gh attestation verify`. Repos migrating off a
+# direct `actions/attest-build-provenance` step need THIS, not `attest:`.
+#
+# Caller pattern (pairs with build-container-bake.yml):
+#
+#   jobs:
+#     build:
+#       uses: netresearch/.github/.github/workflows/build-container-bake.yml@main
+#       permissions:
+#         contents: read
+#         packages: write
+#         security-events: write
+#         id-token: write
+#       with:
+#         targets: app
+#         bake-source: "."
+#         metadata-images: ghcr.io/${{ github.repository }}
+#
+#     attest:
+#       needs: build
+#       uses: netresearch/.github/.github/workflows/attest-image.yml@main
+#       permissions:
+#         contents: read
+#         packages: write        # push the attestation next to the image
+#         id-token: write        # Sigstore OIDC identity
+#         attestations: write    # write the attestation to GitHub
+#       with:
+#         bake-metadata: ${{ needs.build.outputs.bake-metadata }}
+#
+# Verify afterwards with:
+#   gh attestation verify oci://<image>@<digest> --owner <org>
+
+name: Attest container image (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      bake-metadata:
+        description: >-
+          Raw docker/bake-action metadata JSON — pass the `bake-metadata`
+          output of a build-container-bake.yml call (see the caller pattern in
+          the header). Every target carrying a `containerimage.digest` is
+          attested.
+        required: true
+        type: string
+      push-to-registry:
+        description: >-
+          Push the attestation to the registry alongside the image. Requires
+          the image to have been pushed (not merely loaded) and the calling
+          job to grant `packages: write`.
+        required: false
+        type: boolean
+        default: true
+      registry:
+        description: "Registry to authenticate against when push-to-registry is true."
+        required: false
+        type: string
+        default: "ghcr.io"
+
+# CALLER REQUIREMENTS
+# ===================
+# The calling job MUST grant every scope below, or the run fails with
+# `startup_failure` before any job executes:
+#
+#   contents: read
+#   id-token: write        — Sigstore OIDC identity
+#   attestations: write    — write the attestation to GitHub
+#   packages: write        — only when push-to-registry is true (registry auth)
+permissions: {}
+
+jobs:
+  prepare:
+    name: Collect image digests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      subjects: ${{ steps.parse.outputs.subjects }}
+      count: ${{ steps.parse.outputs.count }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Parse bake metadata into attestation subjects
+        id: parse
+        env:
+          BAKE_METADATA: ${{ inputs.bake-metadata }}
+        run: |
+          set -euo pipefail
+          # Each bake target contributes one subject: the image name WITHOUT a
+          # tag (attestations are bound to the digest, not to a tag) plus the
+          # digest buildx reported. Targets that produced no digest — e.g. a
+          # load-only or skipped target — are ignored.
+          subjects=$(printf '%s' "$BAKE_METADATA" | jq -c '
+            [ to_entries[]
+              | select(.value["containerimage.digest"] != null)
+              | { name: ( .value["image.name"] // "" | split(",")[0] | sub(":[^:/]+$"; "") )
+                , digest: .value["containerimage.digest"]
+                }
+              | select(.name != "")
+            ] | unique')
+          count=$(printf '%s' "$subjects" | jq 'length')
+          if [ "$count" = "0" ]; then
+            echo "::error::No attestable image digests found in bake-metadata. Was the image pushed (push: true)?"
+            exit 1
+          fi
+          echo "Attesting $count image(s):"
+          printf '%s' "$subjects" | jq -r '.[] | "  " + .name + "@" + .digest'
+          {
+            echo "subjects=$subjects"
+            echo "count=$count"
+          } >> "$GITHUB_OUTPUT"
+
+  attest:
+    name: Attest ${{ matrix.subject.name }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        subject: ${{ fromJSON(needs.prepare.outputs.subjects) }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Log in to ${{ inputs.registry }}
+        if: ${{ inputs.push-to-registry }}
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-name: ${{ matrix.subject.name }}
+          subject-digest: ${{ matrix.subject.digest }}
+          push-to-registry: ${{ inputs.push-to-registry }}
