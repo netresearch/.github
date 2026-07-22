@@ -36,11 +36,17 @@ on:
           `author_association` gate is replaced by an explicit collaborator
           permission lookup
           (`GET /repos/{repo}/collaborators/{author}/permission`) and the PR is
-          only approved when that permission is `admin` or `write`.
-          Rationale: `author_association == MEMBER` matches ANY member of the
-          owning organisation, including members who hold only read access on
-          this repository. Defaults to false so existing callers keep the
-          historical association-based behaviour unchanged.
+          only approved when that permission is `admin` or `write`
+          (the legacy 4-value field: `maintain` is reported as `write`,
+          `triage` as `read`).
+          Rationale: `author_association` is not a permission. `COLLABORATOR`
+          is returned for ANY invited collaborator, including `read` and
+          `triage` ones, and `MEMBER` only implies write access for as long as
+          the organisation's base repository permission stays at `write` — an
+          org-level setting this workflow cannot see. The permission lookup is
+          repo-scoped and therefore independent of both. Defaults to false so
+          existing callers keep the historical association-based behaviour
+          unchanged.
         required: false
         type: boolean
         default: false
@@ -173,6 +179,11 @@ jobs:
       - name: Auto-approve PR
         # Default mode (input false/unset): approve unconditionally, exactly as
         # before. Strict mode: require admin or write on this repository.
+        # `.permission` is the endpoint's legacy 4-value field — a `maintain`
+        # collaborator is reported as `write` (and `triage` as `read`), so
+        # `["admin","write"]` already covers every write-or-higher role;
+        # listing `maintain` here would be unreachable. Use `.role_name` if a
+        # future change needs to distinguish the granular roles.
         if: >-
           inputs.auto-approve-require-write == false
           || contains(fromJSON('["admin","write"]'), steps.check-permission.outputs.permission)
