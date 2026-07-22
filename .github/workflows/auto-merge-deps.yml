@@ -23,14 +23,19 @@ on:
       allow-release-please:
         description: >-
           When true, ALSO auto-merge release-please release PRs, i.e. PRs
-          opened by `github-actions[bot]` that carry the
-          `autorelease: pending` label. Those PRs are deliberately NOT
-          approved by this workflow: GITHUB_TOKEN cannot approve a PR
-          opened by `github-actions[bot]` (self-approval), so the approval
-          has to come from elsewhere (a PAT-based approve step, e.g. in
-          pr-quality.yml, or a human). The label check keeps the scope to
-          release PRs — other `github-actions[bot]` PRs are ignored.
+          opened by `github-actions[bot]` from a `release-please--*` branch
+          in this same repository that carry the `autorelease: pending`
+          label. Those PRs are deliberately NOT approved by this workflow:
+          GITHUB_TOKEN cannot approve a PR opened by `github-actions[bot]`
+          (self-approval), so the approval has to come from elsewhere (a
+          PAT-based approve step, e.g. in pr-quality.yml, or a human).
           Default false = dependabot + renovate only, unchanged.
+          CALLER PREREQUISITE: release-please must open the PR with a PAT
+          or GitHub App token, NOT the default GITHUB_TOKEN — GitHub does
+          not emit pull_request/pull_request_target events for anything
+          GITHUB_TOKEN creates, so with the default token this workflow is
+          never triggered for the release PR at all. See the note in the
+          CALLER REQUIREMENTS block below.
         type: boolean
         default: false
 
@@ -63,6 +68,31 @@ on:
 #       permissions:
 #         contents: write
 #         pull-requests: write
+#
+# `allow-release-please` HAS ONE CALLER-SIDE PREREQUISITE this reusable
+# cannot satisfy on its own: release-please must open the release PR with a
+# PAT or GitHub App token, not the default GITHUB_TOKEN.
+#
+#   jobs:
+#     release-please:
+#       steps:
+#         - uses: googleapis/release-please-action@<sha>
+#           with:
+#             token: ${{ secrets.RELEASE_PLEASE_TOKEN }}   # <-- required
+#
+# Reason: GitHub deliberately does not emit pull_request /
+# pull_request_target events for anything GITHUB_TOKEN creates, so a
+# release PR opened with the default token triggers no workflow at all and
+# there is nothing for this reusable to act on. Verified on
+# netresearch/node-red-contrib-magento-eqp#339 (release-please PR opened
+# 2026-02-17T01:02:54Z with the default GITHUB_TOKEN): zero
+# pull_request_target runs — neither auto-merge nor PR Quality Gates fired.
+#
+# The `autorelease: pending` label is NOT part of the `opened` payload
+# either: release-please adds it in a separate API call ~1s after creating
+# the PR (netresearch/node-magento-eqp#466: created 11:48:21Z, labeled
+# 11:48:22Z). This workflow therefore re-reads the labels live at run time
+# instead of gating the job on `github.event.pull_request.labels`.
 permissions: {}
 
 jobs:
@@ -74,12 +104,22 @@ jobs:
     # The release-please arm only opens when the caller opts in via
     # `allow-release-please` — with the input unset it is `false`, so the
     # condition reduces to the original dependabot||renovate check.
+    #
+    # The `autorelease: pending` label is deliberately NOT checked here: it
+    # is absent from the `opened` payload (added ~1s later by a separate API
+    # call), so gating the job on it would restrict the arm to `synchronize`.
+    # The label is verified live in the "Check release-please label" step and
+    # enforced on the merge step. What IS checked here — same repository, and
+    # release-please's `release-please--` branch prefix — is immutable for the
+    # lifetime of the PR and narrows the arm well below "any
+    # `github-actions[bot]` PR that someone labelled".
     if: >-
       github.event.pull_request.user.login == 'dependabot[bot]' ||
       github.event.pull_request.user.login == 'renovate[bot]' ||
       (inputs.allow-release-please &&
        github.event.pull_request.user.login == 'github-actions[bot]' &&
-       contains(github.event.pull_request.labels.*.name, 'autorelease: pending'))
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       startsWith(github.event.pull_request.head.ref, 'release-please--'))
     permissions:
       contents: write
       pull-requests: write
@@ -92,9 +132,13 @@ jobs:
       - name: Approve PR
         # Skipped for `github-actions[bot]` (release-please) PRs: GITHUB_TOKEN
         # cannot approve a PR its own app opened, the API call would just fail.
-        # No-op for every caller that does not set `allow-release-please`,
-        # because the job condition above then never admits that author.
-        if: github.event.pull_request.user.login != 'github-actions[bot]'
+        # Gated on the input as well as the author, so the job-level `if` is
+        # not the single point of failure: a caller that did NOT opt in keeps
+        # the unconditional approve it had before, and would fail loudly
+        # rather than silently skip if such a PR ever reached this step.
+        if: >-
+          !inputs.allow-release-please ||
+          github.event.pull_request.user.login != 'github-actions[bot]'
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -107,19 +151,46 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Enable auto-merge
-        # `safe-updates-only` is a Dependabot semver gate; it must not swallow
-        # release-please PRs (they have no dependabot metadata, so every
-        # metadata clause below would be false and the merge silently skipped).
-        # Unreachable unless `allow-release-please` is set.
+      - name: Check release-please label
+        id: release-label
+        # Live label read, because `github.event.pull_request.labels` is empty
+        # on the `opened` event: release-please creates the PR first and adds
+        # `autorelease: pending` in a separate API call about a second later.
+        # By the time this runner starts, the label is there.
         if: >-
-          !inputs.safe-updates-only ||
-          github.event.pull_request.user.login == 'renovate[bot]' ||
-          github.event.pull_request.user.login == 'github-actions[bot]' ||
-          steps.metadata.outputs.update-type == 'version-update:semver-minor' ||
-          steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
-          (steps.metadata.outputs.package-ecosystem == 'docker' &&
-           steps.metadata.outputs.update-type != 'version-update:semver-major')
+          inputs.allow-release-please &&
+          github.event.pull_request.user.login == 'github-actions[bot]'
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          LABELS=$(gh pr view "$PR_URL" --json labels --jq '.labels[].name')
+          if grep -qxF 'autorelease: pending' <<<"$LABELS"; then
+            echo "is-release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is-release=false" >> "$GITHUB_OUTPUT"
+            echo "No 'autorelease: pending' label - not a release PR, nothing to merge."
+          fi
+
+      - name: Enable auto-merge
+        # First clause: a `github-actions[bot]` PR is only merged when the
+        # caller opted in AND the live label check above confirmed it is a
+        # release-please release PR. Independent of the job-level `if`.
+        # Second clause: `safe-updates-only` is a Dependabot semver gate; it
+        # must not swallow release PRs (they have no dependabot metadata, so
+        # every metadata clause would be false and the merge silently skipped).
+        if: >-
+          (github.event.pull_request.user.login != 'github-actions[bot]' ||
+           (inputs.allow-release-please &&
+            steps.release-label.outputs.is-release == 'true')) &&
+          (!inputs.safe-updates-only ||
+           github.event.pull_request.user.login == 'renovate[bot]' ||
+           (inputs.allow-release-please &&
+            github.event.pull_request.user.login == 'github-actions[bot]') ||
+           steps.metadata.outputs.update-type == 'version-update:semver-minor' ||
+           steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
+           (steps.metadata.outputs.package-ecosystem == 'docker' &&
+            steps.metadata.outputs.update-type != 'version-update:semver-major'))
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
