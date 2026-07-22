@@ -11,6 +11,13 @@
 # - Untagged images referenced by a tagged manifest (attestations,
 #   provenance, sbom, platform manifests inside a manifest-list) are
 #   preserved regardless of age.
+# - OPTIONAL count-based floor: keep-n-untagged (default 0 = off) keeps the
+#   N newest orphaned untagged versions regardless of age. This is a
+#   rollback margin for packages whose builds can pause for longer than
+#   orphan-max-age-days — without it, a build gap wider than the age cutoff
+#   makes every rollback target older than the cutoff and therefore
+#   deletable in a single run. The floor is applied BEFORE the age check,
+#   so it wins over orphan-max-age-days.
 #
 # Multi-arch builds typically create multiple versions per release:
 #   - N platform images (386, amd64, arm/v6, arm/v7, arm64 — usually tagged,
@@ -72,6 +79,11 @@ on:
         required: false
         type: number
         default: 7
+      keep-n-untagged:
+        description: "Always keep the N newest orphaned untagged versions regardless of age (count-based rollback margin, applied as a floor before orphan-max-age-days). 0 disables the floor (default) and retention stays purely age-based."
+        required: false
+        type: number
+        default: 0
       dry-run:
         description: "If true, list what would be deleted but don't delete."
         required: false
@@ -306,9 +318,20 @@ jobs:
           OWNER: ${{ github.repository_owner }}
           PACKAGE_NAME: ${{ inputs.package-name }}
           ORPHAN_MAX_AGE_DAYS: ${{ inputs.orphan-max-age-days }}
+          KEEP_N_UNTAGGED: ${{ inputs.keep-n-untagged }}
           DRY_RUN: ${{ inputs.dry-run }}
         run: |
           set -euo pipefail
+
+          # Count-based retention floor. An omitted workflow_call input takes
+          # the declared default (0), but an explicitly-passed empty
+          # expression renders as "" — normalise both to 0 so the historic
+          # purely-age-based behaviour is what an unset input produces.
+          KEEP_N="${KEEP_N_UNTAGGED:-0}"
+          if ! [[ "$KEEP_N" =~ ^[0-9]+$ ]]; then
+            echo "::error::keep-n-untagged must be a non-negative integer, got '${KEEP_N}'"
+            exit 1
+          fi
 
           # Lowercase the owner for the registry path (ghcr.io requires lowercase)
           OWNER_LC="${OWNER,,}"
@@ -317,6 +340,11 @@ jobs:
           echo "Collecting referenced digests from all tagged manifests..."
           echo "Image: ${IMAGE}"
           echo "Orphan retention: ${ORPHAN_MAX_AGE_DAYS} days"
+          if [ "$KEEP_N" -gt 0 ]; then
+            echo "Keep-n-untagged floor: ${KEEP_N} newest orphaned untagged versions kept regardless of age"
+          else
+            echo "Keep-n-untagged floor: disabled (age-based retention only)"
+          fi
           echo "Dry run: ${DRY_RUN}"
           echo ""
 
@@ -358,10 +386,19 @@ jobs:
           echo "Found ${REF_COUNT} unique referenced digests"
           echo ""
 
-          # Now find orphaned untagged versions
+          # Now find orphaned untagged versions.
+          #
+          # Candidates (untagged AND not referenced by any tagged manifest)
+          # are collected FIRST and only afterwards filtered by age, because
+          # the count-based floor has to rank ALL candidates by recency. A
+          # floor applied after the age filter could not protect anything in
+          # the case it exists for: a build gap wider than
+          # orphan-max-age-days, where EVERY rollback target is older than
+          # the cutoff.
           echo "Scanning for orphaned untagged versions..."
           PAGE=1
           VERSIONS_TO_DELETE=()
+          CANDIDATES=$(mktemp)
 
           while true; do
             # Fail loudly if the API call errors — previously the
@@ -402,11 +439,6 @@ jobs:
                 continue
               fi
 
-              # Check if older than cutoff
-              if [[ ! "$CREATED_AT" < "$CUTOFF_DATE" ]]; then
-                continue
-              fi
-
               # Check if referenced by any manifest — these are typically
               # attestations (provenance, sbom) or platform manifests inside
               # a manifest list and must be preserved.
@@ -414,14 +446,45 @@ jobs:
                 continue
               fi
 
-              echo "  Orphaned: ${VERSION_ID} (${DIGEST}) created ${CREATED_AT}"
-              VERSIONS_TO_DELETE+=("$VERSION_ID")
+              printf '%s\t%s\t%s\n' "$CREATED_AT" "$VERSION_ID" "$DIGEST" >> "$CANDIDATES"
             done < <(echo "$VERSIONS" | jq -c '.[]')
 
             PAGE=$((PAGE + 1))
           done
 
           rm -f "$REFERENCED_DIGESTS"
+
+          # Newest first. created_at is RFC 3339 UTC, so a lexicographic sort
+          # IS a chronological sort. Sorted into a file rather than piped
+          # through head/tail so no SIGPIPE can trip `set -o pipefail`.
+          CANDIDATES_SORTED=$(mktemp)
+          sort -r "$CANDIDATES" > "$CANDIDATES_SORTED"
+          rm -f "$CANDIDATES"
+          CANDIDATE_COUNT=$(wc -l < "$CANDIDATES_SORTED")
+          echo "Found ${CANDIDATE_COUNT} orphaned untagged versions (any age)"
+
+          if [ "$KEEP_N" -gt 0 ]; then
+            PROTECTED="$KEEP_N"
+            if [ "$CANDIDATE_COUNT" -lt "$PROTECTED" ]; then
+              PROTECTED="$CANDIDATE_COUNT"
+            fi
+            echo "Retention floor: keeping the ${PROTECTED} newest of them regardless of age"
+          fi
+
+          # `tail -n +N` starts output AT line N, so +1 (KEEP_N=0) emits the
+          # whole list — byte-identical candidate set to the age-only
+          # behaviour this workflow had before keep-n-untagged existed.
+          while IFS=$'\t' read -r CREATED_AT VERSION_ID DIGEST; do
+            # Check if older than cutoff
+            if [[ ! "$CREATED_AT" < "$CUTOFF_DATE" ]]; then
+              continue
+            fi
+
+            echo "  Orphaned: ${VERSION_ID} (${DIGEST}) created ${CREATED_AT}"
+            VERSIONS_TO_DELETE+=("$VERSION_ID")
+          done < <(tail -n +"$((KEEP_N + 1))" "$CANDIDATES_SORTED")
+
+          rm -f "$CANDIDATES_SORTED"
 
           echo ""
           echo "Summary: ${#VERSIONS_TO_DELETE[@]} orphaned untagged versions to delete"
