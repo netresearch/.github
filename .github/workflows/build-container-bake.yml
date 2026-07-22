@@ -212,6 +212,17 @@ on:
         required: false
         type: string
         default: ""
+      metadata-flavor:
+        description: >-
+          docker/metadata-action `flavor:` configuration (newline-separated,
+          e.g. `latest=false`). Only consulted when `metadata-images` is set.
+          Note that supplying an explicit tag list leaves flavor at its default
+          `latest=auto`, which appends `latest` on a tag push - so a tag list
+          that already contains an explicit raw `latest` will emit it twice
+          unless you pass `latest=false` here.
+        required: false
+        type: string
+        default: ""
     outputs:
       bake-metadata:
         description: "Raw docker/bake-action metadata JSON (per-target build results incl. containerimage.digest)."
@@ -268,6 +279,7 @@ jobs:
         with:
           images: ${{ inputs.metadata-images }}
           tags: ${{ inputs.metadata-tags }}
+          flavor: ${{ inputs.metadata-flavor }}
 
       - name: Compose bake files
         id: files
