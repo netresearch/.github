@@ -19,6 +19,21 @@
 # caller's build job. The only cross-job channel is an artifact. So the
 # caller uploads the built directory once (upload-artifact), and this
 # reusable owns the whole Pages trio from there.
+#
+# Hidden files: BOTH halves of the handoff drop dotfiles by default, so a
+# site that ships a `.nojekyll` marker (or a `.well-known/` directory)
+# needs `include-hidden-files: true` on BOTH:
+#
+#   - the build half (actions/upload-artifact, or pages-build.yml's
+#     `include-hidden-files` input) — otherwise the marker never reaches
+#     the artifact; and
+#   - this half, which re-packages the downloaded directory with
+#     actions/upload-pages-artifact. That action tars with
+#     `--exclude=.[^/]*` unless its own `include-hidden-files` is true, so
+#     setting it on the build half alone is not enough — the marker is
+#     stripped here instead, and Pages Jekyll-processes the output.
+#
+# `.git` and `.github` are excluded by upload-pages-artifact regardless.
 
 name: Deploy to GitHub Pages
 
@@ -37,6 +52,19 @@ on:
         default: "./_site"
       enablement:
         description: "Pass `enablement: true` to actions/configure-pages so it turns on GitHub Pages for the repo via the API if it is not already enabled. Leave false when Pages is pre-enabled or the token cannot manage Pages settings (see caller requirements)."
+        required: false
+        type: boolean
+        default: false
+      include-hidden-files:
+        description: >-
+          Keep dotfiles/hidden files (`.nojekyll`, `.well-known/`, …) when
+          re-packaging the downloaded site for Pages. actions/upload-pages-artifact
+          tars with `--exclude=.[^/]*` by default, which strips a `.nojekyll`
+          marker even when the build half uploaded it — so a site that needs
+          the marker must set this AND the matching input on the build half.
+          Off by default, which is exactly the upload-pages-artifact default
+          this workflow relied on before. `.git` / `.github` stay excluded
+          either way.
         required: false
         type: boolean
         default: false
@@ -108,6 +136,7 @@ jobs:
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: ${{ inputs.artifact-path }}
+          include-hidden-files: ${{ inputs.include-hidden-files }}
 
       - name: Deploy to GitHub Pages
         id: deployment
