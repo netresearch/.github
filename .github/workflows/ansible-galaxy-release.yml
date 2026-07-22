@@ -2,17 +2,19 @@
 # Copyright (c) 2026 Netresearch DTT GmbH
 #
 # Reusable "Ansible Galaxy release" — imports an Ansible role into
-# Ansible Galaxy on a version tag. Centralizes the checkout +
-# robertdebock/galaxy-action pair that is currently inlined across the
-# netresearch ansible-role-* repos (ansible_role_docker_containers,
-# ansible-role-gitlab-runner, …), so the pinned action versions live in
-# ONE place instead of being bumped per role by Renovate/Dependabot.
+# Ansible Galaxy on a version tag, and optionally creates a matching
+# GitHub Release. Centralizes the checkout + robertdebock/galaxy-action
+# (and the checkout + `gh release create`) pairs that are currently
+# inlined across the netresearch ansible-role-* repos
+# (ansible_role_docker_containers, ansible-role-gitlab-runner, …), so the
+# pinned action versions live in ONE place instead of being bumped per
+# role by Renovate/Dependabot.
 #
 # The role's own release trigger stays in the caller (it is repo-local:
-# `on: push: tags: ['v*']`). This reusable owns the import step from the
+# `on: push: tags: ['v*']`). This reusable owns everything from the
 # checkout onward.
 #
-# Caller pattern:
+# Caller pattern (Galaxy import only):
 #
 #   name: Release
 #   on:
@@ -21,15 +23,28 @@
 #         - "v*"
 #   permissions: {}
 #   jobs:
-#     galaxy:
+#     release:
 #       uses: netresearch/.github/.github/workflows/ansible-galaxy-release.yml@main
+#       secrets:
+#         galaxy_api_key: ${{ secrets.GALAXY_API_KEY }}
+#
+# Caller pattern (Galaxy import + GitHub Release):
+#
+#   jobs:
+#     release:
+#       uses: netresearch/.github/.github/workflows/ansible-galaxy-release.yml@main
+#       permissions:
+#         contents: write        # required for the GitHub Release
+#       with:
+#         create-github-release: true
 #       secrets:
 #         galaxy_api_key: ${{ secrets.GALAXY_API_KEY }}
 #
 # SECURITY: pinned action SHAs, harden-runner, least-privilege per-job
 # permissions, `persist-credentials: false` on checkout. The Galaxy API
 # key is passed as a `workflow_call` secret (never an input, never
-# interpolated into a run block).
+# interpolated into a run block). The release tag is read from
+# `github.ref_name` via `env:` (never interpolated into a run block).
 
 name: Ansible Galaxy Release (reusable)
 
@@ -44,6 +59,13 @@ on:
         required: false
         type: string
         default: "main"
+      create-github-release:
+        description: >-
+          Also create a GitHub Release for the pushed tag (auto-generated
+          notes). Requires the calling job to grant `contents: write`.
+        required: false
+        type: boolean
+        default: false
     secrets:
       galaxy_api_key:
         description: >-
@@ -54,12 +76,22 @@ on:
 
 # CALLER REQUIREMENTS
 # ===================
-# The caller's job that `uses:` this reusable needs no elevated
-# permissions — the import authenticates with the Galaxy API key, not the
-# GITHUB_TOKEN. `contents: read` (the default `read` this reusable
-# requests per job) is sufficient. A repo hardened to the `read` default
-# workflow permission works without an explicit `permissions:` block on
-# the calling job.
+# The `galaxy` job authenticates with the Galaxy API key, not the
+# GITHUB_TOKEN, so it needs only `contents: read` — a repo on the `read`
+# default workflow permission works with no `permissions:` block on the
+# calling job.
+#
+# When `create-github-release: true`, the calling job MUST additionally
+# grant `contents: write`, otherwise the run fails with `startup_failure`
+# (GitHub rejects a reusable that requests a permission the caller did not
+# grant). Setting any scope forces all unlisted scopes to `none`, so grant
+# it explicitly:
+#
+#   jobs:
+#     release:
+#       uses: netresearch/.github/.github/workflows/ansible-galaxy-release.yml@main
+#       permissions:
+#         contents: write
 permissions: {}
 
 jobs:
@@ -85,3 +117,34 @@ jobs:
         with:
           galaxy_api_key: ${{ secrets.galaxy_api_key }}
           git_branch: ${{ inputs.git-branch }}
+
+  github-release:
+    name: Create GitHub Release
+    if: ${{ inputs.create-github-release }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Create GitHub Release from the pushed tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" \
+            --repo "$REPO" \
+            --title "$TAG" \
+            --generate-notes \
+            --verify-tag
