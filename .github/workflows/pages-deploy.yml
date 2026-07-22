@@ -31,9 +31,20 @@
 #     actions/upload-pages-artifact. That action tars with
 #     `--exclude=.[^/]*` unless its own `include-hidden-files` is true, so
 #     setting it on the build half alone is not enough — the marker is
-#     stripped here instead, and Pages Jekyll-processes the output.
+#     stripped here instead and never reaches the deployment.
 #
-# `.git` and `.github` are excluded by upload-pages-artifact regardless.
+# What the stripping costs is the dotfile itself, nothing more: a
+# `.well-known/` directory the site is supposed to serve simply is not
+# published. No claim is made here about what Pages then does with a missing
+# `.nojekyll` — that was asserted in an earlier revision of this workflow and
+# is withdrawn as unverified.
+#
+# `.git` and `.github` are excluded by upload-pages-artifact regardless, at
+# any setting — its own input documents this ("Excludes .git and .github
+# regardless"). That guarantee is specific to THIS half. actions/upload-artifact
+# in the build half has no such exclusion, so `include-hidden-files: true`
+# there uploads `.git`/`.github` too if they sit under the build's
+# `artifact-path` — see the note in pages-build.yml.
 
 name: Deploy to GitHub Pages
 

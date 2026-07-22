@@ -62,6 +62,15 @@
 # Setting it on this half alone is a no-op end-to-end: the marker reaches
 # the artifact and is stripped again during Pages packaging.
 #
+# Asymmetry worth knowing before turning it on here: actions/upload-pages-artifact
+# (the deploy half) excludes `.git` and `.github` unconditionally, at any
+# setting. actions/upload-artifact — this half — does NOT; it has no such
+# carve-out, so `include-hidden-files: true` uploads everything hidden under
+# `artifact-path`. That is harmless when `artifact-path` is a generated output
+# directory (`_site`, `public`, `dist`), which is the normal case. Point
+# `artifact-path` at the repository root with this on and the artifact will
+# contain `.git` — the full history — so keep it pointed at the build output.
+#
 # SECURITY: pinned action SHAs, harden-runner, least-privilege
 # permissions, `persist-credentials: false` on checkout. The caller's
 # build command is routed through `env:` and executed with `bash -c
