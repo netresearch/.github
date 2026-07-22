@@ -67,9 +67,8 @@
 # setting. actions/upload-artifact — this half — does NOT; it has no such
 # carve-out, so `include-hidden-files: true` uploads everything hidden under
 # `artifact-path`. That is harmless when `artifact-path` is a generated output
-# directory (`_site`, `public`, `dist`), which is the normal case. Point
-# `artifact-path` at the repository root with this on and the artifact will
-# contain `.git` — the full history — so keep it pointed at the build output.
+# directory (`_site`, `public`, `dist`), which is the normal case. Keep
+# `artifact-path` pointed at the build output rather than the repository root.
 #
 # SECURITY: pinned action SHAs, harden-runner, least-privilege
 # permissions, `persist-credentials: false` on checkout. The caller's
@@ -243,16 +242,16 @@ jobs:
         with:
           egress-policy: audit
 
-      # `workflow_call` has no enum input type, so an unrecognised value is
-      # rejected here instead of silently degrading to "no token" (or, worse,
-      # being read as truthy somewhere later). Skipped on the default.
+      # `workflow_call` has no enum input type, so the value is checked here:
+      # anything other than none / pre-build / build / both fails the run. The
+      # check is unconditional — it does not skip the default — so the shell
+      # `case` is the only thing that decides which values are accepted.
       - name: Validate expose-github-token
-        if: ${{ inputs.expose-github-token != 'none' }}
         env:
           EXPOSE_TOKEN: ${{ inputs.expose-github-token }}
         run: |
           case "$EXPOSE_TOKEN" in
-            pre-build|build|both) ;;
+            none|pre-build|build|both) ;;
             *)
               echo "::error::expose-github-token must be one of: none, pre-build, build, both (got '${EXPOSE_TOKEN}')"
               exit 1
