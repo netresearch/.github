@@ -12,12 +12,32 @@
 #   provenance, sbom, platform manifests inside a manifest-list) are
 #   preserved regardless of age.
 # - OPTIONAL count-based floor: keep-n-untagged (default 0 = off) keeps the
-#   N newest orphaned untagged versions regardless of age. This is a
-#   rollback margin for packages whose builds can pause for longer than
-#   orphan-max-age-days — without it, a build gap wider than the age cutoff
-#   makes every rollback target older than the cutoff and therefore
-#   deletable in a single run. The floor is applied BEFORE the age check,
-#   so it wins over orphan-max-age-days.
+#   N newest orphaned untagged IMAGES regardless of age, as a safety margin
+#   for packages whose builds can pause for longer than orphan-max-age-days
+#   (without it, a build gap wider than the age cutoff puts every orphan on
+#   the wrong side of the cutoff at once and a single run removes them all).
+#   The floor is applied BEFORE the age check, so it wins over
+#   orphan-max-age-days.
+#
+#   UNIT: N counts top-level untagged IMAGES (whole manifest groups), NOT
+#   raw API version rows. One multi-arch push is one index version PLUS one
+#   version per platform manifest and per attestation, so counting rows
+#   would both make N mean a fraction of an image and let the cut land
+#   INSIDE a group (keeping an index while deleting the platform manifests
+#   it points at). This matches dataaxiom/ghcr-cleanup-action's
+#   keep-n-untagged, which drops child images from its working set before
+#   counting and deletes staged versions together with their children —
+#   so a `keep-n-untagged: 10` copied from a dataaxiom caller keeps the
+#   same retention depth here.
+#
+#   SCOPE: the floor only ever protects ORPHANS (untagged AND unreachable
+#   from every tag). Anything a tag still points at — directly or as a
+#   platform child / attestation / referrer — is already kept forever by
+#   the referenced-digest scan, with or without the floor. On a package
+#   that gives every build its own immutable tag (a dated or sha- tag), the
+#   previous builds stay reachable and the floor changes nothing for them;
+#   what it protects there are build intermediates (per-arch cell indexes,
+#   sigstore bundle indexes) that no tag references.
 #
 # Multi-arch builds typically create multiple versions per release:
 #   - N platform images (386, amd64, arm/v6, arm/v7, arm64 — usually tagged,
@@ -80,7 +100,7 @@ on:
         type: number
         default: 7
       keep-n-untagged:
-        description: "Always keep the N newest orphaned untagged versions regardless of age (count-based rollback margin, applied as a floor before orphan-max-age-days). 0 disables the floor (default) and retention stays purely age-based."
+        description: "Always keep the N newest orphaned untagged IMAGES regardless of age (count-based margin, applied as a floor before orphan-max-age-days). N counts whole manifest groups — an index plus its platform children and attestations is ONE image — the same unit as dataaxiom/ghcr-cleanup-action's keep-n-untagged. Only orphans are affected; anything a tag still references is kept forever anyway. 0 disables the floor (default) and retention stays purely age-based."
         required: false
         type: number
         default: 0
@@ -341,7 +361,7 @@ jobs:
           echo "Image: ${IMAGE}"
           echo "Orphan retention: ${ORPHAN_MAX_AGE_DAYS} days"
           if [ "$KEEP_N" -gt 0 ]; then
-            echo "Keep-n-untagged floor: ${KEEP_N} newest orphaned untagged versions kept regardless of age"
+            echo "Keep-n-untagged floor: ${KEEP_N} newest orphaned untagged images (whole manifest groups) kept regardless of age"
           else
             echo "Keep-n-untagged floor: disabled (age-based retention only)"
           fi
@@ -463,18 +483,93 @@ jobs:
           CANDIDATE_COUNT=$(wc -l < "$CANDIDATES_SORTED")
           echo "Found ${CANDIDATE_COUNT} orphaned untagged versions (any age)"
 
-          if [ "$KEEP_N" -gt 0 ]; then
-            PROTECTED="$KEEP_N"
-            if [ "$CANDIDATE_COUNT" -lt "$PROTECTED" ]; then
-              PROTECTED="$CANDIDATE_COUNT"
+          # Digests the count-based floor protects. Stays EMPTY unless
+          # keep-n-untagged > 0 — that is what keeps the KEEP_N=0 path
+          # identical to the age-only behaviour this workflow had before
+          # keep-n-untagged existed (no extra registry calls either).
+          PROTECTED_DIGESTS=$(mktemp)
+
+          if [ "$KEEP_N" -gt 0 ] && [ "$CANDIDATE_COUNT" -gt 0 ]; then
+            # The floor counts IMAGES, not API version rows. One multi-arch
+            # push is an index version PLUS one version per platform manifest
+            # and per attestation, so a row-based cut would (a) protect a
+            # fraction of the images a dataaxiom `keep-n-untagged: N` protects
+            # and (b) be able to land INSIDE a manifest group, keeping an
+            # orphaned index while deleting the platform manifests it points
+            # at — a "protected" rollback target that cannot be pulled.
+            #
+            # So: resolve parent->child edges among the candidates, rank the
+            # ROOTS (candidates that are not a child of another candidate)
+            # newest-first, keep the N newest roots and every descendant of
+            # those roots.
+            echo "Resolving manifest groups among the candidates..."
+            EDGES=$(mktemp)          # "<parent digest>\t<child digest>"
+            CHILD_DIGESTS=$(mktemp)  # candidates owned by another candidate
+            while IFS=$'\t' read -r _CREATED_AT _VERSION_ID DIGEST; do
+              CANDIDATE_MANIFEST=$(crane manifest "${IMAGE}@${DIGEST}" 2>/dev/null || echo "{}")
+              while IFS= read -r CHILD; do
+                [ -n "$CHILD" ] || continue
+                printf '%s\t%s\n' "$DIGEST" "$CHILD" >> "$EDGES"
+                printf '%s\n' "$CHILD" >> "$CHILD_DIGESTS"
+              done < <(echo "$CANDIDATE_MANIFEST" | jq -r '.manifests[]?.digest // empty' 2>/dev/null || true)
+            done < "$CANDIDATES_SORTED"
+            sort -u "$CHILD_DIGESTS" -o "$CHILD_DIGESTS"
+
+            # CANDIDATES_SORTED is already newest-first, so ROOTS is too.
+            ROOTS=$(mktemp)
+            while IFS=$'\t' read -r _CREATED_AT _VERSION_ID DIGEST; do
+              if grep -qxF "$DIGEST" "$CHILD_DIGESTS"; then
+                continue
+              fi
+              printf '%s\n' "$DIGEST" >> "$ROOTS"
+            done < "$CANDIDATES_SORTED"
+            ROOT_COUNT=$(wc -l < "$ROOTS")
+
+            PROTECTED_ROOTS="$KEEP_N"
+            if [ "$ROOT_COUNT" -lt "$PROTECTED_ROOTS" ]; then
+              PROTECTED_ROOTS="$ROOT_COUNT"
             fi
-            echo "Retention floor: keeping the ${PROTECTED} newest of them regardless of age"
+            echo "  ${ROOT_COUNT} top-level orphaned images across ${CANDIDATE_COUNT} versions"
+            echo "Retention floor: keeping the ${PROTECTED_ROOTS} newest orphaned images (whole manifest groups) regardless of age"
+
+            # Breadth-first closure over EDGES, so a protected root drags its
+            # platform manifests and attestations along even when they sort
+            # far below the Nth root. Handles nested indexes too.
+            QUEUE=()
+            while IFS= read -r ROOT_DIGEST; do
+              QUEUE+=("$ROOT_DIGEST")
+            done < <(head -n "$PROTECTED_ROOTS" "$ROOTS")
+            while [ ${#QUEUE[@]} -gt 0 ]; do
+              CURRENT="${QUEUE[0]}"
+              QUEUE=("${QUEUE[@]:1}")
+              if grep -qxF "$CURRENT" "$PROTECTED_DIGESTS"; then
+                continue
+              fi
+              printf '%s\n' "$CURRENT" >> "$PROTECTED_DIGESTS"
+              while IFS= read -r CHILD; do
+                [ -n "$CHILD" ] || continue
+                QUEUE+=("$CHILD")
+              done < <(awk -F'\t' -v parent="$CURRENT" '$1 == parent { print $2 }' "$EDGES")
+            done
+            # Count only the protected digests that are actually candidates:
+            # the closure can also walk into children that a tag still
+            # references, and those are kept by the referenced-digest scan
+            # anyway, so counting them here would overstate the floor.
+            PROTECTED_ROWS=$(awk -F'\t' 'NR == FNR { p[$0] = 1; next } ($3 in p) { n++ } END { print n + 0 }' "$PROTECTED_DIGESTS" "$CANDIDATES_SORTED")
+            echo "  ${PROTECTED_ROOTS} images = ${PROTECTED_ROWS} of the ${CANDIDATE_COUNT} candidate versions"
+            rm -f "$EDGES" "$CHILD_DIGESTS" "$ROOTS"
           fi
 
-          # `tail -n +N` starts output AT line N, so +1 (KEEP_N=0) emits the
-          # whole list — byte-identical candidate set to the age-only
-          # behaviour this workflow had before keep-n-untagged existed.
+          # The floor is expressed as a digest set rather than as a slice of
+          # the row list, so the age filter below is exactly the pre-floor
+          # one: with KEEP_N=0 the protected set is empty and every candidate
+          # is age-checked as before, in the same order.
           while IFS=$'\t' read -r CREATED_AT VERSION_ID DIGEST; do
+            # Kept by the count-based floor, regardless of age
+            if grep -qxF "$DIGEST" "$PROTECTED_DIGESTS"; then
+              continue
+            fi
+
             # Check if older than cutoff
             if [[ ! "$CREATED_AT" < "$CUTOFF_DATE" ]]; then
               continue
@@ -482,9 +577,9 @@ jobs:
 
             echo "  Orphaned: ${VERSION_ID} (${DIGEST}) created ${CREATED_AT}"
             VERSIONS_TO_DELETE+=("$VERSION_ID")
-          done < <(tail -n +"$((KEEP_N + 1))" "$CANDIDATES_SORTED")
+          done < "$CANDIDATES_SORTED"
 
-          rm -f "$CANDIDATES_SORTED"
+          rm -f "$CANDIDATES_SORTED" "$PROTECTED_DIGESTS"
 
           echo ""
           echo "Summary: ${#VERSIONS_TO_DELETE[@]} orphaned untagged versions to delete"
