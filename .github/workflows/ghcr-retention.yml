@@ -46,6 +46,40 @@
 # The referenced-digest scan keeps attestations alive for as long as any
 # tagged manifest still points at them.
 #
+# ATTESTATIONS — the two kinds, and why BOTH are covered by the tag scan:
+#   1. BuildKit inline attestations (`docker buildx build --provenance/--sbom`)
+#      are extra entries INSIDE the image index, carrying
+#      `vnd.docker.reference.type=attestation-manifest`. `.manifests[]?.digest`
+#      on the tagged index picks them up directly.
+#   2. Sigstore bundles from actions/attest-build-provenance (and cosign
+#      signatures) are OCI *referrers* — separate manifests with a `subject`,
+#      NOT listed in the subject's index. ghcr.io does not implement the OCI
+#      referrers API (`GET /v2/<name>/referrers/<digest>` answers 404
+#      MANIFEST_UNKNOWN, verified 2026-07-22), so clients use the spec's
+#      fallback TAG scheme: the referrers list is pushed as an index tagged
+#      `sha256-<hex of the subject digest>`. `crane ls` returns those tags
+#      like any other, so the loop below walks them and every bundle manifest
+#      they list lands in the referenced-digest set.
+#      Measured on ghcr.io/netresearch/glpi-php-fpm (713 versions, 253 tags,
+#      217 of them `sha256-…` fallback tags): 93 orphan candidates, none of
+#      them a sigstore bundle, and all 155 children of those candidates are
+#      referenced by a tag. The orphaned `sha256-…`-shaped objects are
+#      SUPERSEDED referrers-index versions, left untagged when the fallback
+#      tag was re-pointed at a newer list; the bundles they used to list are
+#      still referenced by the current, tagged list.
+#      CAVEAT: this coverage rests on the fallback-tag scheme. If ghcr.io ever
+#      serves the referrers API and clients stop writing `sha256-…` tags,
+#      bundles would become unreferenced and this workflow would need explicit
+#      referrers/`subject` resolution before it may delete untagged versions.
+#
+# NO SILENT DEGRADATION: every `crane` call below is retried and then fails
+# the job. An earlier `|| echo "{}"` fallback turned a transient registry
+# error into a manifest with no children — which silently promotes live
+# platform manifests, inline attestations and sigstore bundles to deletable
+# "orphans", and (in the keep-n-untagged grouping pass) reintroduces exactly
+# the row-based cut that grouping exists to prevent. Deleting nothing is
+# always recoverable; deleting a referenced digest is not.
+#
 # See: https://github.com/actions/delete-package-versions/issues/162
 #
 # Caller pattern:
@@ -373,9 +407,40 @@ jobs:
           echo "Cutoff date: ${CUTOFF_DATE}"
           echo ""
 
+          # `crane manifest` with bounded retries and NO fallback value.
+          # Prints the manifest on stdout and returns 0, or emits ::error::
+          # and returns 1 — callers must abort, never substitute a stand-in
+          # manifest (see "NO SILENT DEGRADATION" in the header).
+          crane_manifest_retry() {
+            local ref="$1" out attempt
+            out=""
+            for attempt in 1 2 3; do
+              if out=$(crane manifest "$ref" 2>&1); then
+                printf '%s' "$out"
+                return 0
+              fi
+              if [ "$attempt" -lt 3 ]; then
+                sleep $((attempt * 3))
+              fi
+            done
+            # Bash parameter expansion (collapse newlines, truncate) — same
+            # SIGPIPE-avoidance reason as the gh api error paths.
+            local one_line=${out//$'\n'/ }
+            echo "::error::crane manifest ${ref} failed after 3 attempts: ${one_line:0:400}" >&2
+            return 1
+          }
+
           # Collect all referenced digests from tagged manifests
           REFERENCED_DIGESTS=$(mktemp)
-          TAGS=$(crane ls "$IMAGE" 2>/dev/null || echo "")
+          # A registry/auth failure here must NOT look like "this package has
+          # no tags": that path exits 0 and, on the next successful run,
+          # nothing would have been protected in between. An existing package
+          # with zero tags still returns success with empty output.
+          if ! TAGS=$(crane ls "$IMAGE" 2>&1); then
+            TAGS_SINGLE_LINE=${TAGS//$'\n'/ }
+            echo "::error::Failed to list tags for ${IMAGE}: ${TAGS_SINGLE_LINE:0:400}"
+            exit 1
+          fi
 
           if [ -z "$TAGS" ]; then
             echo "No tags found, skipping"
@@ -386,18 +451,28 @@ jobs:
           echo "Found ${TAG_COUNT} tags, collecting referenced digests..."
 
           for TAG in $TAGS; do
-            # Get manifest and extract all referenced digests
-            MANIFEST=$(crane manifest "${IMAGE}:${TAG}" 2>/dev/null || echo "{}")
+            # Get manifest and extract all referenced digests. Fatal on
+            # failure: a stand-in "{}" would drop this tag's platform
+            # manifests, inline attestations and — for a `sha256-…` referrers
+            # fallback tag — its sigstore bundles out of the referenced set,
+            # i.e. hand them to the orphan deleter.
+            if ! MANIFEST=$(crane_manifest_retry "${IMAGE}:${TAG}"); then
+              exit 1
+            fi
 
             # Extract digests from manifest list (multi-arch) or single manifest
-            echo "$MANIFEST" | jq -r '
-              # From manifest list
+            if ! printf '%s\n' "$MANIFEST" | jq -r '
+              # From manifest list (platform children, inline attestations,
+              # and the entries of a referrers fallback-tag index)
               (.manifests[]?.digest // empty),
               # From config
               (.config?.digest // empty),
               # From layers
               (.layers[]?.digest // empty)
-            ' 2>/dev/null >> "$REFERENCED_DIGESTS" || true
+            ' >> "$REFERENCED_DIGESTS"; then
+              echo "::error::Failed to parse the manifest of tag ${TAG}"
+              exit 1
+            fi
           done
 
           # Sort and dedupe
@@ -506,12 +581,24 @@ jobs:
             EDGES=$(mktemp)          # "<parent digest>\t<child digest>"
             CHILD_DIGESTS=$(mktemp)  # candidates owned by another candidate
             while IFS=$'\t' read -r _CREATED_AT _VERSION_ID DIGEST; do
-              CANDIDATE_MANIFEST=$(crane manifest "${IMAGE}@${DIGEST}" 2>/dev/null || echo "{}")
+              # Fatal on failure. A "{}" fallback here would make this
+              # candidate look like a childless root: its real children would
+              # be promoted to roots of their own, and if the candidate landed
+              # inside the protected head its children would be deleted out
+              # from under it — precisely the row-based cut that grouping
+              # exists to prevent, only now silent and load-dependent.
+              if ! CANDIDATE_MANIFEST=$(crane_manifest_retry "${IMAGE}@${DIGEST}"); then
+                exit 1
+              fi
+              if ! CANDIDATE_CHILDREN=$(printf '%s\n' "$CANDIDATE_MANIFEST" | jq -r '.manifests[]?.digest // empty'); then
+                echo "::error::Failed to parse the manifest of candidate ${DIGEST}"
+                exit 1
+              fi
               while IFS= read -r CHILD; do
                 [ -n "$CHILD" ] || continue
                 printf '%s\t%s\n' "$DIGEST" "$CHILD" >> "$EDGES"
                 printf '%s\n' "$CHILD" >> "$CHILD_DIGESTS"
-              done < <(echo "$CANDIDATE_MANIFEST" | jq -r '.manifests[]?.digest // empty' 2>/dev/null || true)
+              done <<< "$CANDIDATE_CHILDREN"
             done < "$CANDIDATES_SORTED"
             sort -u "$CHILD_DIGESTS" -o "$CHILD_DIGESTS"
 
