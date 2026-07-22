@@ -68,6 +68,22 @@
 #           type=semver,pattern={{version}}
 #           type=sha
 #           type=raw,value=latest,enable={{is_default_branch}}
+#
+# Caller pattern (nightly security rebuild — cache MUST be off):
+#
+#   on:
+#     schedule:
+#       - cron: "38 4 * * *"     # pull fresh upstream base image + OS patches
+#     push:
+#       branches: [main]
+#   jobs:
+#     build:
+#       uses: netresearch/.github/.github/workflows/build-container-bake.yml@main
+#       with:
+#         targets: app
+#         # On a scheduled run the GHA layer cache would restore the previous
+#         # layer chain and rebuild nothing, making the refresh a no-op.
+#         cache: ${{ github.event_name != 'schedule' }}
 
 name: Build Container (Bake)
 
@@ -150,8 +166,20 @@ on:
         required: false
         type: string
         default: ""
+      cache:
+        description: >-
+          Use the GitHub Actions layer cache (`cache-from`/`cache-to=type=gha`).
+          Set to false for scheduled rebuilds that exist to pull fresh upstream
+          base images and OS patches: with `cache-from` those runs restore the
+          previous layer chain and rebuild nothing, silently turning a security
+          refresh into a no-op. Typical use: pass an expression comparing
+          `github.event_name` against `schedule` (see the caller example in
+          the header).
+        required: false
+        type: boolean
+        default: true
       cache-scope:
-        description: "Optional GHA cache scope suffix. Set when parallel matrix calls share targets but must keep separate caches. Empty = one shared cache."
+        description: "Optional GHA cache scope suffix. Set when parallel matrix calls share targets but must keep separate caches. Empty = one shared cache. Ignored when `cache` is false."
         required: false
         type: string
         default: ""
@@ -273,6 +301,7 @@ jobs:
         env:
           PLATFORMS: ${{ inputs.platforms }}
           CACHE_SCOPE: ${{ inputs.cache-scope }}
+          CACHE: ${{ inputs.cache }}
           EXTRA_SET: ${{ inputs.bake-set }}
         run: |
           set -euo pipefail
@@ -282,8 +311,15 @@ jobs:
           fi
           {
             echo 'set<<EOM'
-            echo "*.cache-from=type=gha${SCOPE_SUFFIX}"
-            echo "*.cache-to=type=gha,mode=max${SCOPE_SUFFIX}"
+            # cache=false omits cache-from entirely so the build cannot be
+            # satisfied from a previous run's layers. Required for scheduled
+            # rebuilds whose whole purpose is to pick up fresh upstream base
+            # images and OS patches - with cache-from those runs restore the
+            # old layer chain and rebuild nothing.
+            if [[ "$CACHE" == "true" ]]; then
+              echo "*.cache-from=type=gha${SCOPE_SUFFIX}"
+              echo "*.cache-to=type=gha,mode=max${SCOPE_SUFFIX}"
+            fi
             if [[ -n "$PLATFORMS" ]]; then
               echo "*.platform=${PLATFORMS}"
             fi
