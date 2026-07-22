@@ -62,6 +62,7 @@
 #       with:
 #         targets: app,app-e2e
 #         push: ${{ github.event_name != 'pull_request' }}
+#         bake-source: .                       # local checkout — metadata tags are local files
 #         metadata-images: ghcr.io/${{ github.repository }}
 #         metadata-tags: |
 #           type=semver,pattern={{version}}
@@ -78,6 +79,17 @@ on:
         required: false
         type: string
         default: "docker-bake.hcl"
+      bake-source:
+        description: >-
+          docker/bake-action `source` (build context root). Empty (default)
+          keeps bake-action's own default, which in a checked-out repo is the
+          git remote context (`<repo>.git#<ref>`). Set to `.` to build from
+          the LOCAL checkout instead — REQUIRED when `metadata-images` is used
+          or `pre-build-command` generates files, because their outputs are
+          local temp files the git remote context cannot see.
+        required: false
+        type: string
+        default: ""
       targets:
         description: "Comma- or newline-separated bake targets/groups to build. Empty = the bake file's `default` group."
         required: false
@@ -326,6 +338,7 @@ jobs:
         id: bake
         uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
         with:
+          source: ${{ inputs.bake-source }}
           files: ${{ steps.files.outputs.files }}
           targets: ${{ inputs.targets }}
           set: ${{ steps.bakeset.outputs.set }}
