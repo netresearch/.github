@@ -21,11 +21,18 @@ on:
 
       auto-approve-maintainers:
         description: >-
-          When true, automatically approve PRs whose author_association is
-          OWNER / MEMBER / COLLABORATOR (i.e. project maintainers). Satisfies
-          the "1 approval" branch-protection gate for maintainer PRs without
-          bypassing Copilot review (which runs separately via the Copilot
-          ruleset, not this workflow).
+          Master switch for the auto-approve job. When false the job never
+          runs. When true the job runs for non-draft, same-repo (non-fork) PRs
+          and `auto-approve-require-write` selects which authorization test is
+          applied: by default the author's `author_association` must be
+          OWNER / MEMBER / COLLABORATOR; with `auto-approve-require-write: true`
+          that pre-filter is replaced by an explicit repository-permission
+          lookup (see the input below). Note that `author_association` is not a
+          permission — COLLABORATOR is returned for read/triage collaborators
+          as well, so the default test is broader than "project maintainers".
+          Either way this satisfies the "1 approval" branch-protection gate
+          without bypassing Copilot review (which runs separately via the
+          Copilot ruleset, not this workflow).
         required: false
         type: boolean
         default: true
