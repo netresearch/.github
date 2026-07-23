@@ -126,6 +126,14 @@ jobs:
             # For each "KEY=VALUE" line, fill an empty "KEY=" assignment in
             # .env with the placeholder value. awk exact-matches the line so
             # VALUE metacharacters can't leak into a sed pattern.
+            #
+            # The value travels via ENVIRON, NOT via `awk -v`. An -v assignment
+            # runs escape-sequence processing over the value, so a generated
+            # password containing a backslash is silently corrupted
+            # (`p\ass\tword` becomes p<BEL>ss<TAB>word) and a value containing
+            # `\n` is turned into a REAL newline — which appends a second,
+            # attacker-chosen assignment to .env that the whole stack then
+            # parses. ENVIRON does no escape processing.
             while IFS= read -r sub; do
               [ -z "$sub" ] && continue
               case "$sub" in
@@ -135,7 +143,7 @@ jobs:
               key="${sub%%=*}"
               val="${sub#*=}"
               tmp="$(mktemp)"
-              awk -v k="$key" -v v="$val" '$0 == k"=" { print k"="v; next } { print }' .env > "$tmp"
+              SUBST_VALUE="$val" awk -v k="$key" '$0 == k"=" { print k"="ENVIRON["SUBST_VALUE"]; next } { print }' .env > "$tmp"
               mv "$tmp" .env
             done < "$subs_file"
             rm -f "$subs_file"
