@@ -644,6 +644,18 @@ jobs:
       attestations: write
     outputs:
       release-url: ${{ steps.publish.outputs.url }}
+    env:
+      # Keyless signing inside a reusable workflow carries the REUSABLE
+      # workflow's identity (its job_workflow_ref), not the calling repo's.
+      # Both the self-check below and the instructions emitted into the release
+      # body must name THIS workflow: github.repository_owner is the CALLER's
+      # org and does not describe the signer, and `gh attestation verify --repo
+      # <consumer>` therefore fails unless --signer-workflow is passed. Same
+      # reasoning as the "Verify Cosign signature" step in
+      # golib-create-release.yml. Defined once so the documented command and
+      # the command we actually run cannot drift apart.
+      SIGNER_WORKFLOW: netresearch/.github/.github/workflows/release-go-app.yml
+      SIGNER_IDENTITY: '^https://github\.com/netresearch/\.github/\.github/workflows/release-go-app\.yml@'
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
@@ -704,6 +716,20 @@ jobs:
           done
           ls -lah
 
+      - name: Verify Cosign signature
+        if: inputs.sign-artifacts
+        # Runs the same identity the release body tells users to verify
+        # against, so a drifting workflow path fails the release here instead
+        # of shipping a verify command that cannot succeed.
+        run: |
+          set -euo pipefail
+          cd release
+          cosign verify-blob \
+            --bundle checksums.txt.sigstore.json \
+            --certificate-identity-regexp "$SIGNER_IDENTITY" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            checksums.txt
+
       - name: Attest checksums.txt
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
@@ -714,7 +740,6 @@ jobs:
         env:
           NOTES: ${{ needs.preflight.outputs.notes }}
           APP: ${{ inputs.app-name }}
-          OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.repository }}
           VERSION: ${{ needs.preflight.outputs.version }}
           IMAGE_REF: ${{ needs.container.outputs.image-ref }}
@@ -751,7 +776,7 @@ jobs:
               echo '```bash'
               echo "cosign verify-blob \\"
               echo "  --bundle ${APP}-linux-amd64.sigstore.json \\"
-              echo "  --certificate-identity-regexp \"https://github.com/${OWNER}/.*\" \\"
+              echo "  --certificate-identity-regexp \"${SIGNER_IDENTITY}\" \\"
               echo "  --certificate-oidc-issuer \"https://token.actions.githubusercontent.com\" \\"
               echo "  ${APP}-linux-amd64"
               echo '```'
@@ -761,17 +786,22 @@ jobs:
               echo '```bash'
               echo "cosign verify-blob \\"
               echo "  --bundle checksums.txt.sigstore.json \\"
-              echo "  --certificate-identity-regexp \"https://github.com/${OWNER}/.*\" \\"
+              echo "  --certificate-identity-regexp \"${SIGNER_IDENTITY}\" \\"
               echo "  --certificate-oidc-issuer \"https://token.actions.githubusercontent.com\" \\"
               echo "  checksums.txt"
               echo "sha256sum -c checksums.txt --ignore-missing"
               echo '```'
               echo ""
             fi
-            echo "Verify build provenance:"
+            echo "Verify build provenance. Releases are built by a reusable"
+            echo "workflow, so the signing identity is that workflow rather than"
+            echo "this repository -- \`--signer-workflow\` is required and"
+            echo "verification fails without it:"
             echo ""
             echo '```bash'
-            echo "gh attestation verify <artifact> --repo ${REPO}"
+            echo "gh attestation verify <artifact> \\"
+            echo "  --repo ${REPO} \\"
+            echo "  --signer-workflow ${SIGNER_WORKFLOW}"
             echo '```'
             if [ "$CONTAINER" = "true" ] && [ -n "$IMAGE_REF" ]; then
               echo ""
@@ -779,9 +809,11 @@ jobs:
               echo ""
               echo '```bash'
               echo "cosign verify ${IMAGE_REF}:${VERSION} \\"
-              echo "  --certificate-identity-regexp \"https://github.com/${OWNER}/.*\" \\"
+              echo "  --certificate-identity-regexp \"${SIGNER_IDENTITY}\" \\"
               echo "  --certificate-oidc-issuer \"https://token.actions.githubusercontent.com\""
-              echo "gh attestation verify oci://${IMAGE_REF}:${VERSION} --repo ${REPO}"
+              echo "gh attestation verify oci://${IMAGE_REF}:${VERSION} \\"
+              echo "  --repo ${REPO} \\"
+              echo "  --signer-workflow ${SIGNER_WORKFLOW}"
               echo '```'
             fi
             echo "$DELIMITER"
