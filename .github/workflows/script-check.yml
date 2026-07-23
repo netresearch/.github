@@ -1,0 +1,206 @@
+# Reusable "script check" workflow (LEAF).
+#
+# Checks out the caller's repository, optionally provisions a tool, runs ONE
+# repo-owned command, and lets that command's exit code decide the job.
+#
+# Deliberately thin: this is a checkout-and-run leaf, NOT a place to grow
+# language logic. A check that needs a language toolchain belongs in the
+# reusable that owns that language (php-ci.yml, python-ci.yml, node-test.yml,
+# ts-check.yml, go-check.yml); a check that needs a one-off binary installs it
+# in `pre-command`. Shell LINTING (shellcheck/shfmt) is deliberately NOT a mode
+# here - it belongs in the lint-* family next to lint-markdown.yml /
+# lint-yaml.yml, which already own file discovery, severity and strict-mode
+# semantics.
+#
+# Caller pattern (single script):
+#
+#   name: Script Tests
+#   on:
+#     push:
+#       branches: [main]
+#     pull_request:
+#   permissions: {}
+#   jobs:
+#     script-tests:
+#       uses: netresearch/.github/.github/workflows/script-check.yml@main
+#       permissions:
+#         contents: read
+#       with:
+#         check-cmd: "bash skills/github-release/scripts/tests/harvest-contributors.test.sh"
+#
+# Caller pattern (tool provisioning, several commands, report artifact):
+#
+#   jobs:
+#     evals:
+#       uses: netresearch/.github/.github/workflows/script-check.yml@main
+#       permissions:
+#         contents: read
+#       with:
+#         pre-command: |
+#           mkdir -p "$HOME/.local/bin"
+#           curl -fsSL "https://github.com/jj-vcs/jj/releases/download/v0.42.0/jj-v0.42.0-x86_64-unknown-linux-musl.tar.gz" | tar -xz -C "$HOME/.local/bin" ./jj
+#           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+#         check-cmd: |
+#           bash tests/smoke_test.sh
+#           bash tests/superiority_evals.sh
+#
+# SECURITY: caller-supplied commands are routed through `env:` and executed via
+# `bash -eo pipefail -c "$VAR"`, so quoting/metacharacters cannot break out of
+# argument position. This workflow never writes a caller-supplied value into
+# `$GITHUB_ENV` / `$GITHUB_OUTPUT`, so no random-delimiter heredoc hardening is
+# needed here. Third-party actions are SHA-pinned, harden-runner is enabled, and
+# checkout uses `persist-credentials: false` (this leaf never pushes). No
+# secrets are declared or forwarded: the check runs WITHOUT an authenticated
+# `GH_TOKEN`, so a script that shells out to `gh` needs a follow-up that
+# declares the secret explicitly under `on.workflow_call.secrets` - never
+# `secrets: inherit`.
+
+name: Script Check (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      check-cmd:
+        description: >-
+          The repo-owned check command. Executed via `bash -eo pipefail -c`, so
+          a multi-line value runs as a script and aborts on the first failing
+          line. Its exit code decides the job.
+
+          NOTE this is STRICTER than a plain `run:` step, whose default shell is
+          `bash -e {0}` with pipefail NOT set. A command whose pipeline ends in a
+          tolerant stage - `something-that-fails | tee log`, `... | head -1` -
+          passes today and fails here, because the failure is no longer swallowed
+          by the last stage's exit code. That is the point, but it means a
+          migrating caller must check its pipelines rather than assume a
+          like-for-like move. Terminate a deliberately tolerant stage with
+          `|| true`.
+        type: string
+        required: true
+      pre-command:
+        description: >-
+          Optional shell command run before the check, in the same job - for
+          provisioning a tool the runner does not ship (e.g. downloading a
+          pinned release binary and appending its directory to `$GITHUB_PATH`).
+          Empty (default) skips the step entirely.
+        type: string
+        default: ""
+
+      runs-on:
+        description: "Runner label."
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Per-job timeout in minutes."
+        type: number
+        default: 15
+
+      upload-artifact:
+        description: >-
+          Upload a report the check wrote as a workflow artifact. Default false
+          - the exit code alone decides the job.
+        type: boolean
+        default: false
+      artifact-name:
+        description: "Artifact name used when `upload-artifact` is true."
+        type: string
+        default: "check-report"
+      artifact-path:
+        description: >-
+          Path(s) uploaded when `upload-artifact` is true. Must be set in that
+          case - there is no meaningful default for a generic check.
+        type: string
+        default: ""
+      artifact-retention-days:
+        description: "Retention for the artifact (1-90)."
+        type: number
+        default: 7
+
+# CALLER REQUIREMENTS
+# ===================
+# When calling this reusable workflow, the caller's job-level
+# `permissions:` block MUST grant at least this full set, otherwise
+# the run fails with `startup_failure` before any job executes
+# (GitHub rejects the workflow at startup when the reusable declares
+# a permission the caller did not grant). NOTE: setting ANY scope in a
+# `permissions:` block forces every UNLISTED scope to `none`, and a job
+# that omits `permissions:` inherits the repository default
+# (default_workflow_permissions) - so a repo hardened to `read` will
+# startup-fail here unless these scopes are granted explicitly.
+#
+#   - contents: read      - check out the repository under test
+#
+#   jobs:
+#     script-check:
+#       uses: netresearch/.github/.github/workflows/script-check.yml@main
+#       permissions:
+#         contents: read
+permissions: {}
+
+jobs:
+  script-check:
+    name: check
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Validate inputs
+        # No `if:` - this must run on every call. `required: true` only enforces
+        # that the key is PRESENT, not that it carries anything: a caller whose
+        # expression resolved to nothing passes an empty string, and an empty
+        # check would then run as `bash -c ""`, exit 0, and report a silently
+        # green check that never executed.
+        env:
+          CHECK_CMD: ${{ inputs.check-cmd }}
+          ARTIFACT_PATH: ${{ inputs.artifact-path }}
+          UPLOAD_ARTIFACT: ${{ inputs.upload-artifact }}
+        run: |
+          if [ -z "${CHECK_CMD//[[:space:]]/}" ]; then
+            echo "::error title=Empty check-cmd::check-cmd is empty or whitespace-only. An empty command would exit 0 and report a green check that never ran."
+            exit 1
+          fi
+          if [ "$UPLOAD_ARTIFACT" = "true" ] && [ -z "$ARTIFACT_PATH" ]; then
+            echo "::error title=Missing artifact-path::upload-artifact is true but artifact-path is empty. Set artifact-path to the report file(s) the check writes."
+            exit 1
+          fi
+
+      - name: Pre-command
+        if: ${{ inputs.pre-command != '' }}
+        env:
+          PRE_COMMAND: ${{ inputs.pre-command }}
+        run: bash -eo pipefail -c "$PRE_COMMAND"
+
+      - name: Run check
+        env:
+          CHECK_CMD: ${{ inputs.check-cmd }}
+        run: bash -eo pipefail -c "$CHECK_CMD"
+
+      - name: Upload report artifact
+        # `!cancelled()` rather than `success()`: a report is most useful when
+        # the check just failed. `if-no-files-found: warn` for the same reason -
+        # a check that died before writing its report must not turn a real
+        # finding into a confusing upload error.
+        # `artifact-path != ''` as well, so that when the validation step above
+        # already failed the job this step is SKIPPED instead of erroring on an
+        # empty required `path:` and burying the real message under a second,
+        # more prominent failure.
+        if: ${{ !cancelled() && inputs.upload-artifact && inputs.artifact-path != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ inputs.artifact-path }}
+          if-no-files-found: warn
+          retention-days: ${{ inputs.artifact-retention-days }}
