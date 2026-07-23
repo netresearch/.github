@@ -37,13 +37,33 @@ on:
         required: false
         type: boolean
         default: true
+      load:
+        description: >-
+          Load the built image into the local docker image store
+          (docker/build-push-action `load`). This is what makes `scan: true`
+          effective on validation-only builds: with push=false there is no
+          registry reference, so Trivy can only read the image if it was
+          loaded. Requires a SINGLE platform - the docker exporter cannot
+          export a multi-platform build - and is ignored when push=true
+          (buildx cannot drive the docker and registry exporters in one
+          invocation; the pushed image is scanned by digest instead).
+          Matches the input build-container-bake.yml already has.
+          Default false = previous behaviour.
+        required: false
+        type: boolean
+        default: false
       trivy-severity:
         description: "Trivy severity filter."
         required: false
         type: string
         default: "CRITICAL,HIGH"
       scan:
-        description: "Run Trivy scan and upload SARIF (requires push=true to scan by digest)."
+        description: >-
+          Run Trivy and upload SARIF. With push=true the pushed image is
+          scanned by digest. With push=false the LOCALLY built image is
+          scanned, which requires load=true (single-platform); if neither
+          push nor load is set the workflow emits a warning and skips the
+          scan instead of silently doing nothing.
         required: false
         type: boolean
         default: true
@@ -223,6 +243,43 @@ jobs:
           # replacing them.
           labels: ${{ inputs.metadata-labels }}
 
+      - name: Resolve local scan reference
+        # Validation builds only. On the push path Trivy scans by digest and
+        # needs nothing from here. Emits a warning (not a failure) when the
+        # caller asked for a scan that cannot be performed, so the previously
+        # SILENT no-op - scan: true together with push: false - is now visible
+        # in the run instead of quietly skipping.
+        id: scan_ref
+        if: inputs.scan && !inputs.push
+        env:
+          LOAD: ${{ inputs.load }}
+          PLATFORMS: ${{ inputs.platforms }}
+          META_JSON: ${{ steps.meta.outputs.json }}
+        run: |
+          set -euo pipefail
+          if [[ "$LOAD" != "true" ]]; then
+            echo "::warning title=Container image not scanned::scan=true but push=false and load=false, so the built image exists nowhere Trivy can read it. Pass load: true (single-platform) to scan the locally built image."
+            exit 0
+          fi
+          if [[ "$PLATFORMS" == *,* ]]; then
+            echo "::error title=load requires a single platform::The docker exporter cannot export a multi-platform build to the local image store (platforms='${PLATFORMS}'). Set exactly one platform on validation builds, or set load: false." >&2
+            exit 1
+          fi
+          REF="$(jq -r '.tags[0] // empty' <<<"$META_JSON")"
+          if [[ -z "$REF" ]]; then
+            echo "::warning title=Container image not scanned::docker/metadata-action produced no tags, so the loaded image has no reference for Trivy to resolve."
+            exit 0
+          fi
+          # Random heredoc delimiter: $REF derives from caller-supplied inputs
+          # (image-name / metadata-tags).
+          delim="EOM_$(openssl rand -hex 8)"
+          {
+            echo "ref<<${delim}"
+            printf '%s\n' "$REF"
+            echo "${delim}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Local scan target: ${REF}"
+
       - name: Log in to ${{ inputs.registry }}
         if: inputs.push
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
@@ -242,12 +299,20 @@ jobs:
           file: ${{ env.DOCKERFILE }}
           target: ${{ inputs.target }}
           push: ${{ inputs.push }}
+          # `load` is honoured on validation builds only: buildx cannot drive
+          # the docker exporter and the registry exporter in one invocation.
+          load: ${{ inputs.load && !inputs.push }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: ${{ inputs.platforms }}
           build-args: ${{ inputs.build-args }}
-          provenance: ${{ inputs.provenance }}
-          sbom: ${{ inputs.sbom }}
+          # The docker exporter used by `--load` cannot carry attestations, so
+          # a loaded validation build forces provenance/SBOM off. The truthy
+          # branch holds the NON-EMPTY string 'false' on purpose: an empty
+          # string is falsy in GitHub expressions and would fall through to the
+          # caller's value. Mirrors build-container-bake.yml.
+          provenance: ${{ (inputs.load && !inputs.push) && 'false' || inputs.provenance }}
+          sbom: ${{ (inputs.load && !inputs.push) && 'false' || inputs.sbom }}
           # cache-scope: when set, both cache-from and cache-to suffix the GHA
           # scope so parallel matrix calls keep separate caches. When empty,
           # the GHA action uses a single default-scope cache (backwards
@@ -257,10 +322,14 @@ jobs:
 
       - name: Run Trivy vulnerability scanner
         id: trivy
-        if: inputs.scan && inputs.push
+        # push=true  -> scan the pushed image by digest (unchanged).
+        # push=false -> scan the image loaded into the local docker store;
+        #               steps.scan_ref.outputs.ref is empty when that was not
+        #               possible, and the step skips (a warning was emitted).
+        if: inputs.scan && (inputs.push || steps.scan_ref.outputs.ref != '')
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ${{ env.IMAGE_REF }}@${{ steps.build.outputs.digest }}
+          image-ref: ${{ inputs.push && format('{0}@{1}', env.IMAGE_REF, steps.build.outputs.digest) || steps.scan_ref.outputs.ref }}
           format: "sarif"
           output: "trivy-results.sarif"
           severity: ${{ inputs.trivy-severity }}
@@ -271,7 +340,19 @@ jobs:
         # the moment the merge completes, racing with codeql-action/upload-sarif
         # and producing a guaranteed `ref ... not found` failure. Push and
         # release events run with stable refs.
-        if: inputs.scan && inputs.push && github.event_name != 'merge_group' && hashFiles('trivy-results.sarif') != ''
+        #
+        # Skip on FORK pull requests: GitHub issues a read-only GITHUB_TOKEN for
+        # `pull_request` runs from a fork no matter what the caller granted, so
+        # `security-events: write` is not effective and the upload would fail
+        # with HTTP 403. Same-repo PR branches upload normally - that is the
+        # case this workflow now covers. The scan itself still runs on fork PRs
+        # and reports in the job log.
+        if: >-
+          inputs.scan
+          && (inputs.push || steps.scan_ref.outputs.ref != '')
+          && github.event_name != 'merge_group'
+          && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+          && hashFiles('trivy-results.sarif') != ''
         uses: github/codeql-action/upload-sarif@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1
         with:
           sarif_file: "trivy-results.sarif"

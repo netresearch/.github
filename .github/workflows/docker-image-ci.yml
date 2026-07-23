@@ -62,9 +62,23 @@ on:
         type: string
         default: "."
       platforms:
-        description: "Build platforms for the validation build. Single-arch by default for CI speed; the publish workflow does multi-arch."
+        description: >-
+          Build platforms for the validation build. Single-arch by default for
+          CI speed; the publish workflow does multi-arch. Keep this single-arch
+          to keep the validation Trivy scan working - the built image is loaded
+          into the local docker store to be scanned, and the docker exporter
+          cannot export a multi-platform build.
         type: string
         default: "linux/amd64"
+      scan-build:
+        description: >-
+          Load the validation build into the local docker store and Trivy-scan
+          it. Set false to skip on a runner that cannot hold the image (the
+          symptom is `no space left on device` during the build). Turning it
+          off restores the previous behaviour, in which a push=false build was
+          never scanned at all.
+        type: boolean
+        default: true
 
       lint-container:
         description: "Run the Dockerfile lint (hadolint) job."
@@ -225,7 +239,15 @@ jobs:
       context: ${{ inputs.context }}
       platforms: ${{ inputs.platforms }}
       push: false
-      scan: true
+      # Load the validation build into the local docker image store so the
+      # `scan` below is actually effective. Before this, push=false meant the
+      # Trivy step was gated off entirely and CI/PR builds were never scanned
+      # anywhere in the catalogue. Derived from `platforms` as well as the
+      # toggle: a caller overriding platforms with a comma-separated list keeps
+      # a working build (with a warning that the image was not scanned) instead
+      # of a hard failure.
+      load: ${{ inputs.scan-build && !contains(inputs.platforms, ',') }}
+      scan: ${{ inputs.scan-build }}
       trivy-severity: ${{ inputs.trivy-severity }}
       sign: false
       attest: false
