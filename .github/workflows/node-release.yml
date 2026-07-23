@@ -1,0 +1,745 @@
+# Reusable "Node.js release" workflow — publishes an npm package on a
+# version tag: install → build → npm (OIDC Trusted Publishing, with
+# provenance) → optional GitHub Packages pass → optional GitHub Release.
+#
+# npm upload uses OpenID Connect (Trusted Publishing) — no long-lived
+# NPM_TOKEN is required. An optional `NPM_TOKEN` secret exists ONLY as a
+# migration path for packages whose Trusted Publisher is not configured
+# yet; configure the publisher and drop the secret.
+#
+# ┌─────────────────────────────────────────────────────────────────────┐
+# │ PREREQUISITE — the npm Trusted Publisher names the CALLER workflow. │
+# │ On npmjs.com → package → Settings → Trusted Publisher, configure:   │
+# │   Publisher:        GitHub Actions                                  │
+# │   Repository:       netresearch/<repo>                              │
+# │   Workflow:         the *caller's* filename, e.g. `release.yml`     │
+# │ npm validates the entry-point workflow of the run, NOT the reusable │
+# │ that executes `npm publish`, so `node-release.yml` must NEVER be    │
+# │ entered there. `id-token: write` has to be granted by the caller    │
+# │ job as well as by the job in here (both are checked).               │
+# │ Requires npm CLI >= 11.5.1 on Node >= 22.14. The bundled npm of     │
+# │ Node 24 satisfies this; on Node 22 set `npm-version: latest`. The   │
+# │ publish job enforces this floor before publishing via OIDC.         │
+# └─────────────────────────────────────────────────────────────────────┘
+#
+# Caller pattern (npm + GitHub Packages + GitHub Release):
+#
+#   name: Release
+#   on:
+#     workflow_dispatch:
+#     push:
+#       tags: ['v*']
+#   permissions: {}
+#   jobs:
+#     release:
+#       uses: netresearch/.github/.github/workflows/node-release.yml@main
+#       permissions:
+#         contents: write
+#         id-token: write
+#         packages: write
+#       with:
+#         build-cmd: "bun run build:lib"
+#         version-source: manifest-verified
+#         publish-github-packages: true
+#
+#   NOTE: manifest-verified is a deliberate hardening, not a reproduction of
+#   prior behaviour — a tag that disagrees with package.json becomes a hard
+#   FAILURE instead of publishing. Repos moving from a plain `npm publish`
+#   (node-magento-eqp, node-red-contrib-magento-eqp) GAIN this check plus
+#   skip-if-published; they are upgraded to the node-agent-skill-coordinator
+#   standard, not held at their current shape.
+#
+# Caller pattern (monorepo — one call per publishable package):
+#
+#   Each call publishes one package; `package-path` selects it, while install
+#   and build still run at the repository root. When more than one call sets
+#   `release-files`, give each a DISTINCT `artifact-name` — two
+#   `actions/upload-artifact` uploads sharing a name in one run hard-fail.
+#   CONCURRENCY: exactly one call per tag may set `create-github-release: true`;
+#   every sibling call MUST set it to false, or two release jobs race the same
+#   tag (the `gh release view` guard is TOCTOU). On Node 22 the bundled npm
+#   predates OIDC Trusted Publishing, so set `npm-version: latest` (or Node 24).
+#
+#   jobs:
+#     sdk:
+#       uses: netresearch/.github/.github/workflows/node-release.yml@main
+#       permissions: { contents: write, id-token: write, packages: write }
+#       with:
+#         package-manager: yarn
+#         install-cmd: "yarn install --immutable"
+#         build-cmd: "yarn build"
+#         package-path: "packages/autocomplete-sdk"
+#         version-source: tag
+#         release-files: "packages/autocomplete-sdk/dist/*.zip"
+#         artifact-name: "release-autocomplete-sdk"
+#         create-github-release: true
+#     dropins:
+#       uses: netresearch/.github/.github/workflows/node-release.yml@main
+#       permissions: { contents: write, id-token: write, packages: write }
+#       with:
+#         package-manager: yarn
+#         install-cmd: "yarn install --immutable"
+#         build-cmd: "yarn build"
+#         package-path: "packages/browser-dropins"
+#         version-source: tag
+#         release-files: "packages/browser-dropins/dist/*.zip"
+#         artifact-name: "release-browser-dropins"
+#         create-github-release: false
+#
+# Caller pattern (legacy NPM_TOKEN — no Trusted Publisher configured yet):
+#
+#   Until the package has a Trusted Publisher on npmjs.com, forward the token
+#   EXPLICITLY — this org's callers never use `secrets: inherit`. Provenance
+#   requires OIDC, so it is off here. Register a Trusted Publisher against the
+#   caller's filename and drop both `provenance: false` and the secret once done.
+#
+#   jobs:
+#     release:
+#       uses: netresearch/.github/.github/workflows/node-release.yml@main
+#       permissions:
+#         contents: write
+#         id-token: write
+#         packages: write
+#       with:
+#         build-cmd: "yarn build"
+#         provenance: false
+#         create-github-release: false
+#       secrets:
+#         NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+#
+# NOT in scope: running tests/lint before publishing. Compose
+# `node-test.yml` (or `node-ci.yml`) as a `needs:` job in the caller —
+# the release path must not grow a second, divergent test invocation.
+#
+# SECURITY: pinned third-party action SHAs, harden-runner, least-privilege
+# per-job permissions, `persist-credentials: false` on checkout. Caller
+# commands are routed through `env:` and executed with `bash -c "$VAR"`,
+# never interpolated into a script body. Tag and prerelease validity are
+# checked in the publish job BEFORE any irreversible publish; the single
+# resolved tag is passed to the release job as a job output, not re-derived.
+# The GitHub Release job holds the only `contents: write` token and never
+# runs a caller-supplied build command. Values written to $GITHUB_OUTPUT are
+# validated and emitted with a random heredoc delimiter; no caller-supplied
+# key name is ever written, so no key-name allowlist is needed.
+
+name: Node.js Release (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: "Runner label."
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Timeout in minutes for the publish job."
+        type: number
+        default: 15
+
+      package-manager:
+        description: "Package manager used for install/build (one of: bun, npm, pnpm, yarn). Publishing always uses the npm CLI."
+        type: string
+        default: "bun"
+      node-version:
+        description: "Node.js version. Must be 22.14 or newer for OIDC Trusted Publishing."
+        type: string
+        default: "24"
+      bun-version:
+        description: "Bun version passed to oven-sh/setup-bun (when package-manager is bun)."
+        type: string
+        default: "latest"
+      npm-version:
+        description: >-
+          npm CLI version installed globally before publishing (e.g. `latest`).
+          Empty (default) keeps the npm bundled with `node-version`. Set this
+          when `node-version` is 22 or older and you publish via OIDC: npm 10
+          has no Trusted Publishing support, so the publish would fall back to
+          token auth and fail without a secret. The publish job hard-fails up
+          front when the resolved npm is older than 11.5.1 and no NPM_TOKEN is
+          supplied.
+        type: string
+        default: ""
+
+      install-cmd:
+        description: "Dependency install command, executed at the repository root. Empty skips the install."
+        type: string
+        default: "bun install --frozen-lockfile"
+      build-cmd:
+        description: "Build command, executed at the repository root. Empty skips the build (for packages that ship sources)."
+        type: string
+        default: "bun run build"
+      package-path:
+        description: >-
+          Path of the package to publish, relative to the repository root.
+          Defaults to the root. Install and build always run at the root; a
+          monorepo calls this workflow once per publishable package.
+        type: string
+        default: "."
+
+      tag:
+        description: "Release tag. Empty (default) uses the ref the workflow ran on, which must then be a tag."
+        type: string
+        default: ""
+      version-source:
+        description: >-
+          Where the published version comes from. `manifest` (default)
+          publishes whatever package.json declares and never inspects the tag.
+          `manifest-verified` additionally fails when the tag (minus a leading
+          v) differs from package.json — use it with release-please, where the
+          manifest is the source of truth. `tag` rewrites package.json from
+          the tag before publishing (no commit), for repositories whose
+          manifests are not bumped ahead of the tag.
+        type: string
+        default: "manifest"
+
+      publish-npm:
+        description: "Publish to registry.npmjs.org."
+        type: boolean
+        default: true
+      npm-access:
+        description: "Value passed to npm publish --access (public or restricted)."
+        type: string
+        default: "public"
+      provenance:
+        description: "Pass --provenance on the npmjs.com publish. Requires a public repository."
+        type: boolean
+        default: true
+      publish-github-packages:
+        description: >-
+          Run a second publish pass against GitHub Packages
+          (npm.pkg.github.com). Provenance is not supported there and is not
+          attempted. Default false = npm-only. A repo that publishes to GitHub
+          Packages today (node-magento-eqp, node-red-contrib-magento-eqp do so
+          unconditionally) MUST set this true when migrating, or it silently
+          drops that registry.
+        type: boolean
+        default: false
+      skip-if-published:
+        description: >-
+          Probe each registry first and skip a publish whose version is already
+          there, so re-running the workflow on an existing tag is a no-op
+          instead of a failure. Set false to make a duplicate version fail.
+        type: boolean
+        default: true
+
+      create-github-release:
+        description: "Create a GitHub Release for the tag with auto-generated notes. Existing releases are updated, not recreated."
+        type: boolean
+        default: true
+      release-files:
+        description: >-
+          Glob of files produced by the build that are attached to the GitHub
+          Release, resolved against the repository root (e.g. `dist/*.zip`).
+          Empty (default) creates a Release with notes only. The files are
+          handed to the release job as an artifact so that job never runs a
+          build command.
+        type: string
+        default: ""
+      artifact-name:
+        description: >-
+          Name of the artifact that carries release-files from the publish job
+          to the release job. Must be unique per call within a single workflow
+          run: a monorepo running two calls in one run that both set
+          release-files must give each call a distinct artifact-name, because
+          actions/upload-artifact hard-fails on a duplicate name within a run.
+        type: string
+        default: "node-release-assets"
+      prerelease:
+        description: >-
+          How the Release is marked. `auto` (default) sets --prerelease when
+          the tag carries a SemVer prerelease segment (v1.2.3-rc.1, 2.0.0-beta.4);
+          `true` always marks it a prerelease; `false` never does. Unlike
+          python-release.yml this deliberately uses the SemVer rule, not the
+          PEP 440 one — 1.2.3a1 is not a Node version.
+        type: string
+        default: "auto"
+    secrets:
+      NPM_TOKEN:
+        description: >-
+          Legacy npmjs.com automation token. Only supply it while the package
+          has no Trusted Publisher configured; forward it EXPLICITLY from the
+          caller (secrets: NPM_TOKEN: ...), as this org's callers do not use
+          secrets: inherit. When absent (default) the publish authenticates via
+          OIDC. Remove it once the publisher exists.
+        required: false
+
+# CALLER REQUIREMENTS
+# ===================
+# When calling this reusable workflow, the caller's job-level
+# `permissions:` block MUST grant at least this full set, otherwise
+# the run fails with `startup_failure` before any job executes
+# (GitHub rejects the workflow at startup when the reusable declares
+# a permission the caller did not grant). NOTE: setting ANY scope in a
+# `permissions:` block forces every UNLISTED scope to `none`, and a job
+# that omits `permissions:` inherits the repository default
+# (default_workflow_permissions) — so a repo hardened to `read` will
+# startup-fail here unless these scopes are granted explicitly. The set is
+# the UNION over both jobs and is validated statically, so it is required
+# even when `publish-github-packages` or `create-github-release` is false.
+#
+#   - contents: write     — create/update the GitHub Release
+#   - id-token: write     — OIDC identity for npm Trusted Publishing and
+#                           for provenance attestation
+#   - packages: write     — GitHub Packages publish pass
+#
+#   jobs:
+#     release:
+#       uses: netresearch/.github/.github/workflows/node-release.yml@main
+#       permissions:
+#         contents: write
+#         id-token: write
+#         packages: write
+permissions: {}
+
+jobs:
+  publish:
+    name: Publish
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Git hooks must never run in CI: a `prepare`/`postinstall` hook
+      # installer can fail the install or mutate the tree that is about to be
+      # published. Callers needing full suppression put `--ignore-scripts`
+      # into `install-cmd`.
+      HUSKY: "0"
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Validate inputs
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package-manager }}
+          VERSION_SOURCE: ${{ inputs.version-source }}
+          NPM_ACCESS: ${{ inputs.npm-access }}
+          PACKAGE_PATH: ${{ inputs.package-path }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          CREATE_GITHUB_RELEASE: ${{ inputs.create-github-release }}
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          case "$PACKAGE_MANAGER" in
+            bun|npm|pnpm|yarn) : ;;
+            *)
+              echo "::error title=Invalid package-manager::Unsupported package-manager '$PACKAGE_MANAGER'. Expected one of: bun, npm, pnpm, yarn."
+              exit 1
+              ;;
+          esac
+
+          case "$VERSION_SOURCE" in
+            manifest|manifest-verified|tag) : ;;
+            *)
+              echo "::error title=Invalid version-source::Expected 'manifest', 'manifest-verified' or 'tag', got '$VERSION_SOURCE'."
+              exit 1
+              ;;
+          esac
+
+          case "$NPM_ACCESS" in
+            public|restricted) : ;;
+            *)
+              echo "::error title=Invalid npm-access::Expected 'public' or 'restricted', got '$NPM_ACCESS'."
+              exit 1
+              ;;
+          esac
+
+          # prerelease is validated here, up front, so an invalid value can
+          # never reach the release job AFTER an irreversible publish.
+          case "$PRERELEASE" in
+            auto|true|false) : ;;
+            *)
+              echo "::error title=Invalid prerelease::Expected 'auto', 'true' or 'false', got '$PRERELEASE'."
+              exit 1
+              ;;
+          esac
+
+          case "$PACKAGE_PATH" in
+            /*|*..*)
+              echo "::error title=Invalid package-path::package-path must be a relative path inside the workspace, got '$PACKAGE_PATH'."
+              exit 1
+              ;;
+          esac
+
+          if [ ! -f "$PACKAGE_PATH/package.json" ]; then
+            echo "::error title=No package.json::No package.json found at '$PACKAGE_PATH'."
+            exit 1
+          fi
+
+          # Fail BEFORE any publish when a GitHub Release is requested but no
+          # tag can be resolved — otherwise the package would publish and the
+          # release job would fail afterwards, leaving a live package with a
+          # permanently red run.
+          if [ "$CREATE_GITHUB_RELEASE" = "true" ] && [ -z "${INPUT_TAG:-}" ] && [ "$REF_TYPE" != "tag" ]; then
+            echo "::error title=Not a tag ref::create-github-release needs a tag, but the 'tag' input is empty and this run is on a $REF_TYPE ref ('$REF_NAME'). Dispatch the workflow on the tag, pass the 'tag' input, or set create-github-release: false."
+            exit 1
+          fi
+
+      - name: Resolve release tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          VERSION_SOURCE: ${{ inputs.version-source }}
+        run: |
+          set -euo pipefail
+
+          TAG="${INPUT_TAG:-}"
+          if [ -z "$TAG" ]; then
+            if [ "$REF_TYPE" != "tag" ] && [ "$VERSION_SOURCE" != "manifest" ]; then
+              echo "::error title=Not a tag ref::version-source '$VERSION_SOURCE' needs a tag, but this run is on a $REF_TYPE ref ('$REF_NAME'). Dispatch the workflow on the tag or pass the 'tag' input."
+              exit 1
+            fi
+            TAG="$REF_NAME"
+          fi
+
+          DELIMITER="ghadelim_$(openssl rand -hex 8)"
+          {
+            echo "tag<<$DELIMITER"
+            echo "$TAG"
+            echo "$DELIMITER"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Bun
+        if: ${{ inputs.package-manager == 'bun' }}
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ inputs.bun-version }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ inputs.node-version }}
+          registry-url: "https://registry.npmjs.org"
+          scope: ${{ github.repository_owner }}
+
+      - name: Enable Corepack
+        if: ${{ inputs.package-manager == 'pnpm' || inputs.package-manager == 'yarn' }}
+        run: corepack enable
+
+      - name: Install npm CLI
+        if: ${{ inputs.npm-version != '' }}
+        env:
+          NPM_VERSION: ${{ inputs.npm-version }}
+        run: npm install -g "npm@${NPM_VERSION}"
+
+      # The tag/manifest version checks run BEFORE install and build: a bad tag
+      # is caught in seconds, and for version-source: tag the manifest is
+      # rewritten before the build so the built artifact carries the tag's
+      # version rather than the pre-rewrite one.
+      - name: Set version from tag
+        if: ${{ inputs.version-source == 'tag' }}
+        working-directory: ${{ inputs.package-path }}
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          if ! printf '%s' "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)*$'; then
+            echo "::error title=Unparseable tag::Tag '$TAG' does not yield a SemVer version ('$VERSION')."
+            exit 1
+          fi
+          # Rewrite the version field in package.json in the workspace only —
+          # a direct node write, so no npm lifecycle scripts (preversion/
+          # version/postversion) run and no lockfile is touched, matching the
+          # "workspace only" contract. Nothing is committed or pushed (checkout
+          # ran with persist-credentials: false).
+          NEW_VERSION="$VERSION" node -e '
+            const fs = require("fs");
+            const path = "./package.json";
+            const pkg = JSON.parse(fs.readFileSync(path, "utf8"));
+            pkg.version = process.env.NEW_VERSION;
+            fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + "\n");
+          '
+
+      - name: Verify tag matches package.json version
+        if: ${{ inputs.version-source == 'manifest-verified' }}
+        working-directory: ${{ inputs.package-path }}
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${TAG#v}"
+          PKG_VERSION="$(node -p 'require("./package.json").version')"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error title=Version mismatch::Tag '$TAG' (version '$TAG_VERSION') does not match package.json version '$PKG_VERSION'."
+            exit 1
+          fi
+          echo "Tag $TAG aligns with package.json version $PKG_VERSION."
+
+      - name: Install dependencies
+        if: ${{ inputs.install-cmd != '' }}
+        env:
+          INSTALL_CMD: ${{ inputs.install-cmd }}
+        run: bash -c "$INSTALL_CMD"
+
+      - name: Build
+        if: ${{ inputs.build-cmd != '' }}
+        env:
+          BUILD_CMD: ${{ inputs.build-cmd }}
+        run: bash -c "$BUILD_CMD"
+
+      - name: Resolve package identity
+        id: pkg
+        working-directory: ${{ inputs.package-path }}
+        run: |
+          set -euo pipefail
+          PKG_NAME="$(node -p 'require("./package.json").name')"
+          PKG_VERSION="$(node -p 'require("./package.json").version')"
+
+          # Both values come from repository content and are used to build a
+          # registry URL and a CLI argument, so they are constrained before use.
+          if ! printf '%s' "$PKG_NAME" | grep -qE '^(@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*$'; then
+            echo "::error title=Invalid package name::package.json name '$PKG_NAME' is not a publishable npm name."
+            exit 1
+          fi
+          if ! printf '%s' "$PKG_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)*$'; then
+            echo "::error title=Invalid package version::package.json version '$PKG_VERSION' is not a SemVer version."
+            exit 1
+          fi
+
+          DELIMITER="ghadelim_$(openssl rand -hex 8)"
+          {
+            echo "name<<$DELIMITER"
+            echo "$PKG_NAME"
+            echo "$DELIMITER"
+            echo "version<<$DELIMITER"
+            echo "$PKG_VERSION"
+            echo "$DELIMITER"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Publishing $PKG_NAME@$PKG_VERSION"
+
+      - name: Guard npm version for OIDC
+        if: ${{ inputs.publish-npm }}
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # OIDC Trusted Publishing needs npm >= 11.5.1. When a legacy NPM_TOKEN
+        # is supplied the publish uses token auth and this floor does not apply.
+        # Fail here, not at the registry, so the diagnosis names the npm version
+        # rather than surfacing as an opaque ENEEDAUTH/401.
+        run: |
+          set -euo pipefail
+          if [ -n "${NPM_TOKEN:-}" ]; then
+            echo "NPM_TOKEN supplied; publishing via token auth, OIDC npm-version floor does not apply."
+            exit 0
+          fi
+          NPM_V="$(npm --version)"
+          MIN="11.5.1"
+          if [ "$(printf '%s\n%s\n' "$MIN" "$NPM_V" | sort -V | head -n1)" != "$MIN" ]; then
+            echo "::error title=npm too old for OIDC::npm $NPM_V has no Trusted Publishing support (need >= $MIN). Set npm-version: latest or raise node-version to 24."
+            exit 1
+          fi
+          echo "npm $NPM_V supports OIDC Trusted Publishing (>= $MIN)."
+
+      - name: Check whether the version is already on npm
+        id: npm_state
+        if: ${{ inputs.publish-npm && inputs.skip-if-published }}
+        env:
+          PKG_NAME: ${{ steps.pkg.outputs.name }}
+          PKG_VERSION: ${{ steps.pkg.outputs.version }}
+        # A plain HTTP probe, not `npm view`: setup-node has wired this runner
+        # up for OIDC auth against the registry, and `npm view` then sends an
+        # authenticated request that 404s for any package whose Trusted
+        # Publisher does not match this exact workflow context, even when the
+        # version is publicly readable. The REST endpoint is unauthenticated
+        # and returns the truth.
+        run: |
+          set -euo pipefail
+          STATUS="$(curl -sS -o /dev/null -w '%{http_code}' --retry 3 --retry-connrefused \
+            "https://registry.npmjs.org/${PKG_NAME}/${PKG_VERSION}")"
+          case "$STATUS" in
+            200)
+              echo "Version $PKG_VERSION of $PKG_NAME is already on npm — the publish step is skipped."
+              echo "published=true" >> "$GITHUB_OUTPUT"
+              ;;
+            404)
+              echo "Version $PKG_VERSION of $PKG_NAME is not on npm yet."
+              echo "published=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error title=Registry probe failed::registry.npmjs.org answered HTTP $STATUS for ${PKG_NAME}/${PKG_VERSION}; refusing to guess."
+              exit 1
+              ;;
+          esac
+
+      - name: Publish to npm
+        if: ${{ inputs.publish-npm && steps.npm_state.outputs.published != 'true' }}
+        working-directory: ${{ inputs.package-path }}
+        env:
+          NPM_ACCESS: ${{ inputs.npm-access }}
+          PROVENANCE: ${{ inputs.provenance }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          ARGS=( --access "$NPM_ACCESS" )
+          if [ "$PROVENANCE" = "true" ]; then
+            ARGS+=( --provenance )
+          fi
+          # NODE_AUTH_TOKEN is exported only when a legacy token was supplied.
+          # Leaving it unset is what makes npm fall through to OIDC Trusted
+          # Publishing; exporting an empty value would authenticate as nobody.
+          if [ -n "${NPM_TOKEN:-}" ]; then
+            echo "::warning title=Legacy npm token::Publishing with NPM_TOKEN. Configure a Trusted Publisher for this package and drop the secret."
+            export NODE_AUTH_TOKEN="$NPM_TOKEN"
+          fi
+          npm publish "${ARGS[@]}"
+
+      - name: Set up Node.js for GitHub Packages
+        if: ${{ inputs.publish-github-packages }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ inputs.node-version }}
+          registry-url: "https://npm.pkg.github.com"
+          scope: ${{ github.repository_owner }}
+
+      - name: Check whether the version is already on GitHub Packages
+        id: ghp_state
+        if: ${{ inputs.publish-github-packages && inputs.skip-if-published }}
+        env:
+          PKG_NAME: ${{ steps.pkg.outputs.name }}
+          PKG_VERSION: ${{ steps.pkg.outputs.version }}
+          NODE_AUTH_TOKEN: ${{ github.token }}
+        # GitHub Packages requires auth even for a read, so `npm view` is used
+        # here; it has none of the OIDC quirk that rules it out for npmjs.com.
+        # A probe FAILURE must not be read as "not published": only a genuine
+        # E404 means absent; any other failure (5xx, rate limit, token scope,
+        # network) hard-errors rather than provoking a 409 publish, matching
+        # the npmjs.com probe's refuse-to-guess contract.
+        run: |
+          set -euo pipefail
+          if OUT="$(npm view "${PKG_NAME}@${PKG_VERSION}" version --registry=https://npm.pkg.github.com 2>&1)"; then
+            echo "Version $PKG_VERSION of $PKG_NAME is already on GitHub Packages — the publish step is skipped."
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          elif printf '%s' "$OUT" | grep -q 'E404'; then
+            echo "Version $PKG_VERSION of $PKG_NAME is not on GitHub Packages yet."
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error title=Registry probe failed::npm.pkg.github.com probe failed for ${PKG_NAME}@${PKG_VERSION}: $OUT"
+            exit 1
+          fi
+
+      - name: Publish to GitHub Packages
+        if: ${{ inputs.publish-github-packages && steps.ghp_state.outputs.published != 'true' }}
+        working-directory: ${{ inputs.package-path }}
+        env:
+          NPM_ACCESS: ${{ inputs.npm-access }}
+          NODE_AUTH_TOKEN: ${{ github.token }}
+        run: npm publish --access "$NPM_ACCESS"
+
+      - name: Upload release assets
+        if: ${{ inputs.release-files != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ inputs.release-files }}
+          if-no-files-found: error
+          retention-days: 7
+
+  github-release:
+    name: Create GitHub Release
+    needs: publish
+    if: ${{ inputs.create-github-release }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Download release assets
+        if: ${{ inputs.release-files != '' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: release-assets/
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.publish.outputs.tag }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+
+          # The tag is resolved once, in the publish job, and passed through as
+          # a job output; it was validated there before any publish ran.
+          if [ -z "$TAG" ]; then
+            echo "::error title=No tag resolved::The publish job did not resolve a release tag."
+            exit 1
+          fi
+
+          case "$PRERELEASE" in
+            true)  MARK=--prerelease ;;
+            false) MARK= ;;
+            auto)
+              # SemVer rule: a prerelease is the segment after the first
+              # hyphen that follows the version core (v1.2.3-rc.1). A bare
+              # substring test would read "rc" out of v1.0.0-darcy, and a
+              # tag without a version core is never marked. `prerelease` was
+              # already validated in the publish job's "Validate inputs" step.
+              if printf '%s' "$TAG" | grep -qE '^v?[0-9]+\.[0-9]+\.[0-9]+-'; then
+                MARK=--prerelease
+              else
+                MARK=
+              fi
+              ;;
+          esac
+          if [ -n "$MARK" ]; then
+            echo "Marking $TAG as a prerelease."
+          fi
+
+          # Every downloaded file is attached, whatever nesting the upload
+          # glob produced — the artifact round-trip rewrites relative paths,
+          # so re-globbing the caller's pattern here would match nothing.
+          FILES=()
+          if [ -d release-assets ]; then
+            mapfile -t FILES < <(find release-assets -type f | sort)
+            if [ "${#FILES[@]}" -eq 0 ]; then
+              echo "::error title=No release files::The release-assets artifact contained no files."
+              exit 1
+            fi
+            echo "Attaching ${#FILES[@]} file(s) to the release."
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — not recreating it."
+            if [ "${#FILES[@]}" -gt 0 ]; then
+              gh release upload "$TAG" --clobber "${FILES[@]}"
+            fi
+            exit 0
+          fi
+
+          # Tolerate a lost race: if a sibling call (or a concurrent rerun)
+          # created the release between the view above and this create, fall
+          # back to confirming it exists instead of failing the run.
+          gh release create "$TAG" --generate-notes ${MARK:+"$MARK"} ${FILES[@]+"${FILES[@]}"} \
+            || gh release view "$TAG" >/dev/null
