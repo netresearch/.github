@@ -475,7 +475,19 @@ jobs:
         # Skip on merge_group: the gh-readonly-queue ref is deleted the moment
         # the merge completes, racing codeql-action/upload-sarif into a
         # guaranteed `ref ... not found` failure. Push/PR runs have stable refs.
-        if: inputs.scan && (inputs.push || inputs.load) && github.event_name != 'merge_group' && steps.trivy.outputs.count != '0'
+        #
+        # Skip on FORK pull requests for the same reason its sibling
+        # build-container.yml does: GitHub issues a read-only GITHUB_TOKEN for
+        # `pull_request` runs from a fork whatever the caller granted, so
+        # `security-events: write` is not effective and the upload 403s. This
+        # workflow is already driven on pull_request with load=true by
+        # phpbu-docker, so the fork path is reachable today.
+        if: >-
+          inputs.scan
+          && (inputs.push || inputs.load)
+          && github.event_name != 'merge_group'
+          && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+          && steps.trivy.outputs.count != '0'
         uses: github/codeql-action/upload-sarif@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1
         with:
           # No `category` here: each SARIF carries its own distinct category
