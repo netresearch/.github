@@ -42,6 +42,30 @@
 #       secrets:
 #         CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 #
+# Caller pattern (floor testing — install the lowest allowed versions):
+#
+#   jobs:
+#     lowest:
+#       uses: netresearch/.github/.github/workflows/php-ci.yml@main
+#       with:
+#         php-versions: '["8.2"]'
+#         dependency-versions: "lowest"   # composer update --prefer-lowest --prefer-stable
+#
+# Caller pattern (environment for the check commands):
+#
+#   Use `check-env` instead of concatenating `FOO=1 vendor/bin/phpunit`
+#   into `phpunit-cmd` — the pairs are exported as step environment, so
+#   the command inputs stay plain commands:
+#
+#   jobs:
+#     php-ci:
+#       uses: netresearch/.github/.github/workflows/php-ci.yml@main
+#       with:
+#         phpunit-cmd: "vendor/bin/phpunit --testdox"
+#         check-env: |
+#           SKIP_NETWORK_TESTS=1
+#           COMPOSER_AUTH={}
+#
 # Caller pattern (TYPO3 extension matrix — pin core before install):
 #
 #   jobs:
@@ -99,9 +123,12 @@
 # `persist-credentials: false` on checkout, secrets passed explicitly
 # (never `secrets: inherit`). Caller-supplied commands are routed
 # through `env:` so callers can't break out of argument position via
-# quoting/metacharacters. No untrusted github.event.* input is used in
-# `run:` blocks — all inputs come via `workflow_call` from trusted
-# callers.
+# quoting/metacharacters. `check-env` exists so that setting a variable
+# for a check step no longer requires concatenating it into a `*-cmd`
+# string — its text is parsed as data and never eval'd, sourced or
+# interpolated into a `run:` block. No untrusted github.event.* input is
+# used in `run:` blocks — all inputs come via `workflow_call` from
+# trusted callers.
 
 name: PHP CI (reusable)
 
@@ -171,6 +198,36 @@ on:
           `composer install`. Use this to pin framework versions in a
           matrix (e.g. `composer require typo3/cms-core:"^13.4"
           --no-update`).
+        type: string
+        default: ""
+      dependency-versions:
+        description: >-
+          Which dependency set to install. `highest` (default) runs
+          `composer install` exactly as before. `lowest` runs
+          `composer update --prefer-lowest --prefer-stable` instead, for
+          floor-constraint testing (the ramsey/composer-install
+          convention). `composer-args` is forwarded in both modes. Any
+          other value fails the job. An empty string is treated as
+          `highest`.
+        type: string
+        default: "highest"
+
+      # Environment passthrough for the caller-supplied check commands
+      check-env:
+        description: >-
+          Newline-separated `KEY=VALUE` pairs exported before the
+          PHPStan / PHP-CS-Fixer / Rector / PHPUnit steps run, e.g.
+          `SKIP_NETWORK_TESTS=1`. Parsed as data and written to
+          `$GITHUB_ENV`; the text is never eval'd, sourced or
+          interpolated into a command, so it cannot be used to smuggle
+          shell code the way concatenating `FOO=1 vendor/bin/phpunit`
+          into a `*-cmd` input does. Blank lines and `#` comment lines
+          are ignored; everything after the first `=` is the literal
+          value (spaces and quotes are kept verbatim, quotes are NOT
+          stripped). Keys must match `[A-Za-z_][A-Za-z0-9_]*` and must
+          not start with `GITHUB_` or `RUNNER_`. Because `$GITHUB_ENV`
+          is job-scoped, the variables also apply to the steps after the
+          checks (coverage upload).
         type: string
         default: ""
 
@@ -361,17 +418,83 @@ jobs:
       - name: Install dependencies
         env:
           COMPOSER_ARGS: ${{ inputs.composer-args }}
+          DEPENDENCY_VERSIONS: ${{ inputs.dependency-versions }}
         # Word-split COMPOSER_ARGS into argv via `read -ra` so any shell
         # metacharacters (`;`, `&&`, backticks, `$()`) end up as literal
         # argv entries Composer rejects, instead of being interpreted by
         # the shell. Avoids the injection foot-gun of `bash -c "... $VAR"`.
+        #
+        # `highest` (and an empty string, i.e. a caller that explicitly
+        # passes `dependency-versions: ''`) keeps the historical
+        # `composer install` path unchanged. `lowest` resolves the floor
+        # of every constraint instead. Anything else is a caller typo and
+        # must fail loudly rather than silently installing the highest set.
         run: |
           read -ra COMPOSER_INSTALL_ARGS <<< "$COMPOSER_ARGS"
-          composer install "${COMPOSER_INSTALL_ARGS[@]}"
+          case "${DEPENDENCY_VERSIONS:-highest}" in
+            highest)
+              composer install "${COMPOSER_INSTALL_ARGS[@]}"
+              ;;
+            lowest)
+              composer update --prefer-lowest --prefer-stable "${COMPOSER_INSTALL_ARGS[@]}"
+              ;;
+            *)
+              echo "::error title=Invalid dependency-versions::Expected 'highest' or 'lowest', got '${DEPENDENCY_VERSIONS}'."
+              exit 1
+              ;;
+          esac
 
       - name: Composer audit
         if: ${{ inputs.run-composer-audit }}
         run: composer audit
+
+      - name: Export check environment
+        # Makes caller-supplied KEY=VALUE pairs available to the check
+        # steps below without concatenating them into a command string.
+        # CHECK_ENV is only ever *read* as data: `read -r` plus parameter
+        # expansion, never `eval`/`source`/`bash -c`, and never
+        # interpolated into this run block (it arrives via `env:`), so a
+        # value containing `$(id)`, backticks, quotes or `;` stays a
+        # literal string. Values are appended with a random heredoc
+        # delimiter so no value can forge extra $GITHUB_ENV entries.
+        # Key names are validated to protect the runner's own contract;
+        # only the key is echoed, never the value.
+        if: ${{ inputs.check-env != '' }}
+        env:
+          CHECK_ENV: ${{ inputs.check-env }}
+        run: |
+          delimiter="CHECK_ENV_EOF_${RANDOM}${RANDOM}${RANDOM}${RANDOM}"
+          lineno=0
+          while IFS= read -r line || [ -n "$line" ]; do
+            lineno=$((lineno + 1))
+            line="${line%$'\r'}"
+            line="${line#"${line%%[![:space:]]*}"}"
+            case "$line" in
+              '' | '#'*) continue ;;
+            esac
+            if [[ "$line" != *=* ]]; then
+              echo "::error title=Invalid check-env::Line ${lineno} is not KEY=VALUE."
+              exit 1
+            fi
+            key="${line%%=*}"
+            value="${line#*=}"
+            if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+              echo "::error title=Invalid check-env::Line ${lineno} has an invalid variable name."
+              exit 1
+            fi
+            case "$key" in
+              GITHUB_* | RUNNER_*)
+                echo "::error title=Invalid check-env::Line ${lineno} may not override reserved variable '${key}'."
+                exit 1
+                ;;
+            esac
+            {
+              printf '%s<<%s\n' "$key" "$delimiter"
+              printf '%s\n' "$value"
+              printf '%s\n' "$delimiter"
+            } >> "$GITHUB_ENV"
+            echo "check-env: exported ${key}"
+          done <<< "$CHECK_ENV"
 
       - name: PHPStan
         if: ${{ inputs.run-phpstan }}
