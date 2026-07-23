@@ -460,9 +460,26 @@ jobs:
             fi
             value="$resolved"
           fi
+          # Reject anything that is not a plausible Composer constraint. This
+          # is what stops $GITHUB_ENV injection at the source: a value carrying
+          # a newline could otherwise forge further environment variables.
+          case "$value" in
+            *[!0-9A-Za-z.*|^~\ ,\<\>=!-]*)
+              echo "::error title=Invalid symfony-require::value contains characters that are not valid in a Composer version constraint"
+              exit 1
+              ;;
+          esac
           composer global config --no-plugins allow-plugins.symfony/flex true
           composer global require --no-progress --no-scripts --no-plugins symfony/flex
-          printf 'SYMFONY_REQUIRE=%s\n' "$value" >> "$GITHUB_ENV"
+          # Written with a random heredoc delimiter for the same reason as
+          # check-env and the extra-matrix export: a value can never forge an
+          # extra $GITHUB_ENV entry, whatever it contains.
+          delimiter="SYMFONY_REQUIRE_EOF_${RANDOM}${RANDOM}${RANDOM}${RANDOM}"
+          {
+            printf 'SYMFONY_REQUIRE<<%s\n' "$delimiter"
+            printf '%s\n' "$value"
+            printf '%s\n' "$delimiter"
+          } >> "$GITHUB_ENV"
           echo "SYMFONY_REQUIRE=$value"
 
       - name: Validate composer.json and composer.lock
