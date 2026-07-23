@@ -433,7 +433,13 @@ jobs:
           GHOSTS=()
           PARTIALS=()
 
-          while IFS=$'\t' read -r VERSION_ID DIGEST TAGS IS_RELEASE; do
+          # Fields are separated by the ASCII unit separator (0x1f), not a tab:
+          # tab is an IFS *whitespace* character, so `IFS=$'\t' read` collapses
+          # runs of separators and silently drops empty fields, shifting every
+          # later column left. No field below can be empty today, but the tag
+          # list is caller-controlled text and this is a deletion path — it must
+          # not depend on that staying true.
+          while IFS=$'\037' read -r VERSION_ID DIGEST TAGS IS_RELEASE; do
             MANIFEST=$(crane manifest "${IMAGE}@${DIGEST}" 2>/dev/null || echo "")
             if [ -z "$MANIFEST" ]; then
               echo "  ?       ${VERSION_ID} (tags: ${TAGS}) - manifest unreadable, skipping"
@@ -485,7 +491,7 @@ jobs:
               , ( ((.metadata.container.tags // [])
                    | any(.[]; . as $t | any($patterns[]; . as $p | $t | test($p))))
                   | tostring )
-              ] | @tsv
+              ] | join("\u001f")
           ' "$ALL_VERSIONS")
 
           VERSIONS_TO_DELETE=()
