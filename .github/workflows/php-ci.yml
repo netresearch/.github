@@ -158,12 +158,26 @@ on:
       extra-tools:
         description: >-
           Additional tools (comma-separated) for shivammathur/setup-php,
-          appended to the always-installed `composer:v2`
+          appended to the always-installed Composer
           (e.g. `php-cs-fixer, phpstan`). The reusable always installs
           Composer because every later step (validate, cache lookup,
-          install, audit) depends on it; callers cannot opt out.
+          install, audit) depends on it; callers cannot opt out. To pin a
+          Composer version use `composer-version`, not an extra
+          `composer:...` entry here.
         type: string
         default: ""
+      composer-version:
+        description: >-
+          Composer version for shivammathur/setup-php, used as the
+          `composer:<value>` entry in its `tools:` list. Default `v2`
+          installs the latest Composer 2.x. Pin a specific release
+          (e.g. `2.2.25`, the last LTS supporting PHP 5.3+) or a channel
+          (`preview`, `snapshot`) when a project needs it. Passing a
+          second `composer:...` through `extra-tools` also works because
+          setup-php lets the later entry win, but it depends on that
+          undocumented precedence — use this input instead.
+        type: string
+        default: "v2"
       ini-values:
         description: "php.ini overrides for shivammathur/setup-php (e.g. 'memory_limit=-1')."
         type: string
@@ -192,6 +206,18 @@ on:
         description: "Run `composer validate --strict` before install."
         type: boolean
         default: true
+      cache-key-suffix:
+        description: >-
+          Extra text appended to the composer cache key. Usually
+          unnecessary: the reusable already derives a per-cell suffix from
+          `dependency-versions` and `extra-matrix`, so matrixed callers get
+          distinct cache entries automatically. Set this only when two
+          cells install different dependency sets for a reason the
+          reusable cannot see (e.g. a `pre-install-cmd` that pins a version
+          from a source other than the matrix). Empty (default) with a
+          single-dimension matrix reproduces the historical key exactly.
+        type: string
+        default: ""
       pre-install-cmd:
         description: >-
           Optional shell command to run after PHP setup but before
@@ -274,6 +300,15 @@ on:
         description: "PHPUnit command. Override to use a composer script (e.g. `composer ci:tests:unit`)."
         type: string
         default: "vendor/bin/phpunit"
+      phpunit-continue-on-error:
+        description: >-
+          Treat a failing PHPUnit step as tolerated: the step is marked
+          failed in the UI but the job still succeeds. Use this for
+          advisory suites instead of hiding the intent inside
+          `phpunit-cmd` as `... || true`, which reports a green step and
+          loses the signal entirely. Default `false` fails the job.
+        type: boolean
+        default: false
 
       # PHP-CS-Fixer (off by default — many projects use composer scripts that bundle this with linting)
       run-cs-fixer:
@@ -352,6 +387,13 @@ on:
         description: "Codecov `flags` (comma-separated)."
         type: string
         default: "unittests"
+      codecov-name:
+        description: >-
+          Codecov upload label (`name`), shown per upload in the Codecov
+          UI. Useful when several jobs of one repo upload separately.
+          Empty (default) leaves the action's own default.
+        type: string
+        default: ""
     secrets:
       CODECOV_TOKEN:
         description: "Codecov upload token. Required for private repositories when `upload-coverage-codecov` is true."
@@ -407,10 +449,11 @@ jobs:
         with:
           php-version: ${{ matrix.php }}
           extensions: ${{ inputs.extensions }}
-          # Always-on `composer:v2` (later steps depend on it); callers
-          # add to the list via `extra-tools`. setup-php tolerates the
-          # trailing comma when `extra-tools` is empty.
-          tools: composer:v2, ${{ inputs.extra-tools }}
+          # Always-on Composer (later steps depend on it), version chosen
+          # via `composer-version`; callers add further tools through
+          # `extra-tools`. setup-php tolerates the trailing comma when
+          # `extra-tools` is empty.
+          tools: composer:${{ inputs.composer-version }}, ${{ inputs.extra-tools }}
           ini-values: ${{ inputs.ini-values }}
           coverage: ${{ inputs.coverage }}
 
@@ -490,11 +533,51 @@ jobs:
         id: composer-cache
         run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
 
+      - name: Compute composer cache key suffix
+        id: cache-suffix
+        # Two matrix cells that install DIFFERENT dependency sets must not
+        # share one cache entry, or they evict each other on every run and
+        # the cache stops paying for itself. The suffix is derived from the
+        # two things the reusable knows change the resolved set —
+        # `dependency-versions` and the `extra-matrix` cell — so callers get
+        # per-cell caches without having to know the rule; `cache-key-suffix`
+        # only adds anything the reusable cannot see. All three inputs arrive
+        # via `env:` and are only ever read as data (no eval/source, never
+        # interpolated into this block).
+        #
+        # A default caller (highest + no extra matrix + no explicit suffix)
+        # produces an EMPTY suffix, so its cache key stays byte-identical to
+        # the pre-input key and existing caches keep hitting.
+        env:
+          DEPENDENCY_VERSIONS: ${{ inputs.dependency-versions }}
+          MATRIX_EXTRA: ${{ toJSON(matrix.extra) }}
+          CACHE_KEY_SUFFIX: ${{ inputs.cache-key-suffix }}
+        run: |
+          set -euo pipefail
+          suffix=""
+          # Only a non-default dependency set changes what gets installed.
+          if [ "${DEPENDENCY_VERSIONS:-highest}" != "highest" ] && [ -n "${DEPENDENCY_VERSIONS:-}" ]; then
+            suffix="${suffix}-${DEPENDENCY_VERSIONS}"
+          fi
+          # Hash the cell rather than embedding it: values may contain
+          # characters that are not safe in a cache key.
+          if [ "$MATRIX_EXTRA" != "{}" ]; then
+            suffix="${suffix}-$(printf '%s' "$MATRIX_EXTRA" | sha256sum | cut -c1-12)"
+          fi
+          if [ -n "$CACHE_KEY_SUFFIX" ]; then
+            suffix="${suffix}-${CACHE_KEY_SUFFIX}"
+          fi
+          echo "value=${suffix}" >> "$GITHUB_OUTPUT"
+          echo "composer cache key suffix: '${suffix}'"
+
       - name: Cache composer packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.composer-cache.outputs.dir }}
-          key: ${{ runner.os }}-php-${{ matrix.php }}-composer-${{ hashFiles(format('{0}/composer.json', inputs.working-directory), format('{0}/composer.lock', inputs.working-directory)) }}
+          # The suffix goes LAST so an empty one reproduces the historical
+          # key exactly, and so the version-level restore-keys below still
+          # match every cell as a fallback.
+          key: ${{ runner.os }}-php-${{ matrix.php }}-composer-${{ hashFiles(format('{0}/composer.json', inputs.working-directory), format('{0}/composer.lock', inputs.working-directory)) }}${{ steps.cache-suffix.outputs.value }}
           restore-keys: |
             ${{ runner.os }}-php-${{ matrix.php }}-composer-
             ${{ runner.os }}-php-${{ matrix.php }}-
@@ -613,6 +696,10 @@ jobs:
 
       - name: PHPUnit
         if: ${{ inputs.run-phpunit }}
+        # `continue-on-error` keeps the step visibly red while letting the
+        # job pass — unlike `... || true` inside phpunit-cmd, which reports
+        # success and hides that the suite failed at all.
+        continue-on-error: ${{ inputs.phpunit-continue-on-error }}
         env:
           PHPUNIT_CMD: ${{ inputs.phpunit-cmd }}
         run: bash -c "$PHPUNIT_CMD"
@@ -640,5 +727,6 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ${{ inputs.coverage-file }}
           flags: ${{ inputs.coverage-flags }}
+          name: ${{ inputs.codecov-name }}
           working-directory: ${{ inputs.working-directory }}
           fail_ci_if_error: false
