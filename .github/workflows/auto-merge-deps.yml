@@ -96,6 +96,7 @@ jobs:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
           STRATEGY_OVERRIDE: ${{ inputs.merge-strategy }}
           CHECKS_TIMEOUT_MINUTES: ${{ inputs.checks-timeout-minutes || 15 }}
         run: |
@@ -116,22 +117,52 @@ jobs:
 
           ALLOW_AUTO_MERGE=$(printf '%s' "$REPO_JSON" | jq -r '.allow_auto_merge // false')
 
+          # `--auto` is only a GATE where GitHub actually has something to hold
+          # the merge on. Native auto-merge waits for REQUIRED status checks and
+          # required reviews - not for "whatever is currently running". On a
+          # branch with none required it does not wait at all: the PR either
+          # merges the moment it is mergeable, before CI reports, or the command
+          # errors out because the PR is already in a clean state.
+          #
+          # Branching on `allow_auto_merge` alone therefore silently drops the
+          # CI gate on every repo that permits auto-merge without requiring any
+          # check - which, measured across this org on 2026-07-23, is nearly all
+          # of them (netresearch/.github included; only timetracker carried a
+          # required-status-checks rule). So establish that a real gate exists
+          # before trusting GitHub to enforce one.
+          NATIVE_GATE=false
           if [ "$ALLOW_AUTO_MERGE" = "true" ]; then
-            # GitHub queues the merge and holds it until the required checks
-            # pass. Nothing for us to wait on.
+            # Rulesets are readable with ordinary read access.
+            if RULES=$(gh api "repos/$REPO/rules/branches/$BASE_REF" 2>/dev/null); then
+              if printf '%s' "$RULES" | jq -e 'any(.[]?; .type == "required_status_checks")' >/dev/null 2>&1; then
+                NATIVE_GATE=true
+              fi
+            fi
+            # Classic branch protection needs admin rights, so this call may
+            # 403. That is fine: an unreadable protection config counts as
+            # "cannot prove a gate exists" and falls through to gating here -
+            # slower, never unsafe.
+            if [ "$NATIVE_GATE" != "true" ] && PROT=$(gh api "repos/$REPO/branches/$BASE_REF/protection" 2>/dev/null); then
+              REQ_COUNT=$(printf '%s' "$PROT" | jq '((.required_status_checks.contexts // []) + (.required_status_checks.checks // [])) | length' 2>/dev/null || echo 0)
+              if [ "${REQ_COUNT:-0}" -gt 0 ]; then
+                NATIVE_GATE=true
+              fi
+            fi
+          fi
+
+          if [ "$NATIVE_GATE" = "true" ]; then
+            echo "Base branch '$BASE_REF' has required status checks - letting GitHub hold the merge."
             gh pr merge --auto "$STRATEGY" "$PR_URL"
             exit 0
           fi
 
-          # Auto-merge is off for this repository. `gh pr merge --auto` would
-          # fail outright here — and simply dropping the flag would be worse
-          # than failing: without auto-merge there is nothing holding the
-          # merge back, so the PR would go in IMMEDIATELY, before CI has
-          # reported. So this workflow does the gating itself.
+          # Either auto-merge is disabled, or it is enabled but nothing is
+          # required on the base branch. In both cases nothing outside this job
+          # keeps an unverified dependency bump from landing, so gate here.
           #
-          # This is why repos without auto-merge used to keep a hand-rolled
-          # copy of this workflow. They no longer have to.
-          echo "Repository has auto-merge disabled — gating on the checks here."
+          # This is why repos in that state used to keep a hand-rolled copy of
+          # this workflow. They no longer have to.
+          echo "No required status checks on '$BASE_REF' (allow_auto_merge=$ALLOW_AUTO_MERGE) - gating on the checks here."
 
           DEADLINE=$(( $(date +%s) + ${CHECKS_TIMEOUT_MINUTES:-15} * 60 ))
           while :; do
