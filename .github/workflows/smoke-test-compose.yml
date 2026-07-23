@@ -1,0 +1,522 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# Reusable "Smoke-test Compose" — boot a multi-service docker compose
+# stack, wait for it to come up healthy, probe an HTTP endpoint, run a
+# caller-supplied smoke command against the running stack, and tear it
+# down. `docker compose ps -a` + `docker compose logs` are ALWAYS dumped
+# on failure, and the stack is ALWAYS torn down — including when the
+# smoke command fails.
+#
+# This is the multi-service counterpart to smoke-test-container.yml,
+# which explicitly scopes stack orchestration OUT (it builds one image
+# and runs container-structure-test against it). lint-compose.yml only
+# runs `docker compose config`; it never starts anything.
+#
+# Caller pattern (build the stack, wait for healthchecks, probe HTTP):
+#
+#   jobs:
+#     stack:
+#       uses: netresearch/.github/.github/workflows/smoke-test-compose.yml@main
+#       permissions:
+#         contents: read
+#       with:
+#         build: true
+#         env-substitutions: |
+#           MARIADB_PASSWORD=ci_placeholder
+#           MARIADB_ROOT_PASSWORD=ci_placeholder_root
+#         http-url: "http://localhost/"
+#         http-expect-status: "200 303"
+#         http-follow-redirects: false
+#         smoke-command: |
+#           docker compose exec -T database mariadb -uroot -pci_placeholder_root -e 'SHOW DATABASES;' | grep -q moodle
+#           docker compose exec -T valkey valkey-cli PING | grep -q PONG
+#
+# Caller pattern (pull published images, assert a body marker over TLS):
+#
+#   jobs:
+#     stack:
+#       uses: netresearch/.github/.github/workflows/smoke-test-compose.yml@main
+#       permissions:
+#         contents: read
+#       with:
+#         lfs: true
+#         pull-policy: always
+#         wait-timeout: 300
+#         http-url: "https://localhost/"
+#         http-insecure: true
+#         http-expect-body: "typo3"
+#
+# Minimum (compose.yml at repo root, .env.example copied if present,
+# wait for `docker compose up --wait`, then tear down):
+#
+#   jobs:
+#     stack:
+#       uses: netresearch/.github/.github/workflows/smoke-test-compose.yml@main
+#       permissions:
+#         contents: read
+#
+# DESIGN NOTES
+# ============
+# Step order is deliberate: checkout → prepare `.env` → `pre-command` →
+# `docker compose up` → HTTP probe → `smoke-command` → diagnostics on
+# failure → teardown. `pre-command` runs AFTER `.env` exists, so a caller
+# can append runtime-computed values to it (`printf 'DOCKER_UID=%s\n'
+# "$(id -u)" >> .env`) or generate the material the stack needs (self-
+# signed certs, an init script that mints local secrets).
+#
+# `env-from-example` mirrors lint-compose.yml. `env-substitutions`
+# deliberately does NOT: lint-compose only fills an EMPTY `KEY=`
+# assignment, which is enough to make interpolation parse, but a stack
+# that must actually BOOT has to override committed placeholder values
+# (`PASSWORD=CHANGE_ME`) as well. Here a pair sets or replaces the whole
+# assignment. Keys are validated as shell identifiers and `GITHUB_*` /
+# `RUNNER_*` are rejected.
+#
+# Health waiting uses compose's own `up --wait --wait-timeout`, not a
+# hand-rolled `docker inspect` poll and not `--timeout` (which is the
+# container SHUTDOWN timeout — passing it and expecting a health deadline
+# is a silent no-op). The HTTP probe is orthogonal to it: a stack whose
+# healthchecks flip late still gets a deterministic "is it actually
+# serving" assertion, and a stack with no healthchecks at all can set
+# `wait-for-healthy: false` and rely on the probe alone.
+#
+# A bare status code is not proof that the application rendered — nginx
+# happily 200s an error page — so `http-expect-body` asserts a fixed
+# marker string in the response body (`grep -iF`, never a regex, so a
+# caller marker cannot turn into a pattern).
+#
+# NOT IN SCOPE: building an image outside compose (that is
+# smoke-test-container.yml, or a `build:` section in the compose file),
+# registry authentication for private images, and browser/E2E test
+# pipelines with sharding, coverage collection and artifact upload —
+# those own too much caller-specific machinery to generalise.
+#
+# SECURITY: pinned third-party action SHAs, harden-runner, top-level
+# `permissions: {}` with least-privilege per job, `persist-credentials:
+# false` on checkout. Every caller-supplied string reaches a `run:` body
+# through `env:` and is executed via `bash -c "$VAR"` or passed as argv —
+# never interpolated into the script text (SonarCloud
+# githubactions:S7630). The single value written to `$GITHUB_ENV`
+# (`COMPOSE_FILE`) uses a random heredoc delimiter. This workflow takes
+# no secrets.
+
+name: Smoke-test Compose (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: "Runner label."
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Per-job timeout in minutes. Must exceed wait-timeout plus http-timeout plus the time the smoke command needs."
+        type: number
+        default: 30
+
+      compose-files:
+        description: "Space-separated list of compose files, applied in order (same shape as lint-compose.yml's input)."
+        type: string
+        default: "compose.yml"
+      profiles:
+        description: "Comma-separated compose profiles to activate (exported as COMPOSE_PROFILES). Empty activates no profile."
+        type: string
+        default: ""
+      services:
+        description: "Space-separated subset of services to start. Empty starts every service of the active profiles."
+        type: string
+        default: ""
+      lfs:
+        description: "Check out Git LFS objects. Needed when the stack mounts LFS-tracked fixtures or seed data."
+        type: boolean
+        default: false
+
+      env-from-example:
+        description: "Copy `.env.example` to `.env` (when the example file exists) before starting, so committed placeholders resolve."
+        type: boolean
+        default: true
+      env-substitutions:
+        description: >-
+          Newline-separated KEY=VALUE pairs written into `.env`, replacing
+          any existing assignment of the same key and appending the key if
+          it is absent. Use it to override committed placeholders
+          (CHANGE_ME) with CI-only values. Keys must match
+          ^[A-Za-z_][A-Za-z0-9_]*$; GITHUB_ and RUNNER_ prefixes are
+          rejected. Never pass a real secret here.
+        type: string
+        default: ""
+      pre-command:
+        description: "Shell command run after `.env` is prepared and before the stack starts (generate certs, seed files, run an init script). Executed via bash -c."
+        type: string
+        default: ""
+
+      build:
+        description: "Build images declared with a `build:` section before starting (`docker compose up --build`)."
+        type: boolean
+        default: false
+      pull-policy:
+        description: "Value for `docker compose up --pull` (one of: always, missing, never, build). Empty keeps compose's own default."
+        type: string
+        default: ""
+      wait-for-healthy:
+        description: "Wait for services to report running/healthy via `docker compose up --wait`. Set false for stacks without healthchecks or with one-shot services that exit."
+        type: boolean
+        default: true
+      wait-timeout:
+        description: "Seconds `docker compose up --wait` may spend waiting for the stack to become healthy."
+        type: number
+        default: 300
+
+      http-url:
+        description: "URL polled until it answers as expected. Empty (default) skips the HTTP probe entirely."
+        type: string
+        default: ""
+      http-expect-status:
+        description: "Space-separated list of acceptable HTTP status codes for the probe."
+        type: string
+        default: "200"
+      http-expect-body:
+        description: "Fixed (non-regex, case-insensitive) marker string that must appear in the probe response body. Empty checks the status code only."
+        type: string
+        default: ""
+      http-insecure:
+        description: "Pass `--insecure` to curl, for stacks serving a self-signed certificate."
+        type: boolean
+        default: false
+      http-follow-redirects:
+        description: "Follow redirects during the probe. Set false when the expected answer IS the redirect (e.g. an app that 303s to its login page)."
+        type: boolean
+        default: true
+      http-timeout:
+        description: "Seconds the HTTP probe keeps retrying (polled every 5 seconds) before failing."
+        type: number
+        default: 300
+
+      smoke-command:
+        description: >-
+          Command run against the started stack, executed via
+          `bash -eu -o pipefail -c` with COMPOSE_FILE and COMPOSE_PROFILES
+          already exported, so plain `docker compose exec -T <service> ...`
+          resolves the same stack. Because it runs under `set -euo pipefail`,
+          EACH line is an assertion: a failing `... | grep -q marker` aborts
+          the job instead of being swallowed by a later passing line. Empty
+          (default) means the boot plus probe IS the smoke test.
+        type: string
+        default: ""
+      log-tail:
+        description: "Number of log lines per service dumped on failure."
+        type: number
+        default: 200
+      diagnostics-command:
+        description: >-
+          Extra shell command run ONLY on the failure path, after the compose
+          ps/logs dump, for an app-level diagnostic the compose logs do not
+          carry (tailing an in-container application log, an in-container curl).
+          It cannot live in smoke-command: that step is skipped when the stack
+          failed to boot, which is exactly when this dump matters. Tolerant - a
+          non-zero exit is reported as a warning and never masks the real
+          failure. Empty (default) skips it.
+        type: string
+        default: ""
+
+# CALLER REQUIREMENTS
+# ===================
+# When calling this reusable workflow, the caller's job-level
+# `permissions:` block MUST grant at least this full set, otherwise
+# the run fails with `startup_failure` before any job executes
+# (GitHub rejects the workflow at startup when the reusable declares
+# a permission the caller did not grant). NOTE: setting ANY scope in a
+# `permissions:` block forces every UNLISTED scope to `none`, and a job
+# that omits `permissions:` inherits the repository default
+# (default_workflow_permissions) — so a repo hardened to `read` will
+# startup-fail here unless these scopes are granted explicitly.
+#
+#   - contents: read      — check out the compose files and build context
+#
+#   jobs:
+#     stack:
+#       uses: netresearch/.github/.github/workflows/smoke-test-compose.yml@main
+#       permissions:
+#         contents: read
+permissions: {}
+
+jobs:
+  compose-smoke:
+    name: compose stack smoke test
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Passed through as an env var (never interpolated into a run body) so
+      # every step below — including the caller's own smoke command — sees
+      # the same profile selection.
+      COMPOSE_PROFILES: ${{ inputs.profiles }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          lfs: ${{ inputs.lfs }}
+
+      - name: Resolve compose files
+        env:
+          COMPOSE_FILES: ${{ inputs.compose-files }}
+        run: |
+          set -euo pipefail
+          docker compose version
+          read -ra files <<< "$COMPOSE_FILES"
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error title=No compose files::Input 'compose-files' is empty."
+            exit 1
+          fi
+          for f in "${files[@]}"; do
+            if [ ! -f "$f" ]; then
+              echo "::error title=Compose file not found::${f}"
+              exit 1
+            fi
+          done
+          # Export the whole set once as COMPOSE_FILE so every later step —
+          # and the caller's smoke command — targets the same stack without
+          # repeating -f flags. Random heredoc delimiter because the value
+          # derives from caller input.
+          joined="$(IFS=:; printf '%s' "${files[*]}")"
+          delim="COMPOSE_FILE_$(openssl rand -hex 16)"
+          {
+            printf '%s<<%s\n' "COMPOSE_FILE" "$delim"
+            printf '%s\n' "$joined"
+            printf '%s\n' "$delim"
+          } >> "$GITHUB_ENV"
+          echo "Using compose files: ${files[*]}"
+
+      - name: Prepare .env
+        env:
+          ENV_FROM_EXAMPLE: ${{ inputs.env-from-example }}
+          ENV_SUBSTITUTIONS: ${{ inputs.env-substitutions }}
+        run: |
+          set -euo pipefail
+          if [ "$ENV_FROM_EXAMPLE" = "true" ] && [ -f .env.example ]; then
+            cp .env.example .env
+            echo "Copied .env.example -> .env"
+          fi
+          if [ -n "$ENV_SUBSTITUTIONS" ]; then
+            touch .env
+            subs_file="$(mktemp)"
+            printf '%s\n' "$ENV_SUBSTITUTIONS" > "$subs_file"
+            while IFS= read -r sub; do
+              if [ -n "$sub" ]; then
+                case "$sub" in
+                  *=*) ;;
+                  *)
+                    echo "::error title=Invalid env-substitution::Expected KEY=VALUE, got '${sub}'."
+                    exit 1
+                    ;;
+                esac
+                key="${sub%%=*}"
+                val="${sub#*=}"
+                if ! printf '%s' "$key" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*$'; then
+                  echo "::error title=Invalid env-substitution key::'${key}' is not a shell identifier."
+                  exit 1
+                fi
+                case "$key" in
+                  GITHUB_*|RUNNER_*)
+                    echo "::error title=Reserved env-substitution key::'${key}' uses a reserved prefix."
+                    exit 1
+                    ;;
+                esac
+                # The KEY goes via -v (a plain identifier, no escapes), but the
+                # VALUE goes via ENVIRON: an `awk -v v=...` assignment runs
+                # escape-sequence processing over the value, so a backslash in a
+                # generated CI credential is corrupted and a literal `\n` becomes
+                # a real newline that injects a SECOND assignment into .env. Same
+                # fix as lint-compose.yml. ENVIRON does no escape processing.
+                if printf '%s' "$val" | grep -q "$(printf '\n')"; then
+                  echo "::error title=Invalid env-substitution value::Value for '${key}' contains a newline."
+                  exit 1
+                fi
+                tmp="$(mktemp)"
+                SUBST_VALUE="$val" awk -v k="$key" '
+                  index($0, k "=") == 1 { next }
+                  { print }
+                  END { print k "=" ENVIRON["SUBST_VALUE"] }
+                ' .env > "$tmp"
+                mv "$tmp" .env
+                echo "Set ${key} in .env"
+              fi
+            done < "$subs_file"
+            rm -f "$subs_file"
+          fi
+
+      - name: Pre-command
+        if: ${{ inputs.pre-command != '' }}
+        env:
+          PRE_COMMAND: ${{ inputs.pre-command }}
+        # `-eu -o pipefail`: a multi-line pre-command must abort on the first
+        # failing line, not silently run past a failed cert/seed step and boot
+        # a half-prepared stack. Plain `bash -c` reports only the LAST line's
+        # exit status.
+        run: bash -eu -o pipefail -c "$PRE_COMMAND"
+
+      - name: Start stack
+        env:
+          BUILD: ${{ inputs.build }}
+          PULL_POLICY: ${{ inputs.pull-policy }}
+          WAIT_FOR_HEALTHY: ${{ inputs.wait-for-healthy }}
+          WAIT_TIMEOUT: ${{ inputs.wait-timeout }}
+          SERVICES: ${{ inputs.services }}
+        run: |
+          set -euo pipefail
+          args=(up --detach --remove-orphans)
+          if [ "$BUILD" = "true" ]; then
+            args+=(--build)
+          fi
+          if [ -n "$PULL_POLICY" ]; then
+            case "$PULL_POLICY" in
+              always|missing|never|build) args+=(--pull "$PULL_POLICY") ;;
+              *)
+                echo "::error title=Invalid pull-policy::Expected one of: always, missing, never, build. Got '${PULL_POLICY}'."
+                exit 1
+                ;;
+            esac
+          fi
+          if [ "$WAIT_FOR_HEALTHY" = "true" ]; then
+            # --wait-timeout is the health deadline; `up --timeout` is the
+            # container shutdown timeout and would silently do nothing here.
+            args+=(--wait --wait-timeout "$WAIT_TIMEOUT")
+          fi
+          read -ra svcs <<< "$SERVICES"
+          echo "docker compose ${args[*]} ${svcs[*]-}"
+          docker compose "${args[@]}" ${svcs[@]+"${svcs[@]}"}
+          docker compose ps -a
+
+      - name: Probe HTTP endpoint
+        if: ${{ inputs.http-url != '' }}
+        env:
+          HTTP_URL: ${{ inputs.http-url }}
+          EXPECT_STATUS: ${{ inputs.http-expect-status }}
+          EXPECT_BODY: ${{ inputs.http-expect-body }}
+          INSECURE: ${{ inputs.http-insecure }}
+          FOLLOW_REDIRECTS: ${{ inputs.http-follow-redirects }}
+          HTTP_TIMEOUT: ${{ inputs.http-timeout }}
+        run: |
+          # `defaults.run.shell: bash` makes GitHub invoke this as
+          # `bash -eo pipefail {0}`, so `-e` is ON and `set -uo pipefail` does
+          # NOT clear it. A curl failure is an expected outcome while the stack
+          # comes up, so `-e` is deliberately disabled here - without this an
+          # unguarded fallible command anywhere in the loop would abort it and
+          # turn "still booting" into an instant hard failure.
+          set +e
+          set -uo pipefail
+          read -ra want <<< "$EXPECT_STATUS"
+          if [ "${#want[@]}" -eq 0 ]; then
+            echo "::error title=No expected status::Input 'http-expect-status' is empty."
+            exit 1
+          fi
+          curl_args=(--silent --show-error --max-time 20)
+          if [ "$INSECURE" = "true" ]; then
+            curl_args+=(--insecure)
+          fi
+          if [ "$FOLLOW_REDIRECTS" = "true" ]; then
+            curl_args+=(--location)
+          fi
+          marker_note=""
+          if [ -n "$EXPECT_BODY" ]; then
+            marker_note=" with body marker '${EXPECT_BODY}'"
+          fi
+          body="$(mktemp)"
+          deadline=$(( $(date +%s) + HTTP_TIMEOUT ))
+          attempt=0
+          while :; do
+            attempt=$(( attempt + 1 ))
+            code="$(curl "${curl_args[@]}" --output "$body" --write-out '%{http_code}' "$HTTP_URL" || true)"
+            status_ok=0
+            for w in "${want[@]}"; do
+              if [ "$code" = "$w" ]; then
+                status_ok=1
+              fi
+            done
+            if [ "$status_ok" -eq 1 ]; then
+              # A status code alone is not proof the application rendered —
+              # a proxy can answer 200 with its own error page. Assert the
+              # caller's marker as a FIXED string, never a pattern.
+              if [ -z "$EXPECT_BODY" ] || grep -qiF -e "$EXPECT_BODY" "$body"; then
+                echo "Endpoint answered HTTP ${code} as expected after ${attempt} attempt(s)."
+                exit 0
+              fi
+              echo "[${attempt}] HTTP ${code} but marker not present yet; retrying in 5s"
+            else
+              echo "[${attempt}] HTTP ${code:-000} not in '${EXPECT_STATUS}'; retrying in 5s"
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error title=HTTP probe failed::${HTTP_URL} did not answer '${EXPECT_STATUS}'${marker_note} within ${HTTP_TIMEOUT}s (last status ${code:-000})."
+              echo "Last response body (first 100 lines):"
+              head -n 100 "$body" || true
+              exit 1
+            fi
+            sleep 5
+          done
+
+      - name: Smoke command
+        if: ${{ inputs.smoke-command != '' }}
+        env:
+          SMOKE_COMMAND: ${{ inputs.smoke-command }}
+        # `-eu -o pipefail` so EACH line of a multi-line smoke command is an
+        # assertion. With a plain `bash -c` only the last line's exit status
+        # reaches the step, so a failed `... | grep -q marker` on an earlier
+        # line is silently swallowed as long as the final line passes - a smoke
+        # test that cannot detect the failures it exists to detect.
+        run: bash -eu -o pipefail -c "$SMOKE_COMMAND"
+
+      - name: Dump stack diagnostics
+        # Runs whenever anything above failed — a stack smoke test that
+        # fails without logs is not actionable.
+        if: ${{ failure() }}
+        env:
+          LOG_TAIL: ${{ inputs.log-tail }}
+          DIAGNOSTICS_COMMAND: ${{ inputs.diagnostics-command }}
+        run: |
+          # `-e` is inherited from GitHub's `bash -eo pipefail` invocation and
+          # is deliberately disabled: every command here is best-effort, and one
+          # failing diagnostic must not stop the rest from being collected.
+          set +e
+          set -uo pipefail
+          echo "::group::docker compose ps -a"
+          docker compose ps -a
+          echo "::endgroup::"
+          echo "::group::docker compose logs (last ${LOG_TAIL} lines per service)"
+          docker compose logs --no-color --timestamps --tail "$LOG_TAIL"
+          echo "::endgroup::"
+          if [ -n "$DIAGNOSTICS_COMMAND" ]; then
+            # App-level dump (e.g. tailing an in-container log). Runs ONLY on the
+            # failure path, which is exactly when it matters - so it cannot live
+            # in smoke-command, whose success() guard skips it when the stack
+            # failed to boot. Tolerant: a broken hook must not mask the real
+            # failure.
+            echo "::group::diagnostics-command"
+            bash -c "$DIAGNOSTICS_COMMAND" || echo "::warning title=diagnostics-command failed::the caller diagnostics hook exited non-zero"
+            echo "::endgroup::"
+          fi
+
+      - name: Tear down stack
+        # `always()` so the stack goes away even when the smoke command,
+        # the probe or the boot itself failed. A teardown problem is
+        # reported as a warning rather than failing the job, so it can
+        # never mask the real failure above.
+        if: ${{ always() }}
+        run: |
+          # `-e` inherited from GitHub's bash invocation, disabled here so a
+          # teardown error becomes a warning instead of a job failure that could
+          # mask the real failure above.
+          set +e
+          set -uo pipefail
+          docker compose down --volumes --remove-orphans --timeout 30 \
+            || echo "::warning title=Teardown incomplete::docker compose down reported an error."
