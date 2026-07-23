@@ -91,6 +91,36 @@ on:
           repo. Its deployment protection rules gate the PyPI upload.
         type: string
         default: "pypi"
+      release-files:
+        description: >-
+          Glob of built files to attach to the GitHub Release, resolved
+          against the downloaded `dist` artifact (e.g. `dist/*`). Empty
+          (default) creates a Release with notes but no attached
+          distributions - which is what every caller migrating off
+          softprops/action-gh-release would silently lose, since that action
+          is normally configured with `files: dist/*`.
+        type: string
+        default: ""
+      prerelease:
+        description: >-
+          How the Release is marked. `auto` (default) sets --prerelease when
+          the tag contains alpha, beta, rc, dev or a PEP 440 style .devN /
+          preN segment; `true` always marks it a prerelease; `false` never
+          does. `auto` exists because a project on 2.0.0-alpha.6 publishes
+          prerelease tags as its normal case, and a plain
+          `gh release create --generate-notes` would announce every one of
+          them as a full release.
+        type: string
+        default: "auto"
+      check-cmd:
+        description: >-
+          Validation command run against the built distribution before it is
+          published or attached, executed via bash -c in the build job
+          (e.g. `python -m twine check dist/*`). Empty (default) skips it.
+          python-build.yml has the same input; without it here, dist
+          validation is silently dropped on the release path.
+        type: string
+        default: ""
 
 # CALLER REQUIREMENTS
 # ===================
@@ -162,6 +192,12 @@ jobs:
           BUILD_CMD: ${{ inputs.build-cmd }}
         run: bash -c "$BUILD_CMD"
 
+      - name: Check distribution
+        if: ${{ inputs.check-cmd != '' }}
+        env:
+          CHECK_CMD: ${{ inputs.check-cmd }}
+        run: bash -c "$CHECK_CMD"
+
       - name: Upload distribution artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -224,8 +260,58 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Download distribution artifact
+        if: ${{ inputs.release-files != '' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-        run: gh release create "$TAG" --generate-notes
+          RELEASE_FILES: ${{ inputs.release-files }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+
+          case "$PRERELEASE" in
+            true)  MARK=--prerelease ;;
+            false) MARK= ;;
+            auto)
+              # Tag-driven, covering both the delimited spellings
+              # (-alpha.6, -rc1, .dev3, -pre) and the attached PEP 440 forms
+              # (1.2.3a1, 1.2.3rc2). The markers must be delimited or follow a
+              # digit: a bare substring test would read "rc" out of
+              # v1.0.0-darcy and "dev" out of v1.0.0-developer and mark a
+              # final release as a prerelease.
+              if printf '%s' "$TAG" | grep -qiE '([.-](alpha|beta|rc|dev|pre)([.-]?[0-9]+)?($|[.+-]))|([0-9](a|b|c|rc)[0-9]+($|[.+-]))'; then
+                MARK=--prerelease
+              else
+                MARK=
+              fi
+              ;;
+            *)
+              echo "::error title=Invalid prerelease::Expected 'auto', 'true' or 'false', got '${PRERELEASE}'."
+              exit 1
+              ;;
+          esac
+          if [ -n "$MARK" ]; then
+            echo "Marking $TAG as a prerelease."
+          fi
+
+          # Word-split the glob into argv so a caller cannot inject shell
+          # metacharacters; the shell still expands the glob against dist/.
+          FILES=()
+          if [ -n "$RELEASE_FILES" ]; then
+            # shellcheck disable=SC2206
+            FILES=( $RELEASE_FILES )
+            if [ ${#FILES[@]} -eq 0 ] || [ ! -e "${FILES[0]}" ]; then
+              echo "::error title=No release files::release-files '${RELEASE_FILES}' matched nothing."
+              exit 1
+            fi
+            echo "Attaching ${#FILES[@]} file(s) to the release."
+          fi
+
+          gh release create "$TAG" --generate-notes ${MARK:+"$MARK"} ${FILES[@]+"${FILES[@]}"}
