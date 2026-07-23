@@ -231,6 +231,27 @@ on:
         type: string
         default: ""
 
+      symfony-require:
+        description: >-
+          Pin the whole Symfony stack to one major by installing symfony/flex
+          globally and exporting SYMFONY_REQUIRE. Empty (default) skips it.
+          A value of the form MATRIX_<NAME> is resolved at runtime from the
+          `extra-matrix` key of that name, so one caller job can cover several
+          Symfony versions.
+        required: false
+        type: string
+        default: ""
+      extra-matrix:
+        description: >-
+          JSON array of objects adding a SECOND matrix dimension alongside
+          `php-versions`, so a library testing N framework versions x M PHP
+          versions needs one caller job instead of N. Each object's keys are
+          exported to the later steps as MATRIX_<KEY> (upper-cased). The
+          default single empty object yields exactly one cell per PHP version,
+          i.e. the historical behaviour.
+        required: false
+        type: string
+        default: "[{}]"
       # PHPStan
       run-phpstan:
         description: "Run PHPStan static analysis."
@@ -340,7 +361,7 @@ permissions: {}
 
 jobs:
   php-ci:
-    name: PHP ${{ matrix.php }}
+    name: PHP ${{ matrix.php }}${{ toJSON(matrix.extra) != '{}' && format(' · {0}', join(matrix.extra.*, ' ')) || '' }}
     # Skip the job only when every feature is off. `composer-validate`,
     # `pre-install-cmd`, `upload-coverage-codecov`, and
     # `upload-coverage-artifact` are intentionally part of the gate so a
@@ -366,6 +387,7 @@ jobs:
       fail-fast: false
       matrix:
         php: ${{ fromJSON(inputs.php-versions) }}
+        extra: ${{ fromJSON(inputs.extra-matrix) }}
     defaults:
       run:
         working-directory: ${{ inputs.working-directory }}
@@ -391,6 +413,57 @@ jobs:
           tools: composer:v2, ${{ inputs.extra-tools }}
           ini-values: ${{ inputs.ini-values }}
           coverage: ${{ inputs.coverage }}
+
+      - name: Export extra matrix values
+        # Publishes each `extra-matrix` key to the later steps as MATRIX_<KEY>.
+        # MATRIX_EXTRA is only ever read as data (jq over an env var, never
+        # eval/source, never interpolated into this run block), so a value
+        # containing $(id), backticks or ; stays a literal string. Every name
+        # is MATRIX_-prefixed, so no key can shadow GITHUB_*/RUNNER_*. Values
+        # use a random heredoc delimiter so none can forge $GITHUB_ENV lines.
+        if: ${{ toJSON(matrix.extra) != '{}' }}
+        env:
+          MATRIX_EXTRA: ${{ toJSON(matrix.extra) }}
+        run: |
+          delimiter="MATRIX_EOF_${RANDOM}${RANDOM}${RANDOM}${RANDOM}"
+          while IFS= read -r key; do
+            if ! printf '%s' "$key" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*$'; then
+              echo "::error title=Invalid extra-matrix key::'$key' is not a valid identifier"
+              exit 1
+            fi
+            name="MATRIX_$(printf '%s' "$key" | tr '[:lower:]' '[:upper:]')"
+            value="$(printf '%s' "$MATRIX_EXTRA" | jq -r --arg k "$key" '.[$k] | if type == "string" then . else tojson end')"
+            {
+              printf '%s<<%s\n' "$name" "$delimiter"
+              printf '%s\n' "$value"
+              printf '%s\n' "$delimiter"
+            } >> "$GITHUB_ENV"
+            echo "exported $name"
+          done < <(printf '%s' "$MATRIX_EXTRA" | jq -r 'keys_unsorted[]')
+
+      - name: Set up Symfony Flex
+        # Canonical Symfony CI recipe: flex + SYMFONY_REQUIRE pins the whole
+        # stack, including transitive symfony/* packages, to one major.
+        # MATRIX_<NAME> is resolved from the export above via indirect
+        # expansion after the name is validated against a strict pattern; the
+        # value never reaches eval.
+        if: ${{ inputs.symfony-require != '' }}
+        env:
+          SYMFONY_REQUIRE_INPUT: ${{ inputs.symfony-require }}
+        run: |
+          value="$SYMFONY_REQUIRE_INPUT"
+          if printf '%s' "$value" | grep -qE '^MATRIX_[A-Z0-9_]+$'; then
+            resolved="${!value-}"
+            if [ -z "$resolved" ]; then
+              echo "::error title=Invalid symfony-require::'$value' is empty - is that key present in extra-matrix?"
+              exit 1
+            fi
+            value="$resolved"
+          fi
+          composer global config --no-plugins allow-plugins.symfony/flex true
+          composer global require --no-progress --no-scripts --no-plugins symfony/flex
+          printf 'SYMFONY_REQUIRE=%s\n' "$value" >> "$GITHUB_ENV"
+          echo "SYMFONY_REQUIRE=$value"
 
       - name: Validate composer.json and composer.lock
         if: ${{ inputs.composer-validate }}
