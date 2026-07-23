@@ -438,7 +438,14 @@ jobs:
         if: ${{ inputs.npm-version != '' }}
         env:
           NPM_VERSION: ${{ inputs.npm-version }}
-        run: npm install -g "npm@${NPM_VERSION}"
+        # `--ignore-scripts`: npm's own install has no lifecycle scripts we
+        # need, and running them from a freshly fetched global package is the
+        # exposure S6505 flags. `--no-fund --no-audit` keep the step quiet.
+        # The version is pinned by the caller via NPM_VERSION (a concrete
+        # release such as 11.5.1, or a channel like `latest`); there is no
+        # lockfile for a global CLI tool, so S8543 is inherent to installing
+        # one and is accepted here rather than worked around.
+        run: npm install -g --ignore-scripts --no-fund --no-audit "npm@${NPM_VERSION}"
 
       # The tag/manifest version checks run BEFORE install and build: a bad tag
       # is caught in seconds, and for version-source: tag the manifest is
