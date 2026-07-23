@@ -18,7 +18,7 @@
 # │ entered there. `id-token: write` has to be granted by the caller    │
 # │ job as well as by the job in here (both are checked).               │
 # │ Requires npm CLI >= 11.5.1 on Node >= 22.14. The bundled npm of     │
-# │ Node 24 satisfies this; on Node 22 set `npm-version: latest`. The   │
+# │ Node 24 (the default) satisfies this out of the box. An older Node  │
 # │ publish job enforces this floor before publishing via OIDC.         │
 # └─────────────────────────────────────────────────────────────────────┘
 #
@@ -58,7 +58,7 @@
 #   CONCURRENCY: exactly one call per tag may set `create-github-release: true`;
 #   every sibling call MUST set it to false, or two release jobs race the same
 #   tag (the `gh release view` guard is TOCTOU). On Node 22 the bundled npm
-#   predates OIDC Trusted Publishing, so set `npm-version: latest` (or Node 24).
+#   predates OIDC Trusted Publishing, so keep node-version at 24 (the default).
 #
 #   jobs:
 #     sdk:
@@ -148,18 +148,6 @@ on:
         description: "Bun version passed to oven-sh/setup-bun (when package-manager is bun)."
         type: string
         default: "latest"
-      npm-version:
-        description: >-
-          npm CLI version installed globally before publishing (e.g. `latest`).
-          Empty (default) keeps the npm bundled with `node-version`. Set this
-          when `node-version` is 22 or older and you publish via OIDC: npm 10
-          has no Trusted Publishing support, so the publish would fall back to
-          token auth and fail without a secret. The publish job hard-fails up
-          front when the resolved npm is older than 11.5.1 and no NPM_TOKEN is
-          supplied.
-        type: string
-        default: ""
-
       install-cmd:
         description: "Dependency install command, executed at the repository root. Empty skips the install."
         type: string
@@ -434,19 +422,6 @@ jobs:
         if: ${{ inputs.package-manager == 'pnpm' || inputs.package-manager == 'yarn' }}
         run: corepack enable
 
-      - name: Install npm CLI
-        if: ${{ inputs.npm-version != '' }}
-        env:
-          NPM_VERSION: ${{ inputs.npm-version }}
-        # `--ignore-scripts`: npm's own install has no lifecycle scripts we
-        # need, and running them from a freshly fetched global package is the
-        # exposure S6505 flags. `--no-fund --no-audit` keep the step quiet.
-        # The version is pinned by the caller via NPM_VERSION (a concrete
-        # release such as 11.5.1, or a channel like `latest`); there is no
-        # lockfile for a global CLI tool, so S8543 is inherent to installing
-        # one and is accepted here rather than worked around.
-        run: npm install -g --ignore-scripts --no-fund --no-audit "npm@${NPM_VERSION}"
-
       # The tag/manifest version checks run BEFORE install and build: a bad tag
       # is caught in seconds, and for version-source: tag the manifest is
       # rewritten before the build so the built artifact carries the tag's
@@ -545,13 +520,13 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "${NPM_TOKEN:-}" ]; then
-            echo "NPM_TOKEN supplied; publishing via token auth, OIDC npm-version floor does not apply."
+            echo "NPM_TOKEN supplied; publishing via token auth, the OIDC npm floor does not apply."
             exit 0
           fi
           NPM_V="$(npm --version)"
           MIN="11.5.1"
           if [ "$(printf '%s\n%s\n' "$MIN" "$NPM_V" | sort -V | head -n1)" != "$MIN" ]; then
-            echo "::error title=npm too old for OIDC::npm $NPM_V has no Trusted Publishing support (need >= $MIN). Set npm-version: latest or raise node-version to 24."
+            echo "::error title=npm too old for OIDC::npm $NPM_V on this runner has no Trusted Publishing support (need >= $MIN). Raise node-version to 24 (its bundled npm satisfies this), or supply an NPM_TOKEN secret to publish via token auth."
             exit 1
           fi
           echo "npm $NPM_V supports OIDC Trusted Publishing (>= $MIN)."
