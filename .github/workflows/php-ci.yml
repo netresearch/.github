@@ -429,6 +429,13 @@ jobs:
         # `composer install` path unchanged. `lowest` resolves the floor
         # of every constraint instead. Anything else is a caller typo and
         # must fail loudly rather than silently installing the highest set.
+        #
+        # SonarCloud githubactions:S8546 ("dependency versions are not
+        # predictable, use a lock-file enforcing command") fires on the
+        # `composer update` below. That is inherent to floor testing:
+        # ignoring the lock file IS the feature on this branch, and it is
+        # opt-in — the default `highest` path still runs the lock-file
+        # enforcing `composer install`. Accept the finding, don't "fix" it.
         run: |
           read -ra COMPOSER_INSTALL_ARGS <<< "$COMPOSER_ARGS"
           case "${DEPENDENCY_VERSIONS:-highest}" in
