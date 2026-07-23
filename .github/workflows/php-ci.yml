@@ -264,6 +264,15 @@ on:
           A value of the form MATRIX_<NAME> is resolved at runtime from the
           `extra-matrix` key of that name, so one caller job can cover several
           Symfony versions.
+
+          DO NOT combine this with `dependency-versions: lowest` on an old
+          Composer. flex filters the solver pool on PRE_POOL_CREATE, and
+          under Composer 2.2 with --prefer-lowest that drops the fixed
+          platform package, so the resolve dies with "Fixed package
+          ext-<name> <version> was not added to solver pool". It is also
+          pointless there: --prefer-lowest already resolves the floor of the
+          composer.json constraint, which is the oldest Symfony the package
+          claims to support. Leave this empty on floor-testing cells.
         required: false
         type: string
         default: ""
