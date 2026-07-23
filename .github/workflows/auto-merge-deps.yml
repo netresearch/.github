@@ -20,6 +20,17 @@ on:
           auto-detector can't see.
         type: string
         default: ""
+      checks-timeout-minutes:
+        description: >-
+          How long to wait for the other checks when the repository has
+          auto-merge DISABLED and this workflow therefore has to gate the
+          merge itself (see the note on the merge step). Ignored on repos
+          with auto-merge enabled, where GitHub does the waiting. Capped by
+          the job's own 30-minute timeout, so values above 25 have no
+          effect. Timing out is not a failure: the PR stays approved and
+          open for a human.
+        type: number
+        default: 15
 
 # CALLER REQUIREMENTS
 # ===================
@@ -45,7 +56,11 @@ jobs:
   auto-merge:
     name: Auto-merge dependency PRs
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Hard ceiling for the check-gating path below. GitHub expressions
+    # have no arithmetic, so this cannot be derived from the input —
+    # it is a fixed bound and `checks-timeout-minutes` above 25 has no
+    # effect. The auto-merge path finishes in seconds either way.
+    timeout-minutes: 30
     if: github.event.pull_request.user.login == 'dependabot[bot]' || github.event.pull_request.user.login == 'renovate[bot]'
     permissions:
       contents: write
@@ -82,15 +97,78 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           STRATEGY_OVERRIDE: ${{ inputs.merge-strategy }}
+          CHECKS_TIMEOUT_MINUTES: ${{ inputs.checks-timeout-minutes || 15 }}
         run: |
+          set -euo pipefail
+
+          REPO_JSON=$(gh api "repos/$REPO")
+
           if [[ -n "$STRATEGY_OVERRIDE" ]]; then
             STRATEGY="--$STRATEGY_OVERRIDE"
           else
-            STRATEGY=$(gh api "repos/$REPO" --jq '
+            STRATEGY=$(printf '%s' "$REPO_JSON" | jq -r '
               if .allow_squash_merge then "--squash"
               elif .allow_merge_commit then "--merge"
               elif .allow_rebase_merge then "--rebase"
               else "--squash" end')
           fi
           echo "Using merge strategy: $STRATEGY"
-          gh pr merge --auto "$STRATEGY" "$PR_URL"
+
+          ALLOW_AUTO_MERGE=$(printf '%s' "$REPO_JSON" | jq -r '.allow_auto_merge // false')
+
+          if [ "$ALLOW_AUTO_MERGE" = "true" ]; then
+            # GitHub queues the merge and holds it until the required checks
+            # pass. Nothing for us to wait on.
+            gh pr merge --auto "$STRATEGY" "$PR_URL"
+            exit 0
+          fi
+
+          # Auto-merge is off for this repository. `gh pr merge --auto` would
+          # fail outright here — and simply dropping the flag would be worse
+          # than failing: without auto-merge there is nothing holding the
+          # merge back, so the PR would go in IMMEDIATELY, before CI has
+          # reported. So this workflow does the gating itself.
+          #
+          # This is why repos without auto-merge used to keep a hand-rolled
+          # copy of this workflow. They no longer have to.
+          echo "Repository has auto-merge disabled — gating on the checks here."
+
+          DEADLINE=$(( $(date +%s) + ${CHECKS_TIMEOUT_MINUTES:-15} * 60 ))
+          while :; do
+            if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+              echo "::notice::Checks did not all pass within ${CHECKS_TIMEOUT_MINUTES} minutes — approved, not merged."
+              exit 0
+            fi
+
+            # This job's own check must be excluded, or it waits on itself
+            # forever. Match on the job name declared at the top of this file.
+            #
+            # A FAILED API call must never be read as "no checks": falling back
+            # to an empty array here would make the two counters below zero and
+            # the loop would conclude everything passed and merge an unverified
+            # PR on a transient error. Retry until the deadline instead.
+            if ! CHECKS=$(gh pr checks "$PR_URL" --json name,state \
+              --jq '[.[] | select(.name != "Auto-merge dependency PRs")]' 2>/dev/null); then
+              echo "Could not read the check list — retrying."
+              sleep 15
+              continue
+            fi
+
+            FAILED=$(printf '%s' "$CHECKS" | jq '[.[] | select(.state == "FAILURE" or .state == "ERROR" or .state == "TIMED_OUT" or .state == "CANCELLED")] | length')
+            PENDING=$(printf '%s' "$CHECKS" | jq '[.[] | select(.state == "PENDING" or .state == "QUEUED" or .state == "IN_PROGRESS" or .state == "WAITING")] | length')
+
+            if [ "$FAILED" != "0" ]; then
+              echo "::notice::${FAILED} check(s) failed — approved, not merged."
+              exit 0
+            fi
+
+            if [ "$PENDING" = "0" ]; then
+              echo "All checks passed."
+              break
+            fi
+
+            echo "Waiting for ${PENDING} check(s)..."
+            sleep 15
+          done
+
+          gh pr merge "$STRATEGY" "$PR_URL"
