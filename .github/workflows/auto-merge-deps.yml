@@ -172,14 +172,21 @@ jobs:
             fi
 
             # This job's own check must be excluded, or it waits on itself
-            # forever. Match on the job name declared at the top of this file.
+            # forever. Match by SUFFIX, not equality: when this reusable is
+            # called as a job, the check surfaces as "<caller-job> / Auto-merge
+            # dependency PRs" (the caller's job id/name is prefixed), so an
+            # exact `!= "Auto-merge dependency PRs"` never matches and the loop
+            # counts its own IN_PROGRESS check as pending — waiting on itself
+            # until the timeout, and orphaning every bot PR in a repo without
+            # required checks. `endswith` matches whether the caller prefixes it
+            # or not (this reusable owns the job name that forms the suffix).
             #
             # A FAILED API call must never be read as "no checks": falling back
             # to an empty array here would make the two counters below zero and
             # the loop would conclude everything passed and merge an unverified
             # PR on a transient error. Retry until the deadline instead.
             if ! CHECKS=$(gh pr checks "$PR_URL" --json name,state \
-              --jq '[.[] | select(.name != "Auto-merge dependency PRs")]' 2>/dev/null); then
+              --jq '[.[] | select((.name | endswith("Auto-merge dependency PRs")) | not)]' 2>/dev/null); then
               echo "Could not read the check list — retrying."
               sleep 15
               continue
