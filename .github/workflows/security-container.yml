@@ -198,7 +198,7 @@ jobs:
         # the moment the merge completes, racing with codeql-action/upload-sarif
         # and producing a guaranteed `ref ... not found` failure.
         if: always() && inputs.upload-sarif && github.event_name != 'merge_group' && hashFiles('trivy-results.sarif') != ''
-        uses: github/codeql-action/upload-sarif@e0647621c2984b5ed2f768cb892365bf2a616ad1 # v4.37.2
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         with:
           sarif_file: trivy-results.sarif
           category: ${{ inputs.sarif-category }}
