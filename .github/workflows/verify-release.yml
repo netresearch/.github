@@ -1,0 +1,268 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# Reusable "Verify Release" — re-verifies a published release the way an
+# outside user would: download the assets, check every signature, check the
+# checksums, check the build provenance. It executes the instructions our
+# SECURITY.md hands to users, so those instructions cannot rot unnoticed.
+#
+# Caller pattern (after the release workflow has published):
+#
+#   jobs:
+#     verify:
+#       uses: netresearch/.github/.github/workflows/verify-release.yml@main
+#       with:
+#         tag: ${{ github.ref_name }}
+#       permissions:
+#         contents: read
+#         attestations: read
+#         id-token: write
+#
+# DESIGN NOTES
+# ============
+# The accounting is arithmetic, not pattern-based. Every downloaded file is
+# classified into exactly one bucket and the buckets must sum to the total:
+#
+#   total = payloads + bundles
+#   every payload has <payload>.sigstore.json, and every bundle has its payload
+#   checksums file lists exactly the payloads minus itself
+#
+# A name-pattern *exemption* ("skip files matching X") is what lets an asset
+# slip through unverified — a new artifact kind gets added, matches nothing,
+# and is silently not checked. Classifying by suffix is fine as long as the
+# counts have to add up, because then an unclassified file breaks the sum
+# instead of being ignored.
+#
+# SECURITY: pinned action SHAs, harden-runner, read-only permissions,
+# `persist-credentials: false` on checkout. Caller-supplied inputs reach
+# `run:` steps only through `env:`.
+
+name: Verify Release (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag to verify (e.g. v1.2.3)."
+        type: string
+        required: true
+      identity-regexp:
+        description: "cosign --certificate-identity-regexp for the signing workflow."
+        type: string
+        default: "^https://github\\.com/netresearch/\\.github/\\.github/workflows/release-go-app\\.yml@"
+      oidc-issuer:
+        description: "cosign --certificate-oidc-issuer."
+        type: string
+        default: "https://token.actions.githubusercontent.com"
+      signer-workflow:
+        description: "gh attestation verify --signer-workflow value."
+        type: string
+        default: "netresearch/.github/.github/workflows/release-go-app.yml"
+      checksums-file:
+        description: "Name of the checksum manifest among the release assets."
+        type: string
+        default: "checksums.txt"
+      sbom-suffix:
+        description: "Suffix marking SBOM payloads. They are checksummed and signed like binaries but carry no build provenance."
+        type: string
+        default: ".spdx.json"
+      container-image:
+        description: "Optional container reference to verify (e.g. ghcr.io/org/app:v1.2.3). Empty skips the container check."
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      attestations: read
+      id-token: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Download release assets
+        env:
+          TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          gh release download "$TAG" --repo "$REPO" --dir release-assets
+          echo "Downloaded $(find release-assets -type f | wc -l) assets for $TAG."
+
+      - name: Account for every asset
+        env:
+          CHECKSUMS_FILE: ${{ inputs.checksums-file }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+
+          mapfile -t ALL < <(find . -maxdepth 1 -type f -printf '%f\n' | sort)
+          BUNDLES=(); PAYLOADS=()
+          for f in "${ALL[@]}"; do
+            case "$f" in
+              *.sigstore.json) BUNDLES+=("$f") ;;
+              *)               PAYLOADS+=("$f") ;;
+            esac
+          done
+
+          echo "total=${#ALL[@]} payloads=${#PAYLOADS[@]} bundles=${#BUNDLES[@]}"
+
+          rc=0
+
+          # Every payload must be signed.
+          for p in "${PAYLOADS[@]}"; do
+            [ -f "${p}.sigstore.json" ] || { echo "::error::no signature bundle for asset '$p'"; rc=1; }
+          done
+
+          # Every bundle must belong to a payload — an orphan means an asset was
+          # removed but its signature was not, or the naming changed.
+          for b in "${BUNDLES[@]}"; do
+            [ -f "${b%.sigstore.json}" ] || { echo "::error::signature bundle '$b' has no matching asset"; rc=1; }
+          done
+
+          # The sum has to close. If it does not, some file is neither a payload
+          # with a bundle nor a bundle with a payload, and the two loops above
+          # did not describe the release.
+          if [ "$(( ${#PAYLOADS[@]} + ${#BUNDLES[@]} ))" -ne "${#ALL[@]}" ]; then
+            echo "::error::asset accounting does not close: ${#PAYLOADS[@]} + ${#BUNDLES[@]} != ${#ALL[@]}"
+            rc=1
+          fi
+
+          [ -f "$CHECKSUMS_FILE" ] || { echo "::error::checksum manifest '$CHECKSUMS_FILE' is not among the assets"; rc=1; }
+
+          # The manifest must cover exactly the payloads except itself. A missing
+          # entry means an artifact nobody can checksum; an extra one means the
+          # manifest promises a file the release does not ship.
+          if [ -f "$CHECKSUMS_FILE" ]; then
+            printf '%s\n' "${PAYLOADS[@]}" | grep -vxF "$CHECKSUMS_FILE" | sort > /tmp/expected.txt
+            awk '{print $2}' "$CHECKSUMS_FILE" | sort > /tmp/listed.txt
+            if ! diff -u /tmp/expected.txt /tmp/listed.txt > /tmp/manifest.diff; then
+              echo "::error::$CHECKSUMS_FILE does not list exactly the shipped payloads:"
+              cat /tmp/manifest.diff
+              rc=1
+            fi
+          fi
+
+          exit "$rc"
+
+      - name: Verify every signature
+        env:
+          IDENTITY_REGEXP: ${{ inputs.identity-regexp }}
+          OIDC_ISSUER: ${{ inputs.oidc-issuer }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+          rc=0
+          n=0
+          for b in *.sigstore.json; do
+            payload="${b%.sigstore.json}"
+            if cosign verify-blob \
+                 --bundle "$b" \
+                 --certificate-identity-regexp "$IDENTITY_REGEXP" \
+                 --certificate-oidc-issuer "$OIDC_ISSUER" \
+                 "$payload" > /dev/null 2>&1; then
+              n=$((n + 1))
+            else
+              echo "::error::signature verification failed for '$payload'"
+              cosign verify-blob \
+                --bundle "$b" \
+                --certificate-identity-regexp "$IDENTITY_REGEXP" \
+                --certificate-oidc-issuer "$OIDC_ISSUER" \
+                "$payload" || true
+              rc=1
+            fi
+          done
+          echo "Verified $n signature(s)."
+          # A release with no bundles at all would otherwise pass this step
+          # silently, so require at least one.
+          [ "$n" -gt 0 ] || { echo "::error::no signature bundles were verified"; rc=1; }
+          exit "$rc"
+
+      - name: Verify checksums
+        env:
+          CHECKSUMS_FILE: ${{ inputs.checksums-file }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+          # No --ignore-missing: the previous step already proved the manifest
+          # and the shipped payloads are the same set, so every listed file must
+          # be present and match.
+          sha256sum -c "$CHECKSUMS_FILE"
+
+      - name: Verify build provenance
+        env:
+          SIGNER_WORKFLOW: ${{ inputs.signer-workflow }}
+          SBOM_SUFFIX: ${{ inputs.sbom-suffix }}
+          CHECKSUMS_FILE: ${{ inputs.checksums-file }}
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+          rc=0
+          n=0
+          for f in *; do
+            case "$f" in
+              *.sigstore.json)   continue ;;
+              *"$SBOM_SUFFIX")   continue ;;
+              "$CHECKSUMS_FILE") continue ;;
+            esac
+            if gh attestation verify "$f" \
+                 --owner "$OWNER" \
+                 --signer-workflow "$SIGNER_WORKFLOW" > /dev/null 2>&1; then
+              n=$((n + 1))
+            else
+              echo "::error::build provenance verification failed for '$f'"
+              gh attestation verify "$f" --owner "$OWNER" \
+                --signer-workflow "$SIGNER_WORKFLOW" || true
+              rc=1
+            fi
+          done
+          echo "Verified provenance for $n artifact(s)."
+          [ "$n" -gt 0 ] || { echo "::error::no artifacts carried build provenance"; rc=1; }
+          exit "$rc"
+
+      - name: Verify container image
+        if: ${{ inputs.container-image != '' }}
+        env:
+          IMAGE: ${{ inputs.container-image }}
+          IDENTITY_REGEXP: ${{ inputs.identity-regexp }}
+          OIDC_ISSUER: ${{ inputs.oidc-issuer }}
+        run: |
+          set -euo pipefail
+          cosign verify "$IMAGE" \
+            --certificate-identity-regexp "$IDENTITY_REGEXP" \
+            --certificate-oidc-issuer "$OIDC_ISSUER" > /dev/null
+          echo "Container signature verified: $IMAGE"
+
+      - name: Summary
+        if: always()
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          {
+            echo "## Release verification — ${TAG}"
+            echo ""
+            echo "Signatures, checksums and build provenance were re-checked"
+            echo "against the published assets using the commands SECURITY.md"
+            echo "gives to users."
+          } >> "$GITHUB_STEP_SUMMARY"
