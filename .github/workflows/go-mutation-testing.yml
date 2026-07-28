@@ -67,6 +67,10 @@ on:
         description: "Mutation-score threshold (percent). Used for the PR comment emoji / warning — does not fail the job."
         type: number
         default: 60
+      pre-build-cmd:
+        description: "Shell command to run before gremlins, for projects whose Go code depends on generated sources (e.g. 'templ generate')."
+        type: string
+        default: ""
 
 # CALLER REQUIREMENTS
 # ===================
@@ -124,6 +128,15 @@ jobs:
           GREMLINS_VERSION: ${{ inputs.gremlins-version }}
         run: |
           go install "github.com/go-gremlins/gremlins/cmd/gremlins@${GREMLINS_VERSION}"
+
+      - name: Pre-build command
+        if: ${{ inputs.pre-build-cmd != '' }}
+        env:
+          PRE_BUILD_CMD: ${{ inputs.pre-build-cmd }}
+        run: |
+          # Strict mode: surface caller script errors instead of silently
+          # continuing into a run whose packages cannot compile.
+          bash -euo pipefail -c "$PRE_BUILD_CMD"
 
       - name: Run mutation tests (full)
         if: ${{ !inputs.diff-only }}
@@ -186,6 +199,26 @@ jobs:
             echo "Testing only changed files for faster feedback."
           } >> "$GITHUB_STEP_SUMMARY"
         continue-on-error: true
+
+      - name: Fail on packages gremlins could not build
+        if: always()
+        run: |
+          # A package gremlins cannot compile is reported as "[build failed]"
+          # and then left out of the score, so the job publishes a number
+          # computed over a subset and still passes — which reads as
+          # "mutation testing covered the project" when it did not.
+          #
+          # This is a separate step on purpose: both run steps carry
+          # continue-on-error so a low score does not fail the workflow, and
+          # that would swallow this check too. A missing score is a threshold
+          # question; a package that does not compile is not.
+          [ -f mutation-output.txt ] || exit 0
+          grep -q '\[build failed\]' mutation-output.txt || exit 0
+          echo "::error::gremlins could not build these packages, so they are"
+          echo "::error::absent from the mutation score:"
+          grep '\[build failed\]' mutation-output.txt
+          echo "If the Go code depends on generated sources, pass pre-build-cmd."
+          exit 1
 
       - name: Upload mutation reports
         if: always()
