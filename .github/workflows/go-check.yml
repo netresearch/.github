@@ -408,10 +408,11 @@ jobs:
           VULNCHECK_VERSION: ${{ inputs.govulncheck-version }}
           STRICT: ${{ inputs.govulncheck-strict }}
         # govulncheck's exit code is the source of truth (0 = clean, 3 =
-        # vulns). When `govulncheck-strict: false` (default), findings log
-        # but don't break CI — keeps the migration story clean while Go
-        # stdlib upgrades land separately. Flip to true once the repo's on
-        # a patched toolchain.
+        # vulns). Strict is the default: a finding fails the job. Setting
+        # `govulncheck-strict: false` downgrades it to a warning, which is
+        # occasionally the right call while a stdlib fix waits on a toolchain
+        # bump — but it makes the check unable to report red, so treat it as a
+        # temporary, visible exception rather than a resting state.
         run: |
           set +e
           go run "golang.org/x/vuln/cmd/govulncheck@${VULNCHECK_VERSION}" ./...
