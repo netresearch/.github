@@ -115,12 +115,17 @@ on:
         type: string
         default: "latest"
       govulncheck-strict:
-        description: "Fail the job when govulncheck finds a vulnerability. Default false — findings are surfaced in the log so follow-up work (typically a Go toolchain bump) can be tracked separately without blocking unrelated PRs."
+        description: "Fail the job when govulncheck finds a vulnerability. Default true. Set false only to land an unrelated change while a known finding awaits a toolchain bump — a scan that cannot fail is not a gate."
         type: boolean
-        default: false
+        default: true
 
       enable-gosec:
         description: "Enable the gosec security-scan job (SARIF uploaded)."
+        type: boolean
+        default: true
+
+      gosec-strict:
+        description: "Fail the job when gosec finds an issue. Default true. The SARIF upload runs regardless (if: always()), so the Security tab is populated either way; this only controls whether a finding can block a merge."
         type: boolean
         default: true
 
@@ -465,10 +470,12 @@ jobs:
       - name: Run gosec
         uses: securego/gosec@45b083a0cb42119d61b1e0e364d8c62c68f6f5cd # master
         with:
-          # `-no-fail` keeps the CI step green; findings flow into the
-          # Security tab via the SARIF upload below. Treat code scanning
-          # (not workflow-log grep) as the source of truth for gosec.
-          args: "-no-fail -fmt sarif -out gosec-results.sarif ./..."
+          # Findings fail the job unless gosec-strict is set false. They also
+          # reach the Security tab through the SARIF upload below, which runs
+          # on failure too (if: always()), so making this blocking costs no
+          # visibility. `-no-fail` used to be passed here unconditionally,
+          # which left a required status check that could never report red.
+          args: ${{ inputs.gosec-strict && '-fmt sarif -out gosec-results.sarif ./...' || '-no-fail -fmt sarif -out gosec-results.sarif ./...' }}
 
       - name: Upload gosec SARIF
         # Skip on merge_group: the gh-readonly-queue/<branch>/pr-NNN-<sha> ref is
