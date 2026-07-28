@@ -203,10 +203,13 @@ jobs:
       - name: Fail on packages gremlins could not build
         if: always()
         run: |
-          # A package gremlins cannot compile is reported as "[build failed]"
-          # and then left out of the score, so the job publishes a number
-          # computed over a subset and still passes — which reads as
-          # "mutation testing covered the project" when it did not.
+          # gremlins compiles the packages it mutates. One it cannot build is
+          # reported as "[build failed]", and gremlins then stops without
+          # printing "Test efficacy" at all — so the score extraction above
+          # falls back to 0 and the job passes publishing 0%, which reads as a
+          # measured result rather than a run that never happened. Observed in
+          # ldap-manager, whose generated templ sources left three packages
+          # unbuildable: every run reported 0% and stayed green.
           #
           # This is a separate step on purpose: both run steps carry
           # continue-on-error so a low score does not fail the workflow, and
