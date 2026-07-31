@@ -15,6 +15,7 @@
 #   on:
 #     pull_request:
 #       types: [opened, synchronize, reopened]
+#     merge_group:          # required if the branch runs a merge queue — see below
 #   permissions: {}
 #   jobs:
 #     dco:
@@ -22,6 +23,21 @@
 #       permissions:
 #         contents: read
 #         pull-requests: read
+#
+# MERGE QUEUES
+# ============
+# Add the `merge_group:` trigger whenever this check is *required* on a branch
+# that runs a merge queue. GitHub treats a required check that has not reported
+# by `check_response_timeout_minutes` as failed and ejects the entry, so a
+# pull_request-only caller stalls every queue entry until the queue is unusable.
+#
+# This is also why the probot DCO app cannot be a required check on a
+# queue-enabled branch: it reacts to pull_request events only and has no way to
+# report on a merge group. A repo that wants both a queue and an enforced DCO
+# has to move to this workflow.
+#
+# On a merge_group event the commits come from the group's base..head range
+# rather than from a PR, which covers exactly the commits about to land.
 #
 # WHAT IS CHECKED
 # ===============
@@ -91,18 +107,43 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
           EXEMPT_LOGINS: ${{ inputs.exempt-logins }}
           ALLOW_UNMATCHED: ${{ inputs.allow-unmatched-sign-off }}
         run: |
           set -euo pipefail
 
-          if [ -z "${PR_NUMBER:-}" ] || [ "${PR_NUMBER}" = "null" ]; then
-            echo "::error title=DCO::This reusable must be called from a pull_request event; no PR number in the event payload."
-            exit 1
-          fi
-
-          echo "Checking sign-off on the commits of ${REPO}#${PR_NUMBER}"
+          # Which API lists the commits to check depends on the event.
+          #
+          # merge_group carries no PR number, so a repo whose branch requires
+          # this check AND runs a merge queue needs the second path: a required
+          # check that cannot report on merge_group is treated as failed once
+          # check_response_timeout_minutes elapses, and every queue entry is
+          # ejected. Both SHAs come from the event payload and are compared
+          # server-side; nothing is checked out.
+          case "$EVENT_NAME" in
+            merge_group)
+              if [ -z "${MG_BASE_SHA:-}" ] || [ -z "${MG_HEAD_SHA:-}" ]; then
+                echo "::error title=DCO::merge_group event without base_sha/head_sha in the payload."
+                exit 1
+              fi
+              COMMITS_API="repos/${REPO}/compare/${MG_BASE_SHA}...${MG_HEAD_SHA}"
+              COMMITS_JQ='.commits[]'
+              echo "Checking sign-off on ${REPO} merge group ${MG_BASE_SHA:0:12}..${MG_HEAD_SHA:0:12}"
+              ;;
+            *)
+              if [ -z "${PR_NUMBER:-}" ] || [ "${PR_NUMBER}" = "null" ]; then
+                echo "::error title=DCO::This reusable must be called from a pull_request or merge_group event; no PR number in the event payload."
+                exit 1
+              fi
+              COMMITS_API="repos/${REPO}/pulls/${PR_NUMBER}/commits"
+              COMMITS_JQ='.[]'
+              echo "Checking sign-off on the commits of ${REPO}#${PR_NUMBER}"
+              ;;
+          esac
           echo "Exempt logins: ${EXEMPT_LOGINS:-(none)}"
           echo "Require author match: $([ "$ALLOW_UNMATCHED" = "true" ] && echo no || echo yes)"
           echo ""
@@ -173,8 +214,8 @@ jobs:
               echo "  FAIL  ${SHORT}  sign-off (${SIGNOFF_ONE_LINE}) matches neither author (${AUTHOR_LC}) nor committer (${COMMITTER_LC})"
               FAILED=$((FAILED + 1))
             fi
-          done < <(gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/commits" --jq '
-            .[] | [ .sha
+          done < <(gh api --paginate "$COMMITS_API" --jq "$COMMITS_JQ"'
+            | [ .sha
                   , (.parents | length | tostring)
                   , (.author.login // "")
                   , (.commit.author.email // "")
