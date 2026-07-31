@@ -116,6 +116,11 @@ on:
         required: false
         type: string
         default: ""
+      lfs:
+        description: "Checkout Git LFS objects (actions/checkout `lfs`). Enable when the build context needs LFS-tracked files (assets, fixtures)."
+        required: false
+        type: boolean
+        default: false
       platforms:
         description: "Comma-separated platforms. When set, overrides every target's platform via `--set *.platform=...`. Empty = use the platforms declared in the bake file."
         required: false
@@ -223,6 +228,16 @@ on:
         required: false
         type: string
         default: ""
+    secrets:
+      COMPOSER_AUTH:
+        description: >-
+          Optional Composer auth JSON forwarded to the bake build as the
+          COMPOSER_AUTH env var, so the build can resolve private composer
+          sources (e.g. github-oauth + git.netresearch.de http-basic). The
+          caller assembles the JSON and may interpolate github.actor,
+          secrets.GITHUB_TOKEN and any private-registry token. Empty when
+          unset - the previous behavior.
+        required: false
     outputs:
       bake-metadata:
         description: "Raw docker/bake-action metadata JSON (per-target build results incl. containerimage.digest)."
@@ -259,6 +274,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref || github.ref }}
+          lfs: ${{ inputs.lfs }}
           persist-credentials: false
 
       - name: Run pre-build command
@@ -385,6 +401,10 @@ jobs:
       - name: Build with Bake
         id: bake
         uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
+        env:
+          # Forwarded to the build so HCL/Dockerfile can auth private composer /
+          # registry sources. Empty when the caller passes no COMPOSER_AUTH.
+          COMPOSER_AUTH: ${{ secrets.COMPOSER_AUTH }}
         with:
           source: ${{ inputs.bake-source }}
           files: ${{ steps.files.outputs.files }}
