@@ -1,0 +1,125 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# Reusable "GitHub Release" — creates (or updates) a GitHub Release with
+# caller-supplied notes using the runner's built-in `gh` CLI, so image repos
+# stop pinning a third-party release action inline. Pairs with
+# build-container-bake.yml (which builds/signs/pushes the image) — this leaf
+# only publishes the Release entry. Using `gh release` keeps zero external
+# actions in the chain (zizmor: prefer the runner's gh CLI over an action).
+#
+# The `body` is caller-rendered markdown (docker pull / cosign verify / SBOM
+# instructions with version + image interpolated). It is prepended ahead of
+# GitHub's auto-generated notes when `generate-release-notes` is on.
+#
+# Caller pattern (after a build-container-bake job):
+#
+#   jobs:
+#     build:
+#       uses: netresearch/.github/.github/workflows/build-container-bake.yml@main
+#       ...
+#     release:
+#       needs: build
+#       uses: netresearch/.github/.github/workflows/gh-release-image.yml@main
+#       permissions:
+#         contents: write
+#       with:
+#         make-latest: ${{ needs.build.outputs.is_newest }}
+#         body: |
+#           ## Container image
+#           docker pull ghcr.io/owner/img:${{ github.ref_name }}
+
+name: GitHub Release (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      body:
+        description: "Release notes markdown, prepended ahead of the auto-generated notes. Caller-rendered."
+        required: false
+        type: string
+        default: ""
+      generate-release-notes:
+        description: "Auto-generate categorized notes (gh release --generate-notes)."
+        required: false
+        type: boolean
+        default: true
+      make-latest:
+        description: "Mark this release 'Latest'. 'true' or 'false' — pass 'false' for a backport release."
+        required: false
+        type: string
+        default: "true"
+      tag-name:
+        description: "Tag for the release. Empty = the pushed tag (GITHUB_REF_NAME)."
+        required: false
+        type: string
+        default: ""
+      files:
+        description: "Space-separated globs of assets to attach. Empty = none."
+        required: false
+        type: string
+        default: ""
+      runs-on:
+        description: "Runner label."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+
+permissions: {}
+
+jobs:
+  release:
+    name: GitHub Release
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      contents: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_BODY: ${{ inputs.body }}
+          TAG_INPUT: ${{ inputs.tag-name }}
+          MAKE_LATEST: ${{ inputs.make-latest }}
+          GENERATE_NOTES: ${{ inputs.generate-release-notes }}
+          FILES: ${{ inputs.files }}
+        run: |
+          set -euo pipefail
+          TAG="${TAG_INPUT:-$GITHUB_REF_NAME}"
+
+          latest_flag="--latest"
+          if [ "$MAKE_LATEST" != "true" ]; then
+            latest_flag="--latest=false"
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" "$latest_flag"
+          else
+            create_args=( "$TAG" --title "$TAG" "$latest_flag" )
+            if [ "$GENERATE_NOTES" = "true" ]; then
+              create_args+=( --generate-notes )
+            else
+              create_args+=( --notes "" )
+            fi
+            gh release create "${create_args[@]}"
+          fi
+
+          # Prepend the caller's body ahead of the (auto-generated) notes.
+          if [ -n "${RELEASE_BODY:-}" ]; then
+            current="$(gh release view "$TAG" --json body --jq .body)"
+            {
+              printf '%s\n\n' "$RELEASE_BODY"
+              printf '%s' "$current"
+            } > "$RUNNER_TEMP/notes.md"
+            gh release edit "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
+          fi
+
+          # Attach assets, if any.
+          if [ -n "${FILES:-}" ]; then
+            # shellcheck disable=SC2086
+            gh release upload "$TAG" $FILES --clobber
+          fi
