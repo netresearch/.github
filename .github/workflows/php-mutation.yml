@@ -1,0 +1,110 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# Reusable "PHP Mutation Testing" — runs Infection (or any composer mutation
+# script) on one PHP version with coverage, so the pinned actions
+# (harden-runner, checkout, setup-php) are maintained centrally instead of in
+# a repo-local mutation.yml. Mutation testing is not part of the shared CI
+# matrix (it needs coverage and runs on a single PHP version), hence a
+# dedicated leaf rather than a ci.yml stage.
+#
+# Caller pattern:
+#
+#   name: Mutation Testing
+#   on:
+#     pull_request:
+#     push:
+#       branches: [main]
+#   jobs:
+#     mutation:
+#       uses: netresearch/.github/.github/workflows/php-mutation.yml@main
+#       permissions:
+#         contents: read
+#       with:
+#         php-version: '8.3'
+
+name: PHP Mutation Testing (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      php-version:
+        description: "PHP version to run mutation testing on."
+        required: false
+        type: string
+        default: "8.3"
+      php-extensions:
+        description: "PHP extensions to install (shivammathur/setup-php `extensions`)."
+        required: false
+        type: string
+        default: ""
+      coverage:
+        description: "Coverage driver for setup-php (mutation testing needs one): xdebug or pcov."
+        required: false
+        type: string
+        default: "xdebug"
+      mutation-command:
+        description: "Mutation command (default auto-detects composer ci:mutation:ci / ci:test:php:mutation / infection)."
+        required: false
+        type: string
+        default: ""
+      runs-on:
+        description: "Runner label."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Per-job timeout in minutes."
+        required: false
+        type: number
+        default: 15
+
+permissions: {}
+
+jobs:
+  mutation:
+    name: Mutation Testing (PHP ${{ inputs.php-version }})
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: ${{ inputs.php-version }}
+          extensions: ${{ inputs.php-extensions }}
+          tools: composer:v2
+          coverage: ${{ inputs.coverage }}
+
+      - name: Install dependencies
+        run: |
+          composer config --no-plugins audit.block-insecure false
+          composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Run mutation testing
+        env:
+          MUTATION_COMMAND: ${{ inputs.mutation-command }}
+        run: |
+          SCRIPTS=$(composer run-script --list 2>/dev/null || true)
+          if [[ -n "$MUTATION_COMMAND" ]]; then
+            bash -euo pipefail -c "$MUTATION_COMMAND"
+          elif echo "$SCRIPTS" | grep -q 'ci:mutation:ci'; then
+            composer ci:mutation:ci
+          elif echo "$SCRIPTS" | grep -q 'ci:test:php:mutation'; then
+            composer ci:test:php:mutation
+          elif echo "$SCRIPTS" | grep -q 'infection'; then
+            composer infection
+          else
+            echo "::error::No mutation script found. Add ci:mutation:ci to composer scripts or set mutation-command."
+            exit 1
+          fi
