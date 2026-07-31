@@ -58,7 +58,7 @@ on:
         description: "Visual-regression test command (run via bash -c in working-directory)."
         required: false
         type: string
-        default: "npx playwright test"
+        default: "./node_modules/.bin/playwright test"
       browsers:
         description: "Playwright browsers to install (space-separated)."
         required: false
@@ -126,9 +126,11 @@ jobs:
         working-directory: ${{ inputs.working-directory }}
         env:
           BROWSERS: ${{ inputs.browsers }}
+        # Use the locally installed binary (from the install step) rather than
+        # npx, which could fetch a package on demand and run lifecycle scripts.
         run: |
           # shellcheck disable=SC2086
-          npx playwright install --with-deps $BROWSERS
+          ./node_modules/.bin/playwright install --with-deps $BROWSERS
 
       - name: Download built site
         if: ${{ inputs.artifact-name != '' }}
