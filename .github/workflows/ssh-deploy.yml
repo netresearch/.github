@@ -1,0 +1,142 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# Reusable "SSH Deploy" — runs a remote command over SSH via
+# appleboy/ssh-action, so the pinned action revision is maintained centrally
+# instead of in every deploy workflow. Satisfies the "actions live only in
+# shared workflows" policy for repos that deploy over SSH (e.g. typo3-demo).
+#
+# Per-deploy values reach the remote host through the optional `ENV_VARS`
+# secret (newline KEY=VALUE pairs). Each VALUE is registered with
+# `::add-mask::` and exported to $GITHUB_ENV, then forwarded to the remote
+# host via appleboy's `envs` input — list the same KEYs in `env-names`.
+# Non-secret values (e.g. a workflow_dispatch input) can travel the same way;
+# masking a non-secret value is harmless.
+#
+# SECURITY: pinned action SHA, harden-runner, least-privilege permissions.
+# Secret values are masked before they touch $GITHUB_ENV, and the only step
+# that runs after the export is the deploy itself. The remote `script` is
+# passed to the action verbatim (appleboy runs it on the remote host, not on
+# the runner).
+#
+# NOT CI-verifiable: this drives a real deployment against a live host
+# (`environment:` gates it). Validate a consumer switch by triggering the
+# deploy manually once, not by a PR check.
+#
+# Caller pattern (typo3-demo update deploy):
+#
+#   jobs:
+#     deploy:
+#       uses: netresearch/.github/.github/workflows/ssh-deploy.yml@main
+#       permissions:
+#         contents: read
+#       with:
+#         environment: production
+#         env-names: TYPO3_DOMAIN,MARIADB_PASSWORD
+#         script: |
+#           cd /opt/typo3-demo
+#           git pull --ff-only
+#           git lfs pull
+#           make up
+#       secrets:
+#         SSH_HOST: ${{ secrets.HETZNER_SSH_HOST }}
+#         SSH_USER: ${{ secrets.HETZNER_SSH_USER }}
+#         SSH_KEY: ${{ secrets.HETZNER_SSH_KEY }}
+#         ENV_VARS: |
+#           TYPO3_DOMAIN=${{ secrets.TYPO3_DOMAIN }}
+#           MARIADB_PASSWORD=${{ secrets.MARIADB_PASSWORD }}
+
+name: SSH Deploy (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      script:
+        description: "Shell script executed on the remote host by appleboy/ssh-action."
+        required: true
+        type: string
+      env-names:
+        description: >-
+          Comma-separated names of the exported env vars to forward to the
+          remote host (appleboy `envs`). Must match KEYs in the ENV_VARS
+          secret. Empty forwards nothing.
+        required: false
+        type: string
+        default: ""
+      environment:
+        description: "GitHub deployment environment for the job (gates protection rules / environment secrets)."
+        required: false
+        type: string
+        default: "production"
+      runs-on:
+        description: "Runner label."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      command-timeout:
+        description: "appleboy/ssh-action command_timeout (e.g. 10m, 30m)."
+        required: false
+        type: string
+        default: "10m"
+    secrets:
+      SSH_HOST:
+        description: "Target host."
+        required: true
+      SSH_USER:
+        description: "SSH username."
+        required: true
+      SSH_KEY:
+        description: "SSH private key."
+        required: true
+      ENV_VARS:
+        description: >-
+          Optional newline KEY=VALUE pairs. Each VALUE is masked and exported
+          to $GITHUB_ENV, then forwarded to the remote host via `env-names`.
+        required: false
+
+permissions: {}
+
+jobs:
+  deploy:
+    name: Deploy over SSH
+    runs-on: ${{ inputs.runs-on }}
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Export deploy env vars
+        env:
+          ENV_VARS: ${{ secrets.ENV_VARS }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ENV_VARS:-}" ]; then
+            exit 0
+          fi
+          while IFS= read -r line || [ -n "$line" ]; do
+            if [ -z "$line" ]; then
+              continue
+            fi
+            case "$line" in
+              *=*) ;;
+              *) continue ;;
+            esac
+            key=${line%%=*}
+            val=${line#*=}
+            printf '::add-mask::%s\n' "$val"
+            printf '%s=%s\n' "$key" "$val" >> "$GITHUB_ENV"
+          done <<< "$ENV_VARS"
+
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          envs: ${{ inputs.env-names }}
+          command_timeout: ${{ inputs.command-timeout }}
+          script: ${{ inputs.script }}
