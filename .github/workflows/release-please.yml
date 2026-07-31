@@ -1,0 +1,70 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# Reusable "Release Please" — runs googleapis/release-please-action to create
+# version-bump PRs with changelogs from conventional commits, so the pinned
+# action revision is maintained centrally instead of in every consumer repo.
+#
+# By default it does NOT create GitHub releases or tags (skip-github-release:
+# true) — the netresearch node convention signs the tag locally and pushes it,
+# which then triggers the tag-based publish workflow (node-release.yml).
+#
+# Caller pattern (node package):
+#
+#   name: Release Please
+#   on:
+#     push:
+#       branches: [main]
+#   jobs:
+#     release-please:
+#       uses: netresearch/.github/.github/workflows/release-please.yml@main
+#       permissions:
+#         contents: write
+#         pull-requests: write
+
+name: Release Please (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      release-type:
+        description: "release-please release-type (node, php, python, simple, ...)."
+        required: false
+        type: string
+        default: "node"
+      skip-github-release:
+        description: "Skip creating the GitHub release/tag (version-PR + changelog only)."
+        required: false
+        type: boolean
+        default: true
+    outputs:
+      release-created:
+        description: "'true' when release-please created a release (only when skip-github-release is false)."
+        value: ${{ jobs.release-please.outputs.release-created }}
+      tag-name:
+        description: "The created tag name, when a release was created."
+        value: ${{ jobs.release-please.outputs.tag-name }}
+
+permissions: {}
+
+jobs:
+  release-please:
+    name: Release Please
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release-created: ${{ steps.release.outputs.release_created }}
+      tag-name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5
+        with:
+          release-type: ${{ inputs.release-type }}
+          skip-github-release: ${{ inputs.skip-github-release }}
