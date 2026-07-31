@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Netresearch DTT GmbH
 #
-# Reusable "GitHub Release" — creates a GitHub Release with caller-supplied
-# notes via softprops/action-gh-release, so the pinned action is maintained
-# centrally instead of in every image repo's release workflow. Pairs with
+# Reusable "GitHub Release" — creates (or updates) a GitHub Release with
+# caller-supplied notes using the runner's built-in `gh` CLI, so image repos
+# stop pinning a third-party release action inline. Pairs with
 # build-container-bake.yml (which builds/signs/pushes the image) — this leaf
-# only publishes the Release entry.
+# only publishes the Release entry. Using `gh release` keeps zero external
+# actions in the chain (zizmor: prefer the runner's gh CLI over an action).
 #
 # The `body` is caller-rendered markdown (docker pull / cosign verify / SBOM
-# instructions with the version + image interpolated) and is passed through
-# `env` rather than expanded into the action input directly.
+# instructions with version + image interpolated). It is prepended ahead of
+# GitHub's auto-generated notes when `generate-release-notes` is on.
 #
 # Caller pattern (after a build-container-bake job):
 #
@@ -34,27 +35,27 @@ on:
   workflow_call:
     inputs:
       body:
-        description: "Release notes markdown, prepended to the auto-generated notes. Caller-rendered."
+        description: "Release notes markdown, prepended ahead of the auto-generated notes. Caller-rendered."
         required: false
         type: string
         default: ""
       generate-release-notes:
-        description: "Let GitHub auto-generate categorized notes (softprops `generate_release_notes`)."
+        description: "Auto-generate categorized notes (gh release --generate-notes)."
         required: false
         type: boolean
         default: true
       make-latest:
-        description: "Mark this release 'Latest': 'true', 'false' or 'legacy'. Pass 'false' for backport releases."
+        description: "Mark this release 'Latest'. 'true' or 'false' — pass 'false' for a backport release."
         required: false
         type: string
         default: "true"
       tag-name:
-        description: "Tag for the release. Empty = the pushed tag (github.ref)."
+        description: "Tag for the release. Empty = the pushed tag (GITHUB_REF_NAME)."
         required: false
         type: string
         default: ""
       files:
-        description: "Newline- or comma-separated globs of assets to attach. Empty = none."
+        description: "Space-separated globs of assets to attach. Empty = none."
         required: false
         type: string
         default: ""
@@ -78,13 +79,47 @@ jobs:
         with:
           egress-policy: audit
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+      - name: Create or update GitHub Release
         env:
+          GH_TOKEN: ${{ github.token }}
           RELEASE_BODY: ${{ inputs.body }}
-        with:
-          body: ${{ env.RELEASE_BODY }}
-          generate_release_notes: ${{ inputs.generate-release-notes }}
-          make_latest: ${{ inputs.make-latest }}
-          tag_name: ${{ inputs.tag-name }}
-          files: ${{ inputs.files }}
+          TAG_INPUT: ${{ inputs.tag-name }}
+          MAKE_LATEST: ${{ inputs.make-latest }}
+          GENERATE_NOTES: ${{ inputs.generate-release-notes }}
+          FILES: ${{ inputs.files }}
+        run: |
+          set -euo pipefail
+          TAG="${TAG_INPUT:-$GITHUB_REF_NAME}"
+
+          latest_flag="--latest"
+          if [ "$MAKE_LATEST" != "true" ]; then
+            latest_flag="--latest=false"
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" "$latest_flag"
+          else
+            create_args=( "$TAG" --title "$TAG" "$latest_flag" )
+            if [ "$GENERATE_NOTES" = "true" ]; then
+              create_args+=( --generate-notes )
+            else
+              create_args+=( --notes "" )
+            fi
+            gh release create "${create_args[@]}"
+          fi
+
+          # Prepend the caller's body ahead of the (auto-generated) notes.
+          if [ -n "${RELEASE_BODY:-}" ]; then
+            current="$(gh release view "$TAG" --json body --jq .body)"
+            {
+              printf '%s\n\n' "$RELEASE_BODY"
+              printf '%s' "$current"
+            } > "$RUNNER_TEMP/notes.md"
+            gh release edit "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
+          fi
+
+          # Attach assets, if any.
+          if [ -n "${FILES:-}" ]; then
+            # shellcheck disable=SC2086
+            gh release upload "$TAG" $FILES --clobber
+          fi
