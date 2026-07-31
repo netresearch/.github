@@ -1,0 +1,90 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# Reusable "GitHub Release" — creates a GitHub Release with caller-supplied
+# notes via softprops/action-gh-release, so the pinned action is maintained
+# centrally instead of in every image repo's release workflow. Pairs with
+# build-container-bake.yml (which builds/signs/pushes the image) — this leaf
+# only publishes the Release entry.
+#
+# The `body` is caller-rendered markdown (docker pull / cosign verify / SBOM
+# instructions with the version + image interpolated) and is passed through
+# `env` rather than expanded into the action input directly.
+#
+# Caller pattern (after a build-container-bake job):
+#
+#   jobs:
+#     build:
+#       uses: netresearch/.github/.github/workflows/build-container-bake.yml@main
+#       ...
+#     release:
+#       needs: build
+#       uses: netresearch/.github/.github/workflows/gh-release-image.yml@main
+#       permissions:
+#         contents: write
+#       with:
+#         make-latest: ${{ needs.build.outputs.is_newest }}
+#         body: |
+#           ## Container image
+#           docker pull ghcr.io/owner/img:${{ github.ref_name }}
+
+name: GitHub Release (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      body:
+        description: "Release notes markdown, prepended to the auto-generated notes. Caller-rendered."
+        required: false
+        type: string
+        default: ""
+      generate-release-notes:
+        description: "Let GitHub auto-generate categorized notes (softprops `generate_release_notes`)."
+        required: false
+        type: boolean
+        default: true
+      make-latest:
+        description: "Mark this release 'Latest': 'true', 'false' or 'legacy'. Pass 'false' for backport releases."
+        required: false
+        type: string
+        default: "true"
+      tag-name:
+        description: "Tag for the release. Empty = the pushed tag (github.ref)."
+        required: false
+        type: string
+        default: ""
+      files:
+        description: "Newline- or comma-separated globs of assets to attach. Empty = none."
+        required: false
+        type: string
+        default: ""
+      runs-on:
+        description: "Runner label."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+
+permissions: {}
+
+jobs:
+  release:
+    name: GitHub Release
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      contents: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        env:
+          RELEASE_BODY: ${{ inputs.body }}
+        with:
+          body: ${{ env.RELEASE_BODY }}
+          generate_release_notes: ${{ inputs.generate-release-notes }}
+          make_latest: ${{ inputs.make-latest }}
+          tag_name: ${{ inputs.tag-name }}
+          files: ${{ inputs.files }}
