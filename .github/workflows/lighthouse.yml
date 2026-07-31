@@ -1,0 +1,92 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# Reusable "Lighthouse CI" — runs Lighthouse against a PREVIOUSLY BUILT site
+# artifact (from pages-build.yml) rather than rebuilding, so the pinned
+# actions (checkout, download-artifact, lighthouse-ci-action) live centrally.
+#
+# The caller's pages-build job uploads the site as an artifact; this leaf
+# downloads it into `static-dir` (which must match the lighthouserc
+# `staticDistDir` subtree) and runs lighthouse-ci-action against it.
+#
+# Caller pattern:
+#
+#   jobs:
+#     build:
+#       uses: netresearch/.github/.github/workflows/pages-build.yml@main
+#       with: { build-command: ..., artifact-path: site/_site }
+#     lighthouse:
+#       needs: build
+#       uses: netresearch/.github/.github/workflows/lighthouse.yml@main
+#       permissions: { contents: read }
+#       with:
+#         static-dir: .lhci-site/my-project   # lighthouserc staticDistDir + base path
+#         config-path: lighthouserc.json
+
+name: Lighthouse CI (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      artifact-name:
+        description: "Name of the built-site artifact to download (from pages-build)."
+        required: false
+        type: string
+        default: "github-pages-site"
+      static-dir:
+        description: "Directory to extract the site into — must match the lighthouserc staticDistDir subtree (e.g. .lhci-site/<project> when URLs carry a base path)."
+        required: false
+        type: string
+        default: ".lhci-site"
+      config-path:
+        description: "Path to the Lighthouse CI config."
+        required: false
+        type: string
+        default: "lighthouserc.json"
+      upload-artifacts:
+        description: "lighthouse-ci-action uploadArtifacts."
+        required: false
+        type: boolean
+        default: true
+      temporary-public-storage:
+        description: "lighthouse-ci-action temporaryPublicStorage."
+        required: false
+        type: boolean
+        default: true
+      runs-on:
+        description: "Runner label."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+
+permissions: {}
+
+jobs:
+  lighthouse:
+    name: Lighthouse CI
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download built site
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ inputs.static-dir }}
+
+      - name: Lighthouse CI
+        uses: treosh/lighthouse-ci-action@3e7e23fb74242897f95c0ba9cabad3d0227b9b18 # 12.6.2
+        with:
+          configPath: ${{ inputs.config-path }}
+          uploadArtifacts: ${{ inputs.upload-artifacts }}
+          temporaryPublicStorage: ${{ inputs.temporary-public-storage }}
