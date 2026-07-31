@@ -132,11 +132,17 @@ jobs:
           done <<< "$ENV_VARS"
 
       - name: Deploy over SSH
+        # The caller-provided script is routed through env (DEPLOY_SCRIPT)
+        # rather than expanded directly into the action input, per the
+        # "never interpolate caller shell into a step" policy (zizmor
+        # template-injection). appleboy runs it on the remote host.
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          DEPLOY_SCRIPT: ${{ inputs.script }}
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_KEY }}
           envs: ${{ inputs.env-names }}
           command_timeout: ${{ inputs.command-timeout }}
-          script: ${{ inputs.script }}
+          script: ${{ env.DEPLOY_SCRIPT }}
