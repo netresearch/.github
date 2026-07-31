@@ -174,6 +174,16 @@ on:
         required: false
         type: string
         default: "24"
+      setup-bun:
+        description: "Install Bun (oven-sh/setup-bun) before the build. Combine with setup-node when a bun-driven build also needs Node.js."
+        required: false
+        type: boolean
+        default: false
+      bun-version:
+        description: "Bun version when `setup-bun` is enabled (oven-sh/setup-bun `bun-version`)."
+        required: false
+        type: string
+        default: "latest"
       pre-build-command:
         description: >-
           Optional command run after toolchain setup and before
@@ -277,6 +287,12 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ inputs.node-version }}
+
+      - name: Set up Bun
+        if: ${{ inputs.setup-bun }}
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ inputs.bun-version }}
 
       - name: Run pre-build command
         if: ${{ inputs.pre-build-command != '' }}
