@@ -51,7 +51,8 @@ netresearch/.github (org-wide)
 ├── dependency-review.yml    ← runs on ALL repos automatically (org-wide default)
 ├── auto-merge-deps.yml      ← reusable, called by repos
 ├── codeql.yml               ← reusable
-├── gitleaks.yml             ← reusable (secret scanning)
+├── gitleaks.yml             ← reusable (secret scanning, betterleaks)
+├── zizmor.yml               ← reusable (GitHub Actions workflow SAST, report-only)
 ├── node-audit.yml           ← reusable (Node.js dependency audit)
 ├── scorecard.yml            ← reusable (OpenSSF Scorecard)
 ├── greetings.yml            ← reusable
