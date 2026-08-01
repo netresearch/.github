@@ -27,8 +27,8 @@
 #       secrets:
 #         CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 #
-# SECURITY: secrets are forwarded explicitly (CODECOV_TOKEN, GITLEAKS_LICENSE),
-# never via `secrets: inherit`. Composed first-party reusables track `@main`
+# SECURITY: secrets are forwarded explicitly (CODECOV_TOKEN), never via
+# `secrets: inherit`. Composed first-party reusables track `@main`
 # by policy (see .github/zizmor.yml); third-party actions inside those leaves
 # are SHA-pinned.
 
@@ -91,7 +91,7 @@ on:
         type: boolean
         default: true
       enable-gitleaks:
-        description: "Run the gitleaks secret-scanning job. Disable where a GITLEAKS_LICENSE is unavailable."
+        description: "Run the secret-scanning job. Named `gitleaks` for backwards compatibility; the scan itself runs betterleaks, which needs no license."
         type: boolean
         default: true
       enable-test:
@@ -128,7 +128,7 @@ on:
         description: "Codecov upload token. Required for private repositories when `coverage-upload` is true."
         required: false
       GITLEAKS_LICENSE:
-        description: "gitleaks-action license key (required for org repositories). Forwarded to the gitleaks job."
+        description: "Deprecated: no longer used or forwarded (secret scanning runs on betterleaks, which is OSS). Accepted for backwards compatibility with callers that still pass it."
         required: false
 
 # CALLER REQUIREMENTS
@@ -229,8 +229,6 @@ jobs:
     permissions:
       contents: read
       security-events: write
-    secrets:
-      GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 
   dependency-review:
     name: Dependency Review
