@@ -36,11 +36,9 @@
 #         lint-compose: true
 #         enable-smoke-test: true
 #         smoke-image-tag: my-app:ci
-#       secrets:
-#         GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 #
-# SECURITY: secrets are forwarded explicitly (GITLEAKS_LICENSE), never via
-# `secrets: inherit`. Composed first-party reusables track `@main` by policy
+# SECURITY: secrets are never forwarded via `secrets: inherit`; any secret a
+# leaf needs is passed explicitly. Composed first-party reusables track `@main` by policy
 # (see .github/zizmor.yml); third-party actions inside those leaves are
 # SHA-pinned.
 
@@ -149,7 +147,7 @@ on:
         default: "CRITICAL,HIGH"
     secrets:
       GITLEAKS_LICENSE:
-        description: "Deprecated / accepted for backwards compatibility (betterleaks needs no license). Forwarded to the gitleaks job."
+        description: "Deprecated: no longer used or forwarded (betterleaks is OSS and needs no license). Accepted for backwards compatibility with callers that still pass it."
         required: false
 
 # CALLER REQUIREMENTS
@@ -164,8 +162,8 @@ on:
 # `permissions:` block forces every UNLISTED scope to `none`, and a job that
 # omits `permissions:` inherits the repository default
 # (default_workflow_permissions) — so a repo hardened to `read` will
-# startup-fail here unless these scopes are granted explicitly. Secrets are
-# forwarded explicitly (GITLEAKS_LICENSE); never use `secrets: inherit`.
+# startup-fail here unless these scopes are granted explicitly. Any secret a
+# leaf needs is forwarded explicitly; never use `secrets: inherit`.
 #
 # IMPORTANT — packages/id-token/attestations are REQUIRED even though this
 # CI meta sets `push: false`, `sign: false`, `attest: false`. The `build`
@@ -284,8 +282,6 @@ jobs:
     permissions:
       contents: read
       security-events: write
-    secrets:
-      GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 
   dependency-review:
     name: Dependency Review
