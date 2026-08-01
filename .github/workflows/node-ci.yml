@@ -91,7 +91,7 @@ on:
         type: boolean
         default: true
       enable-gitleaks:
-        description: "Run the betterleaks secret-scanning job."
+        description: "Run the secret-scanning job. Named `gitleaks` for backwards compatibility; the scan itself runs betterleaks, which needs no license."
         type: boolean
         default: true
       enable-test:
