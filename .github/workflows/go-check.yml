@@ -85,6 +85,20 @@ on:
         type: string
         default: "coverage.out"
 
+      enable-test-results:
+        description: >-
+          Run the unit tests through gotestsum and upload the JUnit report to
+          Codecov Test Analytics (flaky-test detection, per-test durations).
+          Requires enable-codecov and CODECOV_TOKEN. Off by default: it changes
+          how `go test` is invoked, so consumers opt in rather than having the
+          invocation swapped underneath them.
+        type: boolean
+        default: false
+      gotestsum-version:
+        description: "gotestsum version used when enable-test-results is on."
+        type: string
+        default: "v1.13.0"
+
       enable-golangci-lint:
         description: "Enable the golangci-lint job."
         type: boolean
@@ -284,12 +298,30 @@ jobs:
         run: go build -v "$BUILD_TARGET"
 
       - name: go test
+        if: ${{ !inputs.enable-test-results }}
         env:
           TEST_FLAGS: ${{ inputs.test-flags }}
           TEST_PACKAGES: ${{ inputs.test-packages }}
         run: |
           # shellcheck disable=SC2086  # TEST_FLAGS is a space-separated flag list by design
           go test -v $TEST_FLAGS "$TEST_PACKAGES"
+
+      # Same test run, reported twice: gotestsum drives `go test -json` and
+      # writes a JUnit report next to the coverage profile. Kept as a separate
+      # step rather than replacing the one above, so a consumer that has not
+      # opted in keeps the exact invocation it has today.
+      - name: go test (with JUnit report)
+        if: ${{ inputs.enable-test-results }}
+        env:
+          TEST_FLAGS: ${{ inputs.test-flags }}
+          TEST_PACKAGES: ${{ inputs.test-packages }}
+          GOTESTSUM_VERSION: ${{ inputs.gotestsum-version }}
+        run: |
+          set -euo pipefail
+          go install "gotest.tools/gotestsum@${GOTESTSUM_VERSION}"
+          # shellcheck disable=SC2086  # TEST_FLAGS is a space-separated flag list by design
+          gotestsum --junitfile junit.xml --format standard-verbose \
+            -- $TEST_FLAGS "$TEST_PACKAGES"
 
       - name: Enforce coverage threshold
         if: ${{ inputs.enable-build-test && hashFiles('coverage.out') != '' }}
@@ -311,6 +343,18 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ${{ inputs.codecov-file }}
+          flags: ${{ inputs.codecov-flags }}
+          fail_ci_if_error: false
+
+      # Runs on failure too, deliberately: a run whose tests failed is exactly
+      # the one Test Analytics is for. Gating this on success would upload only
+      # green runs and leave the flaky-test view blind to every failure.
+      - name: Upload test results to Codecov
+        if: ${{ inputs.enable-test-results && !cancelled() && hashFiles('junit.xml') != '' }}
+        uses: codecov/test-results-action@0fa95f0e1eeaafde2c782583b36b28ad0d8c77d3 # v1.2.1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: junit.xml
           flags: ${{ inputs.codecov-flags }}
           fail_ci_if_error: false
 
