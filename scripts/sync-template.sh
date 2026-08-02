@@ -104,7 +104,8 @@ fi
 # as if they were paths).
 DRIFT_PATHS=()
 if [ -f .github/template.yaml ]; then
-  if ! DRIFT_OUT=$(python3 - .github/template.yaml <<'PY'
+  DRIFT_ERR_FILE=$(mktemp)
+  if ! DRIFT_OUT=$(python3 - .github/template.yaml 2>"$DRIFT_ERR_FILE" <<'PY'
 import sys
 try:
     import yaml
@@ -117,16 +118,25 @@ try:
 except Exception as e:  # noqa: BLE001 - any parse error is fatal here
     sys.stderr.write(f"malformed template.yaml: {e}\n")
     sys.exit(3)
-for item in (doc.get("intentional-drift") or []):
+entries = doc.get("intentional-drift") or []
+if not isinstance(entries, list):
+    sys.stderr.write(
+        f"intentional-drift must be a list, got {type(entries).__name__}\n"
+    )
+    sys.exit(3)
+for item in entries:
     if isinstance(item, dict) and item.get("path"):
         print(item["path"])
     elif isinstance(item, str):
         print(item)
 PY
   ); then
-    echo "::error::Refusing to sync $TARGET: .github/template.yaml exists but its intentional-drift list could not be read ($DRIFT_OUT). Proceeding would overwrite files this repo declared as intentional drift. Install PyYAML (pip install pyyaml) or fix the file, then re-run." >&2
+    DRIFT_ERR=$(cat "$DRIFT_ERR_FILE")
+    rm -f "$DRIFT_ERR_FILE"
+    echo "::error::Refusing to sync $TARGET: .github/template.yaml exists but its intentional-drift list could not be read (${DRIFT_ERR:-no diagnostic}). Proceeding would overwrite files this repo declared as intentional drift. Install PyYAML (pip install pyyaml) or fix the file, then re-run." >&2
     exit 3
   fi
+  rm -f "$DRIFT_ERR_FILE"
   # Keep only non-empty lines; DRIFT_OUT is paths-only (stderr was separate).
   while IFS= read -r line; do
     [ -n "$line" ] && DRIFT_PATHS+=("$line")
