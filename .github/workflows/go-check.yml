@@ -314,10 +314,12 @@ jobs:
           TEST_PACKAGES: ${{ inputs.test-packages }}
         run: |
           set -euo pipefail
-          # Version is literal, not an input: a variable here cannot be shown to
-          # be pinned, and the workflow should own the version of a tool it
-          # installs rather than leaving it to each consumer. Bump it here.
-          go install gotest.tools/gotestsum@v1.13.0
+          # Pinned to a commit rather than a tag, matching the go-licenses
+          # install below: a tag can be repointed, a commit cannot, which is
+          # what "locked to a verified version" asks for. Not an input either —
+          # the workflow should own the version of a tool it installs rather
+          # than leaving it to each consumer. Bump it here.
+          go install gotest.tools/gotestsum@c4a0df2e75a225d979a444342dd3db752b53619f  # v1.13.0
           # shellcheck disable=SC2086  # TEST_FLAGS is a space-separated flag list by design
           gotestsum --junitfile junit.xml --format standard-verbose \
             -- $TEST_FLAGS "$TEST_PACKAGES"
