@@ -81,6 +81,13 @@ permissions: {}
 jobs:
   prepare:
     name: Prepare languages
+    # Skipped on `merge_group`, like scorecard.yml and zizmor.yml: GitHub
+    # deletes the gh-readonly-queue ref the moment the queue finishes, which
+    # races the SARIF upload inside codeql-action/analyze and fails the run
+    # with `ref ... not found`. That ejects the pull request from the queue
+    # even though nothing is wrong with it. The pull-request head was already
+    # analysed, and push and schedule events run against stable refs.
+    if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 2
     permissions:
@@ -142,6 +149,7 @@ jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
     needs: prepare
+    if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
