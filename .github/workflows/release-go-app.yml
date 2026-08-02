@@ -458,9 +458,39 @@ jobs:
           echo "BINARY=${OUTPUT}" >> "$GITHUB_ENV"
 
       - name: Generate provenance attestation for binary
+        id: attest-binary
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: ${{ env.BINARY }}
+
+      # The step above files the attestation in GitHub's attestation store,
+      # where `gh attestation verify` finds it but a release consumer does not:
+      # nothing about the release itself says it carries provenance. OpenSSF
+      # Scorecard reads release *assets* and its releasesHaveProvenance probe
+      # matches on a `.intoto.jsonl` suffix, so a release built this way scored
+      # as having none.
+      #
+      # The bundle the action writes is a Sigstore bundle wrapping a DSSE
+      # envelope. Renaming that file to .intoto.jsonl would satisfy the probe
+      # while misdescribing the format, so the envelope is unwrapped instead:
+      # one DSSE envelope on one line is exactly the JSON Lines provenance
+      # format the extension denotes, and it is the same in-toto statement.
+      - name: Emit provenance as a release asset
+        env:
+          BUNDLE_PATH: ${{ steps.attest-binary.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BUNDLE_PATH}" ] || [ ! -f "${BUNDLE_PATH}" ]; then
+            echo "::error::attest-build-provenance reported no bundle at '${BUNDLE_PATH}'"
+            exit 1
+          fi
+          jq -c '.dsseEnvelope' "${BUNDLE_PATH}" > "${BINARY}.intoto.jsonl"
+          # An absent field leaves jq printing "null", which would ship an
+          # asset that looks like provenance and carries none.
+          if [ ! -s "${BINARY}.intoto.jsonl" ] || [ "$(cat "${BINARY}.intoto.jsonl")" = "null" ]; then
+            echo "::error::bundle at '${BUNDLE_PATH}' has no dsseEnvelope"
+            exit 1
+          fi
 
       - name: Generate SBOM (SPDX)
         if: inputs.include-sbom
@@ -485,6 +515,7 @@ jobs:
           path: |
             ${{ env.BINARY }}
             ${{ env.BINARY }}.spdx.json
+            ${{ env.BINARY }}.intoto.jsonl
           retention-days: 1
           if-no-files-found: error
 
@@ -525,16 +556,18 @@ jobs:
           path: bin/
           merge-multiple: true
 
-      - name: Prepare bin/ (drop SBOMs, mark binaries executable)
+      - name: Prepare bin/ (drop SBOMs and provenance, mark binaries executable)
         env:
           APP: ${{ inputs.app-name }}
         run: |
           set -euo pipefail
-          # download-artifact also drops the SBOMs from the binary artifacts
-          # into bin/. They'd shadow the Dockerfile's expected `COPY bin/<app>-linux-*`
-          # pattern (e.g. ldap-manager-linux-amd64.spdx.json starts with the
-          # same prefix as the binary). Drop them.
-          find bin -maxdepth 1 -type f -name '*.spdx.json' -delete
+          # download-artifact also drops the SBOMs and provenance files from the
+          # binary artifacts into bin/. They'd shadow the Dockerfile's expected
+          # `COPY bin/<app>-linux-*` pattern (e.g.
+          # ldap-manager-linux-amd64.spdx.json starts with the same prefix as
+          # the binary). Drop them — they belong on the release, not in the
+          # image.
+          find bin -maxdepth 1 -type f \( -name '*.spdx.json' -o -name '*.intoto.jsonl' \) -delete
           # And mark all remaining binaries executable.
           find bin -maxdepth 1 -type f -name "${APP}-linux-*" -exec chmod +x {} +
           echo "bin/ contents after prep:"
