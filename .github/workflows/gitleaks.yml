@@ -8,12 +8,6 @@ on:
         required: false
         type: boolean
         default: false
-    secrets:
-      GITLEAKS_LICENSE:
-        # Accepted but ignored — kept for backwards compatibility with consumers
-        # that still pass it. betterleaks is fully OSS and needs no license.
-        description: 'Deprecated: no longer used (betterleaks needs no license). Accepted for backwards compatibility.'
-        required: false
 
 # CALLER REQUIREMENTS
 # ===================

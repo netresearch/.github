@@ -152,9 +152,6 @@ on:
       CODECOV_TOKEN:
         description: "Codecov upload token. Required for private repositories when `coverage-upload` is true."
         required: false
-      GITLEAKS_LICENSE:
-        description: "Deprecated: no longer used or forwarded (betterleaks is OSS and needs no license). Accepted for backwards compatibility with callers that still pass it."
-        required: false
 
 # CALLER REQUIREMENTS
 # ===================

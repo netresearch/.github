@@ -145,10 +145,6 @@ on:
         description: "Trivy severity filter for the build's vulnerability scan (forwarded to build-container)."
         type: string
         default: "CRITICAL,HIGH"
-    secrets:
-      GITLEAKS_LICENSE:
-        description: "Deprecated: no longer used or forwarded (betterleaks is OSS and needs no license). Accepted for backwards compatibility with callers that still pass it."
-        required: false
 
 # CALLER REQUIREMENTS
 # ===================
