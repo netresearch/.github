@@ -7,8 +7,8 @@ name: zizmor
 # / Security tab, exactly like the CodeQL and Scorecard reusables. Findings
 # surface as code-scanning alerts; they do NOT fail CI. zizmor automatically
 # discovers a repo's `.github/zizmor.yml` config when present; when the repo
-# has none, the organisation policy is fetched from config-repo at run time so
-# that consumers do not have to carry a copy of it.
+# has none, the organisation policy is fetched from netresearch/.github at run
+# time so that consumers do not have to carry a copy of it.
 #
 # Skipped on `merge_group`: the gh-readonly-queue ref is deleted the moment
 # the queue completes, which races the SARIF upload (cf. scorecard.yml).
@@ -28,14 +28,6 @@ on:
         description: Exact zizmor version (X.Y.Z) or 'latest'.
         type: string
         default: "1.25.2"
-      config-repo:
-        description: "Repository holding the organisation .github/zizmor.yml, used when the audited repo has none."
-        type: string
-        default: "netresearch/.github"
-      config-ref:
-        description: "Ref of config-repo to take the policy from."
-        type: string
-        default: "main"
 
 permissions: {}
 
@@ -65,13 +57,16 @@ jobs:
       # every one of them. A repo that needs a different policy keeps its own
       # .github/zizmor.yml — that file is present, so nothing is fetched and
       # the local one wins.
+      # The source is fixed rather than an input: a caller-supplied repository
+      # or ref is exactly the untrusted-checkout flow CodeQL flags, and nothing
+      # asked for the flexibility.
       - name: Fetch the organisation zizmor config
         id: org-config
         if: hashFiles('.github/zizmor.yml') == ''
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          repository: ${{ inputs.config-repo }}
-          ref: ${{ inputs.config-ref }}
+          repository: netresearch/.github
+          ref: main
           path: .zizmor-org
           persist-credentials: false
           sparse-checkout: .github/zizmor.yml
@@ -79,18 +74,18 @@ jobs:
 
       - name: Install the organisation zizmor config
         if: steps.org-config.outcome == 'success'
-        env:
-          CONFIG_REPO: ${{ inputs.config-repo }}
         run: |
           set -euo pipefail
-          if [ ! -f .zizmor-org/.github/zizmor.yml ]; then
-            echo "::error::${CONFIG_REPO} has no .github/zizmor.yml — refusing to audit with zizmor's defaults, which would flag every first-party ref-pinned reusable."
+          SRC=.zizmor-org/.github/zizmor.yml
+          # A symlink here would make `cp` copy whatever it points at.
+          if [ -L "$SRC" ] || [ ! -f "$SRC" ]; then
+            echo "::error::netresearch/.github@main has no regular .github/zizmor.yml — refusing to audit with zizmor's defaults, which would flag every first-party ref-pinned reusable."
             exit 1
           fi
           mkdir -p .github
-          cp .zizmor-org/.github/zizmor.yml .github/zizmor.yml
+          cp "$SRC" .github/zizmor.yml
           rm -rf .zizmor-org
-          echo "Using the organisation zizmor policy from ${CONFIG_REPO}."
+          echo "Using the organisation zizmor policy from netresearch/.github@main."
 
       - name: Run zizmor
         uses: zizmorcore/zizmor-action@6fc4b006235f201fdab3722e17240ab420d580e5 # v0.6.1
