@@ -94,8 +94,18 @@ def read_intentional(consumer_root: Path) -> set[str]:
         annotate("error", f"failed to parse template.yaml: {exc}")
         sys.exit(2)
 
+    entries = doc.get("intentional-drift") or []
+    if not isinstance(entries, list):
+        # A scalar would otherwise be iterated character by character, turning
+        # `intentional-drift: foo` into three one-letter exemptions.
+        annotate(
+            "error",
+            f"intentional-drift must be a list, got {type(entries).__name__}",
+        )
+        sys.exit(2)
+
     paths = set()
-    for item in doc.get("intentional-drift") or []:
+    for item in entries:
         if isinstance(item, dict) and item.get("path"):
             paths.add(item["path"])
         elif isinstance(item, str):
