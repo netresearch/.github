@@ -185,3 +185,13 @@ jobs:
         uses: github/codeql-action/analyze@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
         with:
           category: /language:${{ matrix.language }}
+          # On `merge_group` the analysis runs but its result is not uploaded.
+          # GitHub deletes the gh-readonly-queue ref the moment the queue
+          # finishes, which races the upload and fails the run with
+          # `ref ... not found` — scorecard.yml calls that a guaranteed
+          # failure and skips its upload for the same reason. Here the job
+          # must still report, because a merge queue that requires this check
+          # would wait forever on a skipped one, so only the upload is turned
+          # off. The pull-request head was analysed before it entered the
+          # queue, and push and schedule events run against stable refs.
+          upload: ${{ github.event_name == 'merge_group' && 'never' || 'always' }}
