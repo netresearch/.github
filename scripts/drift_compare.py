@@ -4,7 +4,8 @@
 Usage:
     drift_compare.py <consumer-dir> <template-dir>
 
-Exit codes: 0 no drift, 1 drift, 2 the template or metadata could not be read.
+Exit codes: 0 no drift, 1 drift, 2 the template or metadata could not be read,
+or a governed path resolved outside the directory it was compared in.
 
 YAML files are compared as parsed documents rather than as bytes. A file that
 differs only in comments, key order or whitespace runs exactly the same, so it
@@ -48,7 +49,9 @@ class WorkflowLoader(yaml.SafeLoader):
 
 
 WorkflowLoader.yaml_implicit_resolvers = {
-    first: [(tag, regexp) for tag, regexp in resolvers if tag != "tag:yaml.org,2002:bool"]
+    first: [
+        (tag, regexp) for tag, regexp in resolvers if tag != "tag:yaml.org,2002:bool"
+    ]
     for first, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
 }
 WorkflowLoader.add_implicit_resolver(
@@ -65,14 +68,29 @@ def annotate(level: str, message: str) -> None:
     print(f"{prefix}{message}", file=stream)
 
 
+def within(root: Path, candidate: Path) -> bool:
+    """True when candidate exists and resolves to a location inside root.
+
+    Both roots come from the command line and every file path is built by
+    joining onto them, so each one is checked after resolution: a symlink in
+    either tree, or a `..` segment, would otherwise reach a file outside the
+    directory the caller asked to compare.
+    """
+    try:
+        candidate.resolve(strict=True).relative_to(root)
+    except (OSError, ValueError, RuntimeError):
+        return False
+    return True
+
+
 def read_intentional(consumer_root: Path) -> set[str]:
     """Paths the consumer has declared as deliberate exceptions."""
     meta = consumer_root / ".github" / "template.yaml"
-    if not meta.is_file():
+    if not within(consumer_root, meta) or not meta.is_file():
         return set()
     try:
         doc = yaml.load(meta.read_text(encoding="utf-8"), Loader=WorkflowLoader) or {}
-    except Exception as exc:
+    except (yaml.YAMLError, OSError, UnicodeDecodeError) as exc:
         annotate("error", f"failed to parse template.yaml: {exc}")
         sys.exit(2)
 
@@ -91,15 +109,16 @@ def parsed(path: Path) -> tuple[bool, object]:
         return False, None
     try:
         return True, yaml.load(path.read_text(encoding="utf-8"), Loader=WorkflowLoader)
-    except Exception:
+    except (yaml.YAMLError, OSError, UnicodeDecodeError):
         return False, None
 
 
 def classify(consumer_root: Path, template_root: Path, intentional: set[str]):
-    """Split the governed files into missing, differing and cosmetic."""
+    """Split the governed files into missing, differing, cosmetic and escaping."""
     missing: list[str] = []
     differing: list[str] = []
     cosmetic: list[str] = []
+    escaped: list[str] = []
 
     governed = sorted(p for p in (template_root / ".github").rglob("*") if p.is_file())
     for tpl_file in governed:
@@ -109,9 +128,16 @@ def classify(consumer_root: Path, template_root: Path, intentional: set[str]):
         if rel == ".github/template.yaml" or rel in intentional:
             continue
 
+        if not within(template_root, tpl_file):
+            escaped.append(rel)
+            continue
+
         consumer_path = consumer_root / rel
         if not consumer_path.is_file():
             missing.append(rel)
+            continue
+        if not within(consumer_root, consumer_path):
+            escaped.append(rel)
             continue
         if consumer_path.read_bytes() == tpl_file.read_bytes():
             continue
@@ -123,15 +149,17 @@ def classify(consumer_root: Path, template_root: Path, intentional: set[str]):
         else:
             differing.append(rel)
 
-    return missing, differing, cosmetic
+    return missing, differing, cosmetic, escaped
 
 
 def main(argv: list[str]) -> int:
     if len(argv) != 3:
         print(__doc__, file=sys.stderr)
         return 2
-    consumer_root = Path(argv[1])
-    template_root = Path(argv[2])
+    # Resolved once, so every path built by joining onto them can be checked
+    # against a fixed, absolute boundary.
+    consumer_root = Path(argv[1]).resolve()
+    template_root = Path(argv[2]).resolve()
 
     if not template_root.is_dir():
         annotate("error", f"template dir {template_root} does not exist")
@@ -145,7 +173,9 @@ def main(argv: list[str]) -> int:
     else:
         print("No intentional-drift entries.")
 
-    missing, differing, cosmetic = classify(consumer_root, template_root, intentional)
+    missing, differing, cosmetic, escaped = classify(
+        consumer_root, template_root, intentional
+    )
 
     if cosmetic:
         annotate(
@@ -156,13 +186,24 @@ def main(argv: list[str]) -> int:
         for rel in cosmetic:
             print(f"  ~ {rel}")
 
+    if escaped:
+        annotate(
+            "error",
+            f"{len(escaped)} governed path(s) resolve outside the directory being compared.",
+        )
+        for rel in escaped:
+            print(f"  ! {rel}", file=sys.stderr)
+        return 2
+
     if not missing and not differing:
         annotate("notice", "No drift detected.")
         return 0
 
     annotate("error", f"Template drift detected vs. {template_root}.")
     if missing:
-        print("\nMissing files (template has them, consumer does not):", file=sys.stderr)
+        print(
+            "\nMissing files (template has them, consumer does not):", file=sys.stderr
+        )
         for rel in missing:
             print(f"  - {rel}", file=sys.stderr)
     if differing:
@@ -180,8 +221,12 @@ def main(argv: list[str]) -> int:
         print(f"\n=== diff: {rel} ===", file=sys.stderr)
         sys.stderr.writelines(
             difflib.unified_diff(
-                (consumer_root / rel).read_text(encoding="utf-8", errors="replace").splitlines(keepends=True),
-                (template_root / rel).read_text(encoding="utf-8", errors="replace").splitlines(keepends=True),
+                (consumer_root / rel)
+                .read_text(encoding="utf-8", errors="replace")
+                .splitlines(keepends=True),
+                (template_root / rel)
+                .read_text(encoding="utf-8", errors="replace")
+                .splitlines(keepends=True),
                 fromfile=f"consumer/{rel}",
                 tofile=f"template/{rel}",
             )
