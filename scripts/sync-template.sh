@@ -92,24 +92,56 @@ if [ -f .github/template.yaml ]; then
 fi
 
 # Resolve intentional-drift paths (relative to consumer root) so the copy
-# step can skip them. Tolerate missing/malformed template.yaml — the copy
-# proceeds as an unconstrained sync in that case.
-mapfile -t DRIFT_PATHS < <(python3 -c '
-import sys, yaml
+# step can skip them.
+#
+# A MISSING template.yaml means no drift is declared (e.g. the first sync) and
+# an unconstrained copy is correct. But a template.yaml that EXISTS and cannot
+# be read — PyYAML not installed, or the file is malformed — must be a HARD
+# FAILURE: proceeding would silently clobber the very files the repo declared
+# as intentional drift (its per-extension ci.yml matrix, release.yml values,
+# …). Stdout carries only the paths; diagnostics go to stderr and never leak
+# into DRIFT_PATHS (the old code merged 2>&1 and mapfile'd Python tracebacks
+# as if they were paths).
+DRIFT_PATHS=()
+if [ -f .github/template.yaml ]; then
+  DRIFT_ERR_FILE=$(mktemp)
+  if ! DRIFT_OUT=$(python3 - .github/template.yaml 2>"$DRIFT_ERR_FILE" <<'PY'
+import sys
 try:
-    with open(".github/template.yaml") as f:
+    import yaml
+except ModuleNotFoundError:
+    sys.stderr.write("PyYAML is not installed; cannot read intentional-drift.\n")
+    sys.exit(3)
+try:
+    with open(sys.argv[1]) as f:
         doc = yaml.safe_load(f) or {}
-except FileNotFoundError:
-    sys.exit(0)
-except Exception as e:
-    sys.stderr.write(f"warning: could not parse .github/template.yaml: {e}\n")
-    sys.exit(0)
-for item in (doc.get("intentional-drift") or []):
+except Exception as e:  # noqa: BLE001 - any parse error is fatal here
+    sys.stderr.write(f"malformed template.yaml: {e}\n")
+    sys.exit(3)
+entries = doc.get("intentional-drift") or []
+if not isinstance(entries, list):
+    sys.stderr.write(
+        f"intentional-drift must be a list, got {type(entries).__name__}\n"
+    )
+    sys.exit(3)
+for item in entries:
     if isinstance(item, dict) and item.get("path"):
         print(item["path"])
     elif isinstance(item, str):
         print(item)
-' 2>&1 | grep -v "^warning:" || true)
+PY
+  ); then
+    DRIFT_ERR=$(cat "$DRIFT_ERR_FILE")
+    rm -f "$DRIFT_ERR_FILE"
+    echo "::error::Refusing to sync $TARGET: .github/template.yaml exists but its intentional-drift list could not be read (${DRIFT_ERR:-no diagnostic}). Proceeding would overwrite files this repo declared as intentional drift. Install PyYAML (pip install pyyaml) or fix the file, then re-run." >&2
+    exit 3
+  fi
+  rm -f "$DRIFT_ERR_FILE"
+  # Keep only non-empty lines; DRIFT_OUT is paths-only (stderr was separate).
+  while IFS= read -r line; do
+    [ -n "$line" ] && DRIFT_PATHS+=("$line")
+  done <<< "$DRIFT_OUT"
+fi
 
 mkdir -p .github
 
