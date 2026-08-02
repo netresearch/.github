@@ -27,12 +27,35 @@ from __future__ import annotations
 
 import difflib
 import os
+import re
 import sys
 from pathlib import Path
 
 import yaml
 
 IN_ACTIONS = bool(os.environ.get("GITHUB_ACTIONS"))
+
+
+class WorkflowLoader(yaml.SafeLoader):
+    """SafeLoader with YAML 1.2 boolean semantics.
+
+    PyYAML implements YAML 1.1, where bare `on`, `off`, `yes` and `no` resolve
+    to booleans. GitHub parses workflows as YAML 1.2, where only `true`/`false`
+    are booleans and `on:` stays an ordinary string key. Under 1.1 rules a
+    template writing `on:` and a consumer writing `"on":` would compare as
+    different documents even though the two run identically.
+    """
+
+
+WorkflowLoader.yaml_implicit_resolvers = {
+    first: [(tag, regexp) for tag, regexp in resolvers if tag != "tag:yaml.org,2002:bool"]
+    for first, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+WorkflowLoader.add_implicit_resolver(
+    "tag:yaml.org,2002:bool",
+    re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"),
+    list("tTfF"),
+)
 
 
 def annotate(level: str, message: str) -> None:
@@ -48,7 +71,7 @@ def read_intentional(consumer_root: Path) -> set[str]:
     if not meta.is_file():
         return set()
     try:
-        doc = yaml.safe_load(meta.read_text(encoding="utf-8")) or {}
+        doc = yaml.load(meta.read_text(encoding="utf-8"), Loader=WorkflowLoader) or {}
     except Exception as exc:
         annotate("error", f"failed to parse template.yaml: {exc}")
         sys.exit(2)
@@ -67,7 +90,7 @@ def parsed(path: Path) -> tuple[bool, object]:
     if path.suffix not in (".yml", ".yaml"):
         return False, None
     try:
-        return True, yaml.safe_load(path.read_text(encoding="utf-8"))
+        return True, yaml.load(path.read_text(encoding="utf-8"), Loader=WorkflowLoader)
     except Exception:
         return False, None
 
@@ -154,8 +177,8 @@ def main(argv: list[str]) -> int:
 
     # Show the diffs so a reviewer can see what actually changed.
     for rel in differing:
-        print(f"\n=== diff: {rel} ===")
-        sys.stdout.writelines(
+        print(f"\n=== diff: {rel} ===", file=sys.stderr)
+        sys.stderr.writelines(
             difflib.unified_diff(
                 (consumer_root / rel).read_text(encoding="utf-8", errors="replace").splitlines(keepends=True),
                 (template_root / rel).read_text(encoding="utf-8", errors="replace").splitlines(keepends=True),
