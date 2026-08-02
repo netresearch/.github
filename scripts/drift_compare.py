@@ -175,6 +175,19 @@ def main(argv: list[str]) -> int:
         annotate("error", f"template dir {template_root} does not exist")
         return 2
 
+    # Without this, a mis-pointed template directory governs zero files and the
+    # run ends in "No drift detected" — a failure reported as an all-clear.
+    governed_root = template_root / ".github"
+    if not governed_root.is_dir() or not any(
+        p.is_file() for p in governed_root.rglob("*")
+    ):
+        annotate(
+            "error",
+            f"{governed_root} holds no files — refusing to report a clean result "
+            "for a template that governs nothing.",
+        )
+        return 2
+
     intentional = read_intentional(consumer_root)
     if intentional:
         print(f"Intentional-drift paths ({len(intentional)}):")
