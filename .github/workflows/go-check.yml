@@ -89,15 +89,12 @@ on:
         description: >-
           Run the unit tests through gotestsum and upload the JUnit report to
           Codecov Test Analytics (flaky-test detection, per-test durations).
-          Requires enable-codecov and CODECOV_TOKEN. Off by default: it changes
-          how `go test` is invoked, so consumers opt in rather than having the
-          invocation swapped underneath them.
+          Needs Codecov enabled and reachable — pass CODECOV_TOKEN, or rely on
+          the Codecov GitHub App where that is set up. Off by default: it
+          changes how `go test` is invoked, so consumers opt in rather than
+          having the invocation swapped underneath them.
         type: boolean
         default: false
-      gotestsum-version:
-        description: "gotestsum version used when enable-test-results is on."
-        type: string
-        default: "v1.13.0"
 
       enable-golangci-lint:
         description: "Enable the golangci-lint job."
@@ -315,10 +312,12 @@ jobs:
         env:
           TEST_FLAGS: ${{ inputs.test-flags }}
           TEST_PACKAGES: ${{ inputs.test-packages }}
-          GOTESTSUM_VERSION: ${{ inputs.gotestsum-version }}
         run: |
           set -euo pipefail
-          go install "gotest.tools/gotestsum@${GOTESTSUM_VERSION}"
+          # Version is literal, not an input: a variable here cannot be shown to
+          # be pinned, and the workflow should own the version of a tool it
+          # installs rather than leaving it to each consumer. Bump it here.
+          go install gotest.tools/gotestsum@v1.13.0
           # shellcheck disable=SC2086  # TEST_FLAGS is a space-separated flag list by design
           gotestsum --junitfile junit.xml --format standard-verbose \
             -- $TEST_FLAGS "$TEST_PACKAGES"
@@ -349,11 +348,18 @@ jobs:
       # Runs on failure too, deliberately: a run whose tests failed is exactly
       # the one Test Analytics is for. Gating this on success would upload only
       # green runs and leave the flaky-test view blind to every failure.
+      # codecov/test-results-action is deprecated in favour of this action with
+      # report_type: test_results, so the JUnit upload reuses the same action
+      # (and the same pinned SHA) as the coverage upload above. Note the input
+      # is `report_type` with an underscore — the upstream migration note
+      # spells it `report-type`, which this action does not define and would
+      # silently ignore.
       - name: Upload test results to Codecov
         if: ${{ inputs.enable-test-results && !cancelled() && hashFiles('junit.xml') != '' }}
-        uses: codecov/test-results-action@0fa95f0e1eeaafde2c782583b36b28ad0d8c77d3 # v1.2.1
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
           files: junit.xml
           flags: ${{ inputs.codecov-flags }}
           fail_ci_if_error: false
