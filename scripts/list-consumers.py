@@ -10,7 +10,7 @@ emits a GitHub Actions matrix instead: {"include":[{"repo":…,"template":…}]}
 Why this exists: the consumer list used to be written out twice by hand — in
 scripts/sync-all-consumers.sh and in the drift-scan.yml matrix — with a comment
 telling the reader to keep the two in step. Both said six Go repositories while
-the fleet had grown to 54 across five templates, so the weekly drift scan was
+the fleet had grown to 57 across five templates, so the weekly drift scan was
 watching a ninth of what it claimed to watch and the sync script skipped the
 rest. A repository *declares* its own membership by carrying
 `.github/template.yaml`; asking the organisation is therefore both simpler and
