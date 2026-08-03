@@ -1,25 +1,58 @@
 #!/usr/bin/env bash
-# Run sync-template.sh across every known consumer repo.
+# Run sync-template.sh across every consumer repo.
 #
-# Consumer list is hardcoded here and must match drift-scan.yml's matrix.
-# Edit both when a repo is added/removed from the fleet.
-
+# The consumer list is discovered, not written down: scripts/list-consumers.py
+# asks the organisation which repositories carry .github/template.yaml. It used
+# to be a hardcoded map here that had to be kept in step with drift-scan.yml's
+# matrix by hand, and both had drifted to six Go repositories while the fleet
+# had grown to 57 across five templates.
+#
+# Usage:
+#   sync-all-consumers.sh [--template <name>] [--dry-run] [-- <sync-template.sh args>]
+#
+#   --template <name>   only consumers of that template (go-app, skill, …)
+#   --dry-run           list what would be synced, sync nothing
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TEMPLATE_FILTER=""
+DRY=0
 
-declare -A CONSUMERS=(
-  [netresearch/ofelia]=go-app
-  [netresearch/ldap-manager]=go-app
-  [netresearch/ldap-selfservice-password-changer]=go-app
-  [netresearch/raybeam]=go-app
-  [netresearch/simple-ldap-go]=go-lib
-  [netresearch/go-cron]=go-lib
-)
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --template) TEMPLATE_FILTER="${2:?--template needs a name}"; shift 2 ;;
+    --dry-run)  DRY=1; shift ;;
+    --)         shift; break ;;
+    *)          break ;;
+  esac
+done
 
-for target in "${!CONSUMERS[@]}"; do
-  template="${CONSUMERS[$target]}"
+# The exit status has to be captured, not inferred: a failure inside a process
+# substitution does not reach `set -e`, so `mapfile < <(...)` would leave ROWS
+# empty and the run would report "Consumers: 0" and finish successfully having
+# synced nothing.
+if ! DISCOVERED=$(python3 "$SCRIPT_DIR/list-consumers.py" \
+      ${TEMPLATE_FILTER:+--template "$TEMPLATE_FILTER"}); then
+  echo "sync-all-consumers: consumer discovery failed — refusing to sync" >&2
+  exit 1
+fi
+mapfile -t ROWS <<<"$DISCOVERED"
+if [ "${#ROWS[@]}" -eq 0 ] || [ -z "${ROWS[0]}" ]; then
+  echo "sync-all-consumers: no consumers discovered — refusing to sync" >&2
+  exit 1
+fi
+
+echo "Consumers: ${#ROWS[@]}${TEMPLATE_FILTER:+ (template: $TEMPLATE_FILTER)}"
+echo
+
+for row in "${ROWS[@]}"; do
+  target="${row%%$'\t'*}"
+  template="${row##*$'\t'}"
   echo "=== $target → $template ==="
-  bash "$SCRIPT_DIR/sync-template.sh" "$template" "$target" "$@"
+  if [ "$DRY" = "1" ]; then
+    echo "(dry run)"
+  else
+    bash "$SCRIPT_DIR/sync-template.sh" "$template" "$target" "$@"
+  fi
   echo
 done

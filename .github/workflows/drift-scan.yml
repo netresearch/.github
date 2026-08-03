@@ -1,6 +1,13 @@
-# Weekly fleet-wide template-drift scan. Iterates over the 6 Go repos that
-# consume netresearch/.github templates, compares their .github/ tree to
-# the matching template, and opens/updates one issue per drifting repo.
+# Weekly fleet-wide template-drift scan. Iterates over every repository that
+# consumes a netresearch/.github template, compares its .github/ tree to the
+# matching template, and opens/updates one issue per drifting repo.
+#
+# The fleet is discovered, not listed: a repository declares its membership by
+# carrying .github/template.yaml, and scripts/list-consumers.py asks the
+# organisation for those. The matrix used to be written out here and mirrored by
+# hand in scripts/sync-all-consumers.sh; both had drifted to six Go repos while
+# the fleet had grown to 57 across five templates, so this scan was watching a
+# ninth of what its own comment claimed.
 #
 # This is a monitoring workflow — informational only, it does not block
 # any PR. Per-repo enforcement is handled by check-template-drift.yml
@@ -14,8 +21,8 @@ on:
     - cron: "0 6 * * 1"
   workflow_dispatch:
     inputs:
-      repos:
-        description: "Space-separated list of owner/repo entries to scan (default: all Go repos)."
+      template:
+        description: "Only scan consumers of this template (go-app, go-lib, php-module, skill, typo3-extension). Empty: the whole fleet."
         required: false
         type: string
         default: ""
@@ -23,8 +30,46 @@ on:
 permissions: {}
 
 jobs:
+  discover:
+    name: Discover consumers
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+      count: ${{ steps.list.outputs.count }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: List consumers
+        id: list
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TEMPLATE_FILTER: ${{ inputs.template }}
+        run: |
+          set -euo pipefail
+          # list-consumers.py exits non-zero on an empty fleet, so a discovery
+          # failure stops the run here rather than producing an empty matrix
+          # that would report a clean scan of nothing.
+          MATRIX=$(python3 scripts/list-consumers.py --json \
+            ${TEMPLATE_FILTER:+--template "$TEMPLATE_FILTER"})
+          COUNT=$(printf '%s' "$MATRIX" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["include"]))')
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "::notice::Scanning $COUNT consumer(s)."
+
   scan:
     name: Scan consumer
+    needs: discover
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -32,20 +77,12 @@ jobs:
       issues: write
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - repo: netresearch/ofelia
-            template: go-app
-          - repo: netresearch/ldap-manager
-            template: go-app
-          - repo: netresearch/ldap-selfservice-password-changer
-            template: go-app
-          - repo: netresearch/raybeam
-            template: go-app
-          - repo: netresearch/simple-ldap-go
-            template: go-lib
-          - repo: netresearch/go-cron
-            template: go-lib
+      # The fleet is 57 repositories on a free-plan job quota. Starting
+      # them all at once starves the pool — during one bulk campaign that
+      # left merge-queue entries waiting for a runner until they timed
+      # out. Six at a time keeps a weekly scan out of everyone's way.
+      max-parallel: 6
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
