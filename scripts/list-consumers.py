@@ -43,8 +43,19 @@ def run(argv: list[str], stdin: str | None = None) -> str:
 def repo_names(org: str) -> list[str]:
     """Every non-archived repository. Archived ones never run Actions."""
     out = run(
-        ["gh", "repo", "list", org, "--limit", "1000", "--no-archived",
-         "--json", "name", "--jq", ".[].name"]
+        [
+            "gh",
+            "repo",
+            "list",
+            org,
+            "--limit",
+            "1000",
+            "--no-archived",
+            "--json",
+            "name",
+            "--jq",
+            ".[].name",
+        ]
     )
     return sorted(n for n in out.splitlines() if n)
 
@@ -81,23 +92,30 @@ def consumers(org: str) -> list[tuple[str, str]]:
         except yaml.YAMLError as exc:
             # A repo that cannot be read is not silently dropped: it would then
             # look like a non-consumer and stop being scanned entirely.
-            print(f"list-consumers: {repo}: unparseable template.yaml: {exc}",
-                  file=sys.stderr)
+            print(
+                f"list-consumers: {repo}: unparseable template.yaml: {exc}",
+                file=sys.stderr,
+            )
             continue
         template = doc.get("template")
         if template:
             out.append((repo, str(template)))
         else:
-            print(f"list-consumers: {repo}: template.yaml has no `template:` key",
-                  file=sys.stderr)
+            print(
+                f"list-consumers: {repo}: template.yaml has no `template:` key",
+                file=sys.stderr,
+            )
     return out
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--org", default="netresearch")
-    ap.add_argument("--json", action="store_true",
-                    help="emit a GitHub Actions matrix instead of TSV")
+    ap.add_argument(
+        "--json",
+        action="store_true",
+        help="emit a GitHub Actions matrix instead of TSV",
+    )
     ap.add_argument("--template", help="only consumers of this template")
     args = ap.parse_args()
 
@@ -105,8 +123,11 @@ def main() -> int:
     if args.template:
         rows = [r for r in rows if r[1] == args.template]
     if not rows:
-        print("list-consumers: no consumers found — refusing to report an empty "
-              "fleet, which would silently scan nothing", file=sys.stderr)
+        print(
+            "list-consumers: no consumers found — refusing to report an empty "
+            "fleet, which would silently scan nothing",
+            file=sys.stderr,
+        )
         return 1
 
     if args.json:
