@@ -112,24 +112,25 @@ def fetch_template_files(names: list[str]) -> dict[str, str]:
 def consumers() -> list[tuple[str, str]]:
     out = []
     for repo, text in sorted(fetch_template_files(repo_names()).items()):
+        # Both failures below are fatal rather than skipped. A repo dropped
+        # here does not look broken — it looks like a non-consumer, and drops
+        # out of drift scanning and syncing with nothing but a log line to say
+        # so. A partial fleet reported as a whole one is the failure this
+        # script exists to remove.
         try:
             doc = yaml.safe_load(text) or {}
         except yaml.YAMLError as exc:
-            # A repo that cannot be read is not silently dropped: it would then
-            # look like a non-consumer and stop being scanned entirely.
-            print(
-                f"list-consumers: {repo}: unparseable template.yaml: {exc}",
-                file=sys.stderr,
-            )
-            continue
+            raise SystemExit(
+                f"list-consumers: {repo}: unparseable .github/template.yaml: {exc}"
+            ) from exc
         template = doc.get("template")
-        if template:
-            out.append((repo, str(template)))
-        else:
-            print(
-                f"list-consumers: {repo}: template.yaml has no `template:` key",
-                file=sys.stderr,
+        if not template:
+            raise SystemExit(
+                f"list-consumers: {repo}: .github/template.yaml has no `template:` "
+                "key — fix the file or remove it; a consumer cannot be scanned "
+                "without knowing which template it follows"
             )
+        out.append((repo, str(template)))
     return out
 
 
