@@ -2,7 +2,7 @@
 """List every repository in the organisation that consumes a template.
 
 Usage:
-    list-consumers.py [--org netresearch] [--json] [--template skill]
+    list-consumers.py [--json] [--template skill]
 
 Output is one `owner/repo<TAB>template` line per consumer, sorted. `--json`
 emits a GitHub Actions matrix instead: {"include":[{"repo":…,"template":…}]}.
@@ -31,6 +31,12 @@ import sys
 import yaml
 
 CHUNK = 50
+# The organisation this repository serves. Deliberately not a flag: a
+# caller-supplied owner would travel into the gh argument list and into the
+# GraphQL query built below, which is an argument-injection flow (S8705) in
+# exchange for flexibility nobody asked for. A fork that needs another org
+# edits this line.
+ORG = "netresearch"
 
 # GitHub owner and repository names. Two things this rejects matter here: a
 # leading hyphen, which `gh` would read as a flag rather than a value, and a
@@ -58,14 +64,14 @@ def run(argv: list[str], stdin: str | None = None) -> str:
     return p.stdout
 
 
-def repo_names(org: str) -> list[str]:
+def repo_names() -> list[str]:
     """Every non-archived repository. Archived ones never run Actions."""
     out = run(
         [
             "gh",
             "repo",
             "list",
-            org,
+            ORG,
             "--limit",
             "1000",
             "--no-archived",
@@ -78,7 +84,7 @@ def repo_names(org: str) -> list[str]:
     return sorted(n for n in out.splitlines() if n)
 
 
-def fetch_template_files(org: str, names: list[str]) -> dict[str, str]:
+def fetch_template_files(names: list[str]) -> dict[str, str]:
     """alias -> file contents, for the repos that carry a template.yaml."""
     found: dict[str, str] = {}
     for start in range(0, len(names), CHUNK):
@@ -87,7 +93,7 @@ def fetch_template_files(org: str, names: list[str]) -> dict[str, str]:
         for i, name in enumerate(chunk):
             checked_name("repository name", name)
             parts.append(
-                f'r{i}: repository(owner: "{org}", name: "{name}") {{'
+                f'r{i}: repository(owner: "{ORG}", name: "{name}") {{'
                 '  object(expression: "HEAD:.github/template.yaml") {'
                 "    ... on Blob { text }"
                 "  }"
@@ -99,13 +105,13 @@ def fetch_template_files(org: str, names: list[str]) -> dict[str, str]:
             node = (data.get("data") or {}).get(f"r{i}") or {}
             obj = node.get("object")
             if obj and obj.get("text"):
-                found[f"{org}/{name}"] = obj["text"]
+                found[f"{ORG}/{name}"] = obj["text"]
     return found
 
 
-def consumers(org: str) -> list[tuple[str, str]]:
+def consumers() -> list[tuple[str, str]]:
     out = []
-    for repo, text in sorted(fetch_template_files(org, repo_names(org)).items()):
+    for repo, text in sorted(fetch_template_files(repo_names()).items()):
         try:
             doc = yaml.safe_load(text) or {}
         except yaml.YAMLError as exc:
@@ -129,7 +135,6 @@ def consumers(org: str) -> list[tuple[str, str]]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--org", default="netresearch")
     ap.add_argument(
         "--json",
         action="store_true",
@@ -138,7 +143,7 @@ def main() -> int:
     ap.add_argument("--template", help="only consumers of this template")
     args = ap.parse_args()
 
-    rows = consumers(checked_name("organisation", args.org))
+    rows = consumers()
     if args.template:
         rows = [r for r in rows if r[1] == args.template]
     if not rows:
