@@ -24,12 +24,30 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 
 import yaml
 
 CHUNK = 50
+
+# GitHub owner and repository names. Two things this rejects matter here: a
+# leading hyphen, which `gh` would read as a flag rather than a value, and a
+# quote or backslash, which would close the GraphQL string the query is built
+# from. Both reach a command line, so neither is checked as a formality.
+# A leading dot is allowed — `.github` is a real repository in this very org,
+# and a stricter pattern rejected the organisation's own template source.
+NAME = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._-]{0,99}$")
+
+
+def checked_name(kind: str, value: str) -> str:
+    if not NAME.match(value or ""):
+        raise SystemExit(
+            f"list-consumers: refusing {kind} {value!r} — not a GitHub name "
+            "(letters, digits, dot, hyphen, underscore; no leading hyphen)"
+        )
+    return value
 
 
 def run(argv: list[str], stdin: str | None = None) -> str:
@@ -67,6 +85,7 @@ def fetch_template_files(org: str, names: list[str]) -> dict[str, str]:
         chunk = names[start : start + CHUNK]
         parts = []
         for i, name in enumerate(chunk):
+            checked_name("repository name", name)
             parts.append(
                 f'r{i}: repository(owner: "{org}", name: "{name}") {{'
                 '  object(expression: "HEAD:.github/template.yaml") {'
@@ -119,7 +138,7 @@ def main() -> int:
     ap.add_argument("--template", help="only consumers of this template")
     args = ap.parse_args()
 
-    rows = consumers(args.org)
+    rows = consumers(checked_name("organisation", args.org))
     if args.template:
         rows = [r for r in rows if r[1] == args.template]
     if not rows:
