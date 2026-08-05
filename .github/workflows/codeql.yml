@@ -29,10 +29,12 @@ on:
     inputs:
       languages:
         description: >-
-          CodeQL language(s) to analyze. Accepts `auto` (always includes
-          `go`; adds `javascript-typescript` when a package.json or TS
-          source is present), a single language (e.g. `go`), or a
-          comma-separated list (e.g. `go,javascript-typescript`).
+          CodeQL language(s) to analyze. Accepts `auto` (detects what the
+          repository contains: `actions` always, plus `go` when a go.mod or
+          any .go file is present, plus `javascript-typescript` when a
+          package.json or any JS/TS source is present), a single language
+          (e.g. `go`), or a comma-separated list (e.g.
+          `go,javascript-typescript`).
         type: string
         default: actions
       pre-build-cmd-go:
@@ -105,17 +107,30 @@ jobs:
           LANGUAGES: ${{ inputs.languages }}
         run: |
           set -euo pipefail
-          # `auto` triggers in-repo detection: Go is assumed, plus JS/TS if
-          # there's a package.json OR any JS/TS source file. A package.json is
-          # NOT required — repos with hand-written .js (no build step / no
-          # node_modules, e.g. a plain static frontend) still get scanned.
+          # `auto` detects what the repository actually contains. `actions` is
+          # unconditional — every consumer has workflows — and Go and JS/TS are
+          # each added only when found.
+          #
+          # Go used to be assumed rather than detected, which was harmless while
+          # the only `auto` callers were Go services. It is wrong for the wider
+          # fleet: a PHP extension asking for `auto` got a Go analysis with no
+          # Go in it, so `auto` was unusable there and consumers fell back to
+          # the `actions` default — which silently dropped JavaScript from the
+          # scan. Measured 2026-08-05: 14 of the 24 t3x extensions ship
+          # JavaScript and none of it was being analysed.
+          #
           # Explicit lists still win — pass `languages: go` or
-          # `languages: go,javascript-typescript`.
+          # `languages: go,javascript-typescript` to bypass detection entirely.
           if [ "$LANGUAGES" = "auto" ]; then
-            langs="go"
-            # Prune node_modules/vendor/.git (not our source; huge and deep),
-            # then look for any first-party JS/TS file. maxdepth 8 reaches
-            # nested layouts like internal/web/static/js/*.js (depth 5).
+            langs="actions"
+            # Prune node_modules/vendor/.git (not our source; huge and deep).
+            # maxdepth 8 reaches nested layouts like
+            # internal/web/static/js/*.js (depth 5).
+            if [ -f go.mod ] || [ -n "$(find . -maxdepth 8 \
+                \( -type d \( -name node_modules -o -name vendor -o -name .git \) -prune \) -o \
+                \( -type f -name '*.go' -print \) 2>/dev/null | head -1)" ]; then
+              langs="${langs},go"
+            fi
             if [ -f package.json ] || [ -n "$(find . -maxdepth 8 \
                 \( -type d \( -name node_modules -o -name vendor -o -name .git \) -prune \) -o \
                 \( -type f \( -name '*.js' -o -name '*.jsx' -o -name '*.mjs' -o -name '*.cjs' \
@@ -124,6 +139,7 @@ jobs:
               langs="${langs},javascript-typescript"
             fi
             LANGUAGES="$langs"
+            echo "::notice::codeql auto-detection selected: ${LANGUAGES}"
           fi
           # Normalize: strip whitespace, drop empties, emit a JSON array.
           json="$(
