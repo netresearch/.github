@@ -1,0 +1,183 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# Reusable "Attest SBOM" — emits a GitHub-issued, Sigstore-backed SBOM
+# attestation (actions/attest-sbom) for every image a bake run produced,
+# using the merged CycloneDX SBOM the build-container-bake.yml `sbom-attest`
+# job uploaded as workflow artifact, and optionally pushes it to the
+# registry alongside the image.
+#
+# WHY THIS IS A SEPARATE REUSABLE, not part of build-container-bake.yml
+# =====================================================================
+# Same reason as attest-image.yml: actions/attest-sbom requires
+# `attestations: write`, and a called workflow's job permissions are
+# validated STATICALLY at workflow startup — before any job-level `if:` is
+# evaluated. Declaring that scope inside build-container-bake.yml would make
+# every existing caller fail with `startup_failure` until it granted the new
+# scope. Keeping the GitHub-issued SBOM attestation in its own reusable
+# means only repos that want it grant the extra scope.
+#
+# NOTE: this complements — not replaces — the Cosign CycloneDX attestation
+# that build-container-bake.yml's `sbom-attest: true` already attaches to
+# the digest. This workflow adds the GitHub-issued attestation on top,
+# verifiable with `gh attestation verify`.
+#
+# Caller pattern (pairs with build-container-bake.yml `sbom-attest: true`):
+#
+#   jobs:
+#     build:
+#       uses: netresearch/.github/.github/workflows/build-container-bake.yml@main
+#       permissions:
+#         contents: read
+#         packages: write
+#         security-events: write
+#         id-token: write
+#       with:
+#         targets: app
+#         push: ${{ github.event_name != 'pull_request' }}
+#         sign: true
+#         sbom-attest: true
+#
+#     attest-sbom:
+#       needs: build
+#       uses: netresearch/.github/.github/workflows/attest-sbom.yml@main
+#       permissions:
+#         contents: read
+#         packages: write        # push the attestation next to the image
+#         id-token: write        # Sigstore OIDC identity
+#         attestations: write    # write the attestation to GitHub
+#       with:
+#         bake-metadata: ${{ needs.build.outputs.bake-metadata }}
+#
+# Verify afterwards with:
+#   gh attestation verify oci://<image>@<digest> --owner <org>
+
+name: Attest SBOM (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      bake-metadata:
+        description: >-
+          Raw docker/bake-action metadata JSON — pass the `bake-metadata`
+          output of a build-container-bake.yml call that ran with
+          `sbom-attest: true` (see the caller pattern in the header). Every
+          target carrying a `containerimage.digest` is attested, using the
+          `sbom-<digest-hex>` workflow artifact that call uploaded.
+        required: true
+        type: string
+      push-to-registry:
+        description: >-
+          Push the attestation to the registry alongside the image. Requires
+          the image to have been pushed (not merely loaded) and the calling
+          job to grant `packages: write`.
+        required: false
+        type: boolean
+        default: true
+      registry:
+        description: "Registry to authenticate against when push-to-registry is true."
+        required: false
+        type: string
+        default: "ghcr.io"
+
+# CALLER REQUIREMENTS
+# ===================
+# The calling job MUST grant every scope below, or the run fails with
+# `startup_failure` before any job executes:
+#
+#   contents: read
+#   id-token: write        — Sigstore OIDC identity
+#   attestations: write    — write the attestation to GitHub
+#   packages: write        — only when push-to-registry is true (registry auth)
+permissions: {}
+
+jobs:
+  prepare:
+    name: Collect image digests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      subjects: ${{ steps.parse.outputs.subjects }}
+      count: ${{ steps.parse.outputs.count }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Parse bake metadata into attestation subjects
+        id: parse
+        env:
+          BAKE_METADATA: ${{ inputs.bake-metadata }}
+        run: |
+          set -euo pipefail
+          # Each bake target contributes one subject: the image name WITHOUT a
+          # tag (attestations are bound to the digest, not to a tag) plus the
+          # digest buildx reported. Targets that produced no digest — e.g. a
+          # load-only or skipped target — are ignored. Same shape the
+          # build-container-bake.yml sbom job derives, so `hex` matches the
+          # `sbom-<digest-hex>` artifact name it uploaded.
+          subjects=$(printf '%s' "$BAKE_METADATA" | jq -c '
+            [ to_entries[]
+              | select(.value["containerimage.digest"] != null)
+              | { name: ( .value["image.name"] // "" | split(",")[0] | sub(":[^:/]+$"; "") )
+                , digest: .value["containerimage.digest"]
+                , hex: ( .value["containerimage.digest"] | sub("^sha256:"; "") )
+                }
+              | select(.name != "")
+            ] | unique')
+          count=$(printf '%s' "$subjects" | jq 'length')
+          if [ "$count" = "0" ]; then
+            echo "::error::No attestable image digests found in bake-metadata. Was the image pushed (push: true)?"
+            exit 1
+          fi
+          echo "Attesting SBOMs of $count image(s):"
+          printf '%s' "$subjects" | jq -r '.[] | "  " + .name + "@" + .digest'
+          {
+            echo "subjects=$subjects"
+            echo "count=$count"
+          } >> "$GITHUB_OUTPUT"
+
+  attest:
+    name: Attest SBOM ${{ matrix.subject.name }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        subject: ${{ fromJSON(needs.prepare.outputs.subjects) }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Log in to ${{ inputs.registry }}
+        if: ${{ inputs.push-to-registry }}
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download SBOM artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sbom-${{ matrix.subject.hex }}
+          path: ${{ runner.temp }}/sbom
+
+      - name: Attest SBOM
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ${{ matrix.subject.name }}
+          subject-digest: ${{ matrix.subject.digest }}
+          sbom-path: ${{ runner.temp }}/sbom/sbom-${{ matrix.subject.hex }}.cdx.json
+          push-to-registry: ${{ inputs.push-to-registry }}
