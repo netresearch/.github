@@ -681,11 +681,10 @@ jobs:
           fi
           composer global config --no-plugins \
             allow-plugins.cyclonedx/cyclonedx-php-composer true
-          # NOSONAR: an ephemeral global tool install has no lockfile to
-          # enforce; the exact version pin above is the strongest available
-          # constraint (S8546).
-          composer global require --no-interaction --no-progress \
-            "cyclonedx/cyclonedx-php-composer:${CDX_PHP_COMPOSER_VERSION}" # NOSONAR
+          # S8546 suppression: an ephemeral global tool install has no
+          # lockfile to enforce; the exact version pin is the strongest
+          # available constraint.
+          composer global require --no-interaction --no-progress "cyclonedx/cyclonedx-php-composer:${CDX_PHP_COMPOSER_VERSION}" # NOSONAR
           dir=$(dirname "$COMPOSER_FILE")
           base=$(basename "$COMPOSER_FILE")
           if [[ ! -f "${dir}/composer.lock" ]]; then
