@@ -689,8 +689,11 @@ jobs:
           base=$(basename "$COMPOSER_FILE")
           if [[ ! -f "${dir}/composer.lock" ]]; then
             echo "::warning::No composer.lock next to ${COMPOSER_FILE} — resolving one ad hoc. Commit the lockfile to make the declared SBOM reproducible."
-            (cd "$dir" && COMPOSER="$base" composer update \
-              --no-install --no-progress --no-interaction)
+            # --no-scripts/--no-plugins: never execute code from the
+            # checked-out tree, this job only needs the dependency graph.
+            (cd "$dir" && COMPOSER="$base" composer update --no-install \
+              --no-progress --no-interaction --no-scripts --no-plugins \
+              --no-audit)
           fi
           (cd "$dir" && COMPOSER="$base" composer CycloneDX:make-sbom \
             --output-format=JSON \
