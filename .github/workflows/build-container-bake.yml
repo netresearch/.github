@@ -312,11 +312,10 @@ on:
         description: "Newline-separated list of all image tags bake produced (from `bake --print`). Empty when the print step is skipped."
         value: ${{ jobs.bake.outputs.tags }}
 
+# Write scopes live on the jobs (both declare explicit permission blocks);
+# keeping the workflow level read-only satisfies least privilege (S8233).
 permissions:
   contents: read
-  packages: write
-  security-events: write
-  id-token: write
 
 jobs:
   bake:
@@ -682,8 +681,11 @@ jobs:
           fi
           composer global config --no-plugins \
             allow-plugins.cyclonedx/cyclonedx-php-composer true
+          # NOSONAR: an ephemeral global tool install has no lockfile to
+          # enforce; the exact version pin above is the strongest available
+          # constraint (S8546).
           composer global require --no-interaction --no-progress \
-            "cyclonedx/cyclonedx-php-composer:${CDX_PHP_COMPOSER_VERSION}"
+            "cyclonedx/cyclonedx-php-composer:${CDX_PHP_COMPOSER_VERSION}" # NOSONAR
           dir=$(dirname "$COMPOSER_FILE")
           base=$(basename "$COMPOSER_FILE")
           if [[ ! -f "${dir}/composer.lock" ]]; then
@@ -722,7 +724,8 @@ jobs:
           DIGEST_HEX: ${{ matrix.subject.hex }}
         run: |
           set -euo pipefail
-          curl -fsSL -o "${RUNNER_TEMP}/cyclonedx" \
+          curl --proto '=https' --proto-redir '=https' -fsSL \
+            -o "${RUNNER_TEMP}/cyclonedx" \
             "https://github.com/CycloneDX/cyclonedx-cli/releases/download/v${CDX_CLI_VERSION}/cyclonedx-linux-x64"
           echo "${CDX_CLI_SHA256}  ${RUNNER_TEMP}/cyclonedx" | sha256sum -c -
           chmod +x "${RUNNER_TEMP}/cyclonedx"
