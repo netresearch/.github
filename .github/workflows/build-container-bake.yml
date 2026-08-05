@@ -493,6 +493,9 @@ jobs:
           # reported. Same shape attest-image.yml derives from bake-metadata.
           subjects=$(printf '%s' "$BAKE_METADATA" | jq -c '
             [ to_entries[]
+              # bake metadata mixes per-target objects with non-object keys
+              # (e.g. warning arrays) — indexing those with a string throws
+              | select((.value | type) == "object")
               | select(.value["containerimage.digest"] != null)
               | { name: ( .value["image.name"] // "" | split(",")[0] | sub(":[^:/]+$"; "") )
                 , digest: .value["containerimage.digest"]
