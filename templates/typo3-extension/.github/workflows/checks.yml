@@ -15,6 +15,13 @@ permissions: {}
 # extension-specific test matrix lives in ci.yml (intentional-drift). Every
 # `uses:` job grants exactly the reusable's caller contract; no reliance on
 # default_workflow_permissions.
+#
+# ANY JOB ADDED BELOW MUST ALSO BE ADDED TO `gate.needs`. The gate is the only
+# context a ruleset requires, so a job missing from that list is a job whose
+# failure cannot block a merge — the coverage loss is silent, and nothing in CI
+# catches it. GitHub Actions does not support YAML anchors in workflow files,
+# so the list cannot be shared with the job definitions; it has to be kept in
+# step by hand.
 jobs:
   security:
     uses: netresearch/typo3-ci-workflows/.github/workflows/security.yml@main
