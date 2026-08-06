@@ -179,11 +179,27 @@ jobs:
         with:
           persist-credentials: false
 
+      # Vendored third-party code is excluded, our own code is not — including
+      # tests. A finding in a library we ship but do not maintain cannot be
+      # fixed here; the remedy is a version bump, and until then the alert
+      # crowds out the ones that are actionable. Measured 2026-08-06: 4 of the
+      # 14 open JavaScript alerts across the t3x fleet were `js/bad-tag-filter`
+      # inside a single vendored `marked.esm.js`.
+      #
+      # Test paths are deliberately NOT excluded. The first real finding this
+      # analysis produced was clear-text logging of a credential in a Playwright
+      # login helper — test code leaks into CI logs like any other code.
       - name: Initialize CodeQL
         uses: github/codeql-action/init@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
         with:
           languages: ${{ matrix.language }}
           queries: security-and-quality
+          config: |
+            paths-ignore:
+              - '**/Vendor/**'
+              - '**/vendor/**'
+              - '**/node_modules/**'
+              - '.Build/**'
 
       - name: Run Go pre-build command
         if: ${{ matrix.language == 'go' && inputs.pre-build-cmd-go != '' }}
