@@ -47,7 +47,13 @@
 #         id-token: write        # Sigstore OIDC identity
 #         attestations: write    # write the attestation to GitHub
 #       with:
-#         bake-metadata: ${{ needs.build.outputs.bake-metadata }}
+#         subjects: ${{ needs.build.outputs.sbom-subjects }}
+#
+# Prefer `subjects` over `bake-metadata`: GitHub drops a job output entirely
+# when any part of it matches a secret ("Skip output ... since it may contain
+# secret"), and raw bake metadata carries the build definition incl. build
+# args — one masked token empties the input and the attest matrix dies at
+# startup, invisibly. The filtered subjects list is name+digest only.
 #
 # Verify afterwards with:
 #   gh attestation verify oci://<image>@<digest> --owner <org>
@@ -57,15 +63,24 @@ name: Attest SBOM (reusable)
 on:
   workflow_call:
     inputs:
+      subjects:
+        description: >-
+          JSON array of attestation subjects ({name, digest, hex}) — pass the
+          `sbom-subjects` output of a build-container-bake.yml call that ran
+          with `sbom-attest: true`. Preferred over `bake-metadata`: it is
+          secret-free by construction, so GitHub's output masking cannot
+          silently empty it.
+        required: false
+        type: string
+        default: ""
       bake-metadata:
         description: >-
-          Raw docker/bake-action metadata JSON — pass the `bake-metadata`
-          output of a build-container-bake.yml call that ran with
-          `sbom-attest: true` (see the caller pattern in the header). Every
-          target carrying a `containerimage.digest` is attested, using the
-          `sbom-<digest-hex>` workflow artifact that call uploaded.
-        required: true
+          Raw docker/bake-action metadata JSON — legacy alternative to
+          `subjects`. Beware: GitHub drops the whole output when it matches a
+          secret (e.g. tokens in build args), which empties this input.
+        required: false
         type: string
+        default: ""
       push-to-registry:
         description: >-
           Push the attestation to the registry alongside the image. Requires
@@ -107,30 +122,39 @@ jobs:
         with:
           egress-policy: audit
 
-      - name: Parse bake metadata into attestation subjects
+      - name: Parse attestation subjects
         id: parse
         env:
+          SUBJECTS: ${{ inputs.subjects }}
           BAKE_METADATA: ${{ inputs.bake-metadata }}
         run: |
           set -euo pipefail
-          # Each bake target contributes one subject: the image name WITHOUT a
-          # tag (attestations are bound to the digest, not to a tag) plus the
-          # digest buildx reported. Targets that produced no digest — e.g. a
-          # load-only or skipped target — are ignored. Same shape the
-          # build-container-bake.yml sbom job derives, so `hex` matches the
-          # `sbom-<digest-hex>` artifact name it uploaded.
-          subjects=$(printf '%s' "$BAKE_METADATA" | jq -c '
-            [ to_entries[]
-              | select(.value["containerimage.digest"] != null)
-              | { name: ( .value["image.name"] // "" | split(",")[0] | sub(":[^:/]+$"; "") )
-                , digest: .value["containerimage.digest"]
-                , hex: ( .value["containerimage.digest"] | sub("^sha256:"; "") )
-                }
-              | select(.name != "")
-            ] | unique')
+          # Each subject is the image name WITHOUT a tag (attestations are
+          # bound to the digest, not to a tag) plus the digest buildx
+          # reported; `hex` matches the `sbom-<digest-hex>` artifact name the
+          # build-container-bake.yml sbom job uploaded. Preferred source is
+          # the pre-filtered `subjects` input; raw bake metadata is the
+          # legacy fallback (non-object keys guarded — warning arrays).
+          if [ -n "$SUBJECTS" ]; then
+            subjects=$(printf '%s' "$SUBJECTS" | jq -c 'map(select(.name != "" and .digest != null)) | unique')
+          elif [ -n "$BAKE_METADATA" ]; then
+            subjects=$(printf '%s' "$BAKE_METADATA" | jq -c '
+              [ to_entries[]
+                | select((.value | type) == "object")
+                | select(.value["containerimage.digest"] != null)
+                | { name: ( .value["image.name"] // "" | split(",")[0] | sub(":[^:/]+$"; "") )
+                  , digest: .value["containerimage.digest"]
+                  , hex: ( .value["containerimage.digest"] | sub("^sha256:"; "") )
+                  }
+                | select(.name != "")
+              ] | unique')
+          else
+            echo "::error::Neither subjects nor bake-metadata was provided (or the bake-metadata output was masked away by GitHub secret scanning — prefer subjects)."
+            exit 1
+          fi
           count=$(printf '%s' "$subjects" | jq 'length')
           if [ "$count" = "0" ]; then
-            echo "::error::No attestable image digests found in bake-metadata. Was the image pushed (push: true)?"
+            echo "::error::No attestable image digests found. Was the image pushed (push: true)?"
             exit 1
           fi
           echo "Attesting SBOMs of $count image(s):"
