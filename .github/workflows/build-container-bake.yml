@@ -308,6 +308,9 @@ on:
       bake-metadata:
         description: "Raw docker/bake-action metadata JSON (per-target build results incl. containerimage.digest)."
         value: ${{ jobs.bake.outputs.metadata }}
+      sbom-subjects:
+        description: "JSON array of {name, digest, hex} per pushed image (sbom-attest: true only). Secret-free — safe to feed to attest-sbom.yml, unlike raw bake metadata, which GitHub masks away wholesale when it matches a secret."
+        value: ${{ jobs.bake.outputs.sbom-subjects }}
       tags:
         description: "Newline-separated list of all image tags bake produced (from `bake --print`). Empty when the print step is skipped."
         value: ${{ jobs.bake.outputs.tags }}
