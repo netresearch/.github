@@ -2,5 +2,11 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "local>netresearch/renovate-config"
-  ]
+  ],
+  "github-actions": {
+    "description": "Also manage action pins inside the workflow templates: consumers vendor these files verbatim and the drift check compares them byte-for-byte against templates/ \u2014 if renovate bumps a pin in a consumer before the template moves, the whole fleet goes red (issue #353). Managing the template here makes it move in the same cycle.",
+    "fileMatch": [
+      "^templates/.+/\\.github/workflows/.+\\.ya?ml$"
+    ]
+  }
 }
