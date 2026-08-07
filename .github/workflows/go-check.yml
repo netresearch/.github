@@ -521,7 +521,7 @@ jobs:
           bash -euo pipefail -c "$PRE_BUILD_CMD"
 
       - name: Run gosec
-        uses: securego/gosec@45b083a0cb42119d61b1e0e364d8c62c68f6f5cd # master
+        uses: securego/gosec@5e72efc19d97e11549b3427b83fab3257a8c9894 # master
         with:
           # Findings fail the job unless gosec-strict is set false. They also
           # reach the Security tab through the SARIF upload below, which runs
