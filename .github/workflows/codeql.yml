@@ -190,7 +190,7 @@ jobs:
       # analysis produced was clear-text logging of a credential in a Playwright
       # login helper — test code leaks into CI logs like any other code.
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
+        uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
         with:
           languages: ${{ matrix.language }}
           queries: security-and-quality
@@ -214,7 +214,7 @@ jobs:
         run: bash -euo pipefail -c "$PRE_BUILD_CMD"
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
+        uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
         with:
           category: /language:${{ matrix.language }}
           # On `merge_group` the analysis runs but its result is not uploaded.
