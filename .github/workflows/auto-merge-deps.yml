@@ -152,6 +152,31 @@ jobs:
 
           if [ "$NATIVE_GATE" = "true" ]; then
             echo "Base branch '$BASE_REF' has required status checks - letting GitHub hold the merge."
+
+            # Re-arm rather than re-request. An auto-merge request already
+            # attached to this PR is NOT refreshed by asking again: `gh pr
+            # merge --auto` succeeds, prints nothing unusual, and leaves the
+            # OLD request in place. That matters because the old request was
+            # evaluated against the branch rules as they were when it was
+            # created — GitHub does not re-evaluate it when those rules change.
+            # A request created before a rule change can therefore sit on the
+            # PR forever, never completing.
+            #
+            # Worse, while it sits there it silently swallows every later
+            # attempt to merge or enqueue the PR by hand: the command reports
+            # success and nothing happens. Four dependency PRs across this org
+            # were stuck that way on 2026-08-08, the oldest since 2026-07-30,
+            # and the state is invisible unless you query autoMergeRequest
+            # directly.
+            #
+            # Dropping the request first makes each run of this workflow
+            # create a fresh one under the rules in force right now.
+            if gh pr view "$PR_URL" --json autoMergeRequest \
+                 --jq '.autoMergeRequest != null' 2>/dev/null | grep -q true; then
+              echo "::notice::Clearing a pre-existing auto-merge request before re-arming."
+              gh pr merge --disable-auto "$PR_URL" || true
+            fi
+
             gh pr merge --auto "$STRATEGY" "$PR_URL"
             exit 0
           fi
