@@ -712,6 +712,17 @@ jobs:
 
       - name: Generate scanned image SBOM (Syft)
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        env:
+          # No file cataloguing. Syft's default emits one component per file
+          # owned by an installed package. Measured on the netresearch.de stack
+          # BOM: 15426 of 16337 components were such entries, all under /usr
+          # and /etc, none carrying a purl and therefore none able to match an
+          # advisory — they inflated the BOM to 15 MB and buried the ~900
+          # components findings actually attach to. Nothing is lost: the BOM
+          # records the image digest, so a file inventory can be regenerated
+          # from the image whenever a question calls for one. Same setting as
+          # sbom-toolbox collect-stack-boms (ADR 0010).
+          SYFT_FILE_METADATA_SELECTION: none
         with:
           image: ${{ matrix.subject.name }}@${{ matrix.subject.digest }}
           registry-username: ${{ github.actor }}
