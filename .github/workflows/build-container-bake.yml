@@ -750,6 +750,27 @@ jobs:
           chmod +x "${RUNNER_TEMP}/cyclonedx"
           cd "${RUNNER_TEMP}/sbom"
           out="sbom-${DIGEST_HEX}.cdx.json"
+          purl="pkg:oci/${IMAGE_NAME}@${DIGEST}"
+          # Stamp the scanned BOM BEFORE merging. `merge --hierarchical` nests
+          # each input's metadata.component as a child, and Syft's carries no
+          # purl — so stamping only the merged result left the image listed
+          # twice downstream, once identified and once not. Dependency-Track
+          # showed both, which reads like two different things.
+          tmp=$(mktemp)
+          jq \
+            --arg name "$IMAGE_NAME" \
+            --arg version "$DIGEST" \
+            --arg purl "$purl" \
+            --arg hash "$DIGEST_HEX" \
+            '.metadata.component = {
+                "bom-ref": $purl,
+                type: "container",
+                name: $name,
+                version: $version,
+                purl: $purl,
+                hashes: [ { alg: "SHA-256", content: $hash } ]
+            }' sbom-image.cdx.json > "$tmp"
+          mv "$tmp" sbom-image.cdx.json
           if [[ "$APP_PRESENT" == "true" ]]; then
             "${RUNNER_TEMP}/cyclonedx" merge --hierarchical \
               --input-files sbom-app.cdx.json sbom-image.cdx.json \
@@ -760,7 +781,6 @@ jobs:
           fi
           # The digest is the anchor, never a tag resolution: stamp the image
           # as the BOM subject (same shape as sbom-toolbox set-bom-subject).
-          purl="pkg:oci/${IMAGE_NAME}@${DIGEST}"
           tmp=$(mktemp)
           jq \
             --arg name "$IMAGE_NAME" \
