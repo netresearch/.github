@@ -31,6 +31,24 @@ on:
           open for a human.
         type: number
         default: 15
+    secrets:
+      merge-token:
+        description: >-
+          Optional token used for the merge itself, in place of the
+          job's GITHUB_TOKEN. Needed only where dependency updates touch
+          .github/workflows: GitHub refuses enablePullRequestAutoMerge
+          for a GitHub App whose token has no `workflows` scope, which
+          is every Renovate bump of a GitHub Action, and in a repository
+          with required status checks or a merge queue every merge route
+          runs through that mutation. A token carrying `repo` and
+          `workflows` lifts the refusal.
+
+          Left unset the workflow behaves exactly as before, so this
+          costs nothing in the repositories that do not need it. The
+          approval step deliberately keeps using GITHUB_TOKEN: the
+          approval should stay attributable to the app, not to whoever
+          owns this token.
+        required: false
 
 # CALLER REQUIREMENTS
 # ===================
@@ -50,6 +68,20 @@ on:
 #       permissions:
 #         contents: write
 #         pull-requests: write
+#
+# Where dependency updates touch .github/workflows - every Renovate bump
+# of a GitHub Action does - the merge additionally needs a token with the
+# `workflows` scope, which GITHUB_TOKEN does not carry. Pass one and the
+# refusal goes away; omit it and nothing changes:
+#
+#   jobs:
+#     auto-merge:
+#       uses: netresearch/.github/.github/workflows/auto-merge-deps.yml@main
+#       permissions:
+#         contents: write
+#         pull-requests: write
+#       secrets:
+#         merge-token: ${{ secrets.DEPS_MERGE_TOKEN }}
 permissions: {}
 
 jobs:
@@ -94,7 +126,11 @@ jobs:
            steps.metadata.outputs.update-type != 'version-update:semver-major')
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # An unset secret is the empty string, and `||` treats that as
+          # falsy - so a caller that passes nothing keeps GITHUB_TOKEN and
+          # the behaviour it had before this input existed.
+          GH_TOKEN: ${{ secrets.merge-token || secrets.GITHUB_TOKEN }}
+          MERGE_TOKEN_SET: ${{ secrets.merge-token && 'true' || 'false' }}
           REPO: ${{ github.repository }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           STRATEGY_OVERRIDE: ${{ inputs.merge-strategy }}
@@ -114,6 +150,13 @@ jobs:
               else "--squash" end')
           fi
           echo "Using merge strategy: $STRATEGY"
+          # Worth naming: a refusal that mentions the `workflows` scope
+          # reads very differently depending on which token was in play.
+          if [ "$MERGE_TOKEN_SET" = "true" ]; then
+            echo "Using the caller-supplied merge-token."
+          else
+            echo "Using GITHUB_TOKEN (no merge-token passed by the caller)."
+          fi
 
           ALLOW_AUTO_MERGE=$(printf '%s' "$REPO_JSON" | jq -r '.allow_auto_merge // false')
 
