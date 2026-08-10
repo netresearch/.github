@@ -177,17 +177,38 @@ jobs:
               gh pr merge --disable-auto "$PR_URL" || true
             fi
 
-            gh pr merge --auto "$STRATEGY" "$PR_URL"
-            exit 0
+            # `enablePullRequestAutoMerge` is refused outright when the PR
+            # touches .github/workflows and the token has no `workflows`
+            # scope: "refusing to allow a GitHub App to create or update
+            # workflow ... without `workflows` permission". Renovate bumping
+            # a GitHub Action hits this every time, and the scope cannot
+            # simply be added here - the caller has to grant it too, so a
+            # new permission in this file startup-fails every caller that
+            # has not been updated yet (see CALLER REQUIREMENTS above).
+            #
+            # Falling through to the gating path below is not a workaround
+            # but the correct handling: it waits for the same checks itself
+            # and then merges over REST, which is not subject to that
+            # restriction. Measured 2026-08-09 in netresearch/git-workflow-
+            # skill, where PR #153 changed a workflow file and merged over
+            # exactly this path with these permissions.
+            if gh pr merge --auto "$STRATEGY" "$PR_URL" 2>"$RUNNER_TEMP/automerge.err"; then
+              exit 0
+            fi
+            sed 's/^/  /' "$RUNNER_TEMP/automerge.err" >&2 || true
+            echo "::notice::Native auto-merge was refused - gating on the checks here instead."
           fi
 
-          # Either auto-merge is disabled, or it is enabled but nothing is
-          # required on the base branch. In both cases nothing outside this job
+          # Reached three ways: auto-merge is disabled, it is enabled but
+          # nothing is required on the base branch, or GitHub refused the
+          # native request above. In all three nothing outside this job
           # keeps an unverified dependency bump from landing, so gate here.
           #
           # This is why repos in that state used to keep a hand-rolled copy of
           # this workflow. They no longer have to.
-          echo "No required status checks on '$BASE_REF' (allow_auto_merge=$ALLOW_AUTO_MERGE) - gating on the checks here."
+          if [ "$NATIVE_GATE" != "true" ]; then
+            echo "No required status checks on '$BASE_REF' (allow_auto_merge=$ALLOW_AUTO_MERGE) - gating on the checks here."
+          fi
 
           DEADLINE=$(( $(date +%s) + ${CHECKS_TIMEOUT_MINUTES:-15} * 60 ))
           while :; do
@@ -234,4 +255,14 @@ jobs:
             sleep 15
           done
 
-          gh pr merge "$STRATEGY" "$PR_URL"
+          # A refused merge leaves the PR approved and open, which is the
+          # same outcome as the two notices above - so report it the same
+          # way rather than failing the job. A failed job turns this into a
+          # red check on the PR, and a red check is exactly what holds the
+          # PR at UNSTABLE and keeps every other route to merging it shut.
+          # Failing here would therefore make the PR harder to land by hand
+          # than if this workflow had never run.
+          if ! gh pr merge "$STRATEGY" "$PR_URL" 2>"$RUNNER_TEMP/merge.err"; then
+            sed 's/^/  /' "$RUNNER_TEMP/merge.err" >&2 || true
+            echo "::notice::Merge was refused — approved, not merged."
+          fi
