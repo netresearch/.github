@@ -64,10 +64,18 @@ jobs:
     # The label check sits here as well as on the merge step, so a labelled
     # update is not approved either — an approved-but-unmerged pull request
     # looks cleared when nobody has looked at it. See the note on that step.
+    #
+    # Both label names are honoured: the preset renames deps-major to
+    # deps-no-automerge, and whichever of the two changes lands first, the
+    # other name is still in circulation on pull requests Renovate has not
+    # rewritten yet. Accepting both means the order of the two merges cannot
+    # open a window in which labelled updates merge unseen. The old name can
+    # be dropped once no open pull request carries it.
     if: >-
       (github.event.pull_request.user.login == 'dependabot[bot]' ||
        github.event.pull_request.user.login == 'renovate[bot]') &&
-      !contains(github.event.pull_request.labels.*.name, 'deps-no-automerge')
+      !contains(github.event.pull_request.labels.*.name, 'deps-no-automerge') &&
+      !contains(github.event.pull_request.labels.*.name, 'deps-major')
     permissions:
       contents: write
       pull-requests: write
@@ -106,6 +114,7 @@ jobs:
       - name: Enable auto-merge
         if: >-
           !contains(github.event.pull_request.labels.*.name, 'deps-no-automerge') &&
+          !contains(github.event.pull_request.labels.*.name, 'deps-major') &&
           (!inputs.safe-updates-only ||
            github.event.pull_request.user.login == 'renovate[bot]' ||
            steps.metadata.outputs.update-type == 'version-update:semver-minor' ||
