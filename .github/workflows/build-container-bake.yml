@@ -622,14 +622,70 @@ jobs:
       - name: Sign images with Cosign (keyless OIDC)
         if: inputs.sign && inputs.push
         env:
+          BAKE_METADATA: ${{ steps.bake.outputs.metadata }}
           SIGN_TAGS: ${{ steps.images.outputs.tags }}
         run: |
           set -euo pipefail
-          while IFS= read -r tag; do
-            [[ -z "$tag" ]] && continue
-            echo "Signing $tag"
-            cosign sign --yes "$tag"
-          done <<< "$SIGN_TAGS"
+
+          # Rekor answers a *retried* upload with 409 "an equivalent entry
+          # already exists": the first POST did land, the client gave up on a
+          # slow response and re-sent the identical bundle, and the second
+          # attempt sees its own entry. The signature is in the transparency
+          # log, so that is success. Anything else gets a bounded retry —
+          # sigstore.dev is a public service and a single hiccup must not
+          # discard an otherwise good build.
+          cosign_retry() {
+            local attempt=1 max=4 out rc
+            while :; do
+              rc=0
+              out=$("$@" 2>&1) || rc=$?
+              printf '%s\n' "$out"
+              [[ $rc -eq 0 ]] && return 0
+              if [[ "$out" == *"an equivalent entry already exists"* ]]; then
+                echo "Rekor already holds this entry — treating as signed."
+                return 0
+              fi
+              if [[ $attempt -ge $max ]]; then
+                return "$rc"
+              fi
+              echo "Attempt ${attempt}/${max} failed (exit ${rc}); retrying in $((attempt * 15))s"
+              sleep $((attempt * 15))
+              attempt=$((attempt + 1))
+            done
+          }
+
+          # Sign by digest, not by tag — the convention build-container.yml
+          # already follows. Bake fans one image out over many tags (16 tags
+          # over 2 digests in phpbu-docker), and `cosign sign <tag>` resolves
+          # the tag to that digest anyway, writing to the same
+          # `sha256-<digest>.sig` object. Signing every tag therefore uploads
+          # the same artifact to Rekor once per tag: redundant signatures and
+          # N times the exposure to a transparency-log failure, for no added
+          # coverage. `cosign verify <tag>` keeps working either way.
+          REFS=$(printf '%s' "$BAKE_METADATA" | jq -r '
+            [ to_entries[]
+              # bake metadata mixes per-target objects with non-object keys
+              # (e.g. warning arrays) — indexing those with a string throws
+              | select((.value | type) == "object")
+              | select(.value["containerimage.digest"] != null)
+              | { name: ( .value["image.name"] // "" | split(",")[0] | sub(":[^:/]+$"; "") )
+                , digest: .value["containerimage.digest"]
+                }
+              | select(.name != "")
+              | .name + "@" + .digest
+            ] | unique | .[]')
+          if [[ -z "$REFS" ]]; then
+            echo "::error::sign is enabled but bake reported no pushed image digests."
+            exit 1
+          fi
+
+          echo "Tags pointing at these digests:"
+          printf '%s\n' "$SIGN_TAGS" | sed '/^$/d; s/^/  /'
+          while IFS= read -r ref; do
+            [[ -z "$ref" ]] && continue
+            echo "Signing $ref"
+            cosign_retry cosign sign --yes "$ref"
+          done <<< "$REFS"
 
   # Opt-in SBOM path (NRS-4588 phase 1). One matrix leg per pushed image.
   # Deliberately requests ONLY scopes the bake job already declares
@@ -809,7 +865,31 @@ jobs:
           DIGEST_HEX: ${{ matrix.subject.hex }}
         run: |
           set -euo pipefail
-          cosign attest --yes --type cyclonedx \
+
+          # Same Rekor failure mode the sign step guards against: a retried
+          # upload can meet its own first attempt as a 409, and the public
+          # log occasionally stalls. See the comment there for the reasoning.
+          cosign_retry() {
+            local attempt=1 max=4 out rc
+            while :; do
+              rc=0
+              out=$("$@" 2>&1) || rc=$?
+              printf '%s\n' "$out"
+              [[ $rc -eq 0 ]] && return 0
+              if [[ "$out" == *"an equivalent entry already exists"* ]]; then
+                echo "Rekor already holds this entry — treating as attested."
+                return 0
+              fi
+              if [[ $attempt -ge $max ]]; then
+                return "$rc"
+              fi
+              echo "Attempt ${attempt}/${max} failed (exit ${rc}); retrying in $((attempt * 15))s"
+              sleep $((attempt * 15))
+              attempt=$((attempt + 1))
+            done
+          }
+
+          cosign_retry cosign attest --yes --type cyclonedx \
             --predicate "${RUNNER_TEMP}/sbom/sbom-${DIGEST_HEX}.cdx.json" \
             "${IMAGE_NAME}@${DIGEST}"
 
