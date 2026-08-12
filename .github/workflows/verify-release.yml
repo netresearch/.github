@@ -66,6 +66,10 @@ on:
         description: "Suffix marking SBOM payloads. They are checksummed and signed like binaries but carry no build provenance."
         type: string
         default: ".spdx.json"
+      provenance-suffix:
+        description: "Suffix marking build-provenance payloads. They are checksummed and signed like binaries but are provenance statements, not artifacts that carry their own provenance."
+        type: string
+        default: ".intoto.jsonl"
       container-image:
         description: "Optional container reference to verify (e.g. ghcr.io/org/app:v1.2.3). Empty skips the container check."
         type: string
@@ -212,6 +216,7 @@ jobs:
         env:
           SIGNER_WORKFLOW: ${{ inputs.signer-workflow }}
           SBOM_SUFFIX: ${{ inputs.sbom-suffix }}
+          PROVENANCE_SUFFIX: ${{ inputs.provenance-suffix }}
           CHECKSUMS_FILE: ${{ inputs.checksums-file }}
           GH_TOKEN: ${{ github.token }}
           OWNER: ${{ github.repository_owner }}
@@ -222,9 +227,10 @@ jobs:
           n=0
           for f in *; do
             case "$f" in
-              *.sigstore.json)   continue ;;
-              *"$SBOM_SUFFIX")   continue ;;
-              "$CHECKSUMS_FILE") continue ;;
+              *.sigstore.json)       continue ;;
+              *"$SBOM_SUFFIX")       continue ;;
+              *"$PROVENANCE_SUFFIX") continue ;;
+              "$CHECKSUMS_FILE")     continue ;;
             esac
             if gh attestation verify "$f" \
                  --owner "$OWNER" \
