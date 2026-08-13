@@ -766,7 +766,19 @@ jobs:
             --output-file="${RUNNER_TEMP}/sbom/sbom-app.cdx.json")
           echo "present=true" >> "$GITHUB_OUTPUT"
 
+      # Two attempts, because the action downloads Syft at run time and that
+      # download is not reliable. It failed twice in one evening on
+      # netresearch/typo3-demo, and each failure cost a deployment: this job
+      # failing skips `validate`, and Deploy triggers on the Build workflow
+      # concluding success. The container itself had built fine both times —
+      # only the inventory of it was missing.
+      #
+      # continue-on-error plus a guarded repeat rather than a retry action: no
+      # new dependency to pin and audit, and the second attempt is visible as
+      # its own step in the run.
       - name: Generate scanned image SBOM (Syft)
+        id: syft
+        continue-on-error: true
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         env:
           # No file cataloguing. Syft's default emits one component per file
@@ -778,6 +790,32 @@ jobs:
           # records the image digest, so a file inventory can be regenerated
           # from the image whenever a question calls for one. Same setting as
           # sbom-toolbox collect-stack-boms (ADR 0010).
+          SYFT_FILE_METADATA_SELECTION: none
+        with:
+          image: ${{ matrix.subject.name }}@${{ matrix.subject.digest }}
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          format: cyclonedx-json
+          output-file: ${{ runner.temp }}/sbom/sbom-image.cdx.json
+          upload-artifact: false
+
+      - name: Wait before the second Syft attempt
+        if: steps.syft.outcome == 'failure'
+        # The failure being retried is an HTTP 503 from github.com, which
+        # routinely lasts longer than the seconds a bare repeat would wait —
+        # both attempts would then land inside the same blip and the deployment
+        # is lost anyway. cosign_retry further down uses 15/30/45s for the same
+        # reason; one wait is enough here because a second failure is rare
+        # enough to be worth a human look.
+        run: sleep 30
+
+      - name: Generate scanned image SBOM (Syft, second attempt)
+        if: steps.syft.outcome == 'failure'
+        # Keep env and with identical to the first attempt. Dropping
+        # SYFT_FILE_METADATA_SELECTION here would produce the per-file BOM the
+        # comment above exists to prevent, and only on the rare retry path.
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        env:
           SYFT_FILE_METADATA_SELECTION: none
         with:
           image: ${{ matrix.subject.name }}@${{ matrix.subject.digest }}
