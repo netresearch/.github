@@ -555,7 +555,7 @@ jobs:
         with:
           # Pin the Trivy CLI version (setup-trivy defaults to "latest",
           # which zizmor flags as an unpinned external tool).
-          version: v0.73.0
+          version: v0.74.0
 
       - name: Scan images with Trivy
         id: trivy
