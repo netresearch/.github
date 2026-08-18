@@ -34,10 +34,14 @@ jobs:
     name: Secret Scanning
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Deliberately no actor filter. betterleaks is a required status check, and a
+    # required check that never reports blocks the merge -- excluding Dependabot
+    # here made every one of its pull requests unmergeable by construction
+    # (netresearch/.github#383). The job needs no secrets, so nothing stops it
+    # from running for a bot.
     if: >-
       !inputs.skip &&
-      github.event_name != 'merge_group' &&
-      github.actor != 'dependabot[bot]'
+      github.event_name != 'merge_group'
     permissions:
       contents: read
       security-events: write
