@@ -20,7 +20,6 @@ Canonical workflow set for a netresearch Go application repository
 | `.github/workflows/pr-quality.yml` | PR size check + auto-approve for maintainers. |
 | `.github/workflows/release.yml` | GitHub release + SLSA-attested multi-arch Go binaries on tag push. |
 | `.github/workflows/scorecard.yml` | OSSF Scorecard weekly + on-push. |
-| `.github/dependabot.yml` | Canonical Dependabot config (weekly grouped updates for go / actions / docker). |
 | `.github/labeler.yml` | Canonical PR label rules. |
 | `.github/template.yaml` | Template identity + per-repo intentional-drift exceptions. |
 
