@@ -1,0 +1,146 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# Reusable "Attest release files" — emits a GitHub-issued, Sigstore-backed
+# SLSA build-provenance attestation (actions/attest-build-provenance) for
+# the files a python-release.yml run built and attached to its GitHub
+# Release, taken from that run's `dist` artifact.
+#
+# WHY THIS IS A SEPARATE REUSABLE, not an `attest` input on python-release.yml
+# ===========================================================================
+# attest-build-provenance requires `attestations: write`. A called workflow's
+# job permissions are validated STATICALLY at workflow startup — before any
+# job-level `if:` is evaluated — so declaring that scope on any
+# python-release.yml job would make every existing caller (which grants only
+# `contents: write` + `id-token: write`) fail with `startup_failure` until it
+# granted the new scope. Keeping attestation in its own reusable means only
+# the repos that want provenance grant the extra scope; existing
+# python-release.yml callers are unaffected. Same rationale as
+# attest-image.yml and attest-sbom.yml.
+#
+# Consequence: the attestation is recorded right after the release job, not
+# before the Release is published.
+#
+# Caller pattern (pairs with python-release.yml):
+#
+#   jobs:
+#     release:
+#       uses: netresearch/.github/.github/workflows/python-release.yml@main
+#       permissions:
+#         contents: write
+#         id-token: write
+#       with:
+#         publish-pypi: false
+#         release-files: 'dist/*'
+#
+#     attest:
+#       needs: release
+#       uses: netresearch/.github/.github/workflows/attest-release-files.yml@main
+#       permissions:
+#         id-token: write        # Sigstore OIDC identity
+#         attestations: write    # write the attestation to GitHub
+#       with:
+#         subject-path: 'dist/*'  # same value as release-files
+#
+# Verify afterwards with:
+#   gh attestation verify <file> --repo <owner>/<repo>
+#
+# SECURITY: pinned action SHAs, harden-runner, least-privilege job
+# permissions. `subject-path` reaches the run block only through `env:` and
+# is word-split into argv, never evaluated; the resolved file list is handed
+# to the attest action via `with:`.
+
+name: Attest release files (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      subject-path:
+        description: >-
+          Glob (or several, whitespace-separated) of files to attest,
+          resolved against the downloaded artifact (e.g. `dist/*`). Pass the
+          same value as python-release.yml's `release-files` so the attested
+          set equals the attached set. Every pattern must match at least one
+          file, otherwise the job fails.
+        required: true
+        type: string
+      artifact-name:
+        description: "Name of the workflow artifact holding the files. python-release.yml uploads its build as `dist`."
+        required: false
+        type: string
+        default: "dist"
+
+# CALLER REQUIREMENTS
+# ===================
+# The calling job MUST grant every scope below, or the run fails with
+# `startup_failure` before any job executes:
+#
+#   id-token: write        — Sigstore OIDC identity
+#   attestations: write    — write the attestation to GitHub
+permissions: {}
+
+jobs:
+  attest:
+    name: Attest release files
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+      attestations: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Download distribution artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: dist/
+
+      - name: Resolve attestation subjects
+        id: resolve
+        env:
+          SUBJECT_PATH: ${{ inputs.subject-path }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${SUBJECT_PATH//[[:space:]]/}" ]; then
+            echo "::error title=No subject-path::subject-path is empty; pass the glob of files to attest (e.g. 'dist/*')."
+            exit 1
+          fi
+
+          # Word-split each pattern into argv so a caller cannot inject shell
+          # metacharacters; the shell still expands the glob against dist/.
+          # Globbing is off while splitting so each entry stays a pattern and
+          # the error below can name the one that matched nothing.
+          FILES=()
+          set -f
+          # shellcheck disable=SC2206
+          PATTERNS=( $SUBJECT_PATH )
+          for pattern in "${PATTERNS[@]}"; do
+            set +f
+            # shellcheck disable=SC2206
+            matches=( $pattern )
+            set -f
+            if [ ! -e "${matches[0]}" ]; then
+              echo "::error title=No subject files::subject-path pattern '${pattern}' matched nothing."
+              exit 1
+            fi
+            FILES+=( "${matches[@]}" )
+          done
+          set +f
+
+          echo "Attesting ${#FILES[@]} file(s):"
+          printf '  %s\n' "${FILES[@]}"
+          {
+            echo 'files<<ATTEST_SUBJECTS_EOF'
+            printf '%s\n' "${FILES[@]}"
+            echo 'ATTEST_SUBJECTS_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.resolve.outputs.files }}

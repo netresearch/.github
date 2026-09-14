@@ -44,6 +44,31 @@
 #       with:
 #         publish-pypi: false
 #
+# Caller pattern (SLSA build provenance for the attached release files):
+#
+#   jobs:
+#     release:
+#       uses: netresearch/.github/.github/workflows/python-release.yml@main
+#       permissions:
+#         contents: write
+#         id-token: write
+#       with:
+#         release-files: 'dist/*'
+#     attest:
+#       needs: release
+#       uses: netresearch/.github/.github/workflows/attest-release-files.yml@main
+#       permissions:
+#         id-token: write
+#         attestations: write
+#       with:
+#         subject-path: 'dist/*'
+#
+#   Provenance lives in the paired attest-release-files.yml, not in an input
+#   here: it needs `attestations: write`, and a called workflow's job
+#   permissions are validated at startup before any `if:`, so declaring that
+#   scope in this workflow would startup_failure every existing caller. The
+#   attestation is therefore recorded right after the release is created.
+#
 # SECURITY: pinned action SHAs, harden-runner, least-privilege per-job
 # permissions, `persist-credentials: false` on checkout. Caller-supplied
 # commands are routed through `env:` and executed with `bash -c "$VAR"`;
