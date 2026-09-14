@@ -119,6 +119,10 @@ jobs:
           set -f
           # shellcheck disable=SC2206
           PATTERNS=( $SUBJECT_PATH )
+          # Subjects must be regular files inside the downloaded artifact: an
+          # absolute or ../ pattern must not reach other runner files, and a
+          # directory match would be dropped silently by the attest action.
+          DIST="$(realpath -e dist)"
           for pattern in "${PATTERNS[@]}"; do
             set +f
             # shellcheck disable=SC2206
@@ -128,7 +132,21 @@ jobs:
               echo "::error title=No subject files::subject-path pattern '${pattern}' matched nothing."
               exit 1
             fi
-            FILES+=( "${matches[@]}" )
+            for match in "${matches[@]}"; do
+              real="$(realpath -e -- "$match")"
+              case "$real" in
+                "$DIST"/*) ;;
+                *)
+                  echo "::error title=Subject outside artifact::'${match}' resolves to '${real}', outside ${DIST}."
+                  exit 1
+                  ;;
+              esac
+              if [ ! -f "$real" ]; then
+                echo "::error title=Subject not a file::'${match}' is not a regular file."
+                exit 1
+              fi
+              FILES+=( "$match" )
+            done
           done
           set +f
 
