@@ -42,8 +42,10 @@
 #       with:
 #         subject-path: 'dist/*'  # same value as release-files
 #
-# Verify afterwards with:
-#   gh attestation verify <file> --repo <owner>/<repo>
+# Verify afterwards with (this reusable workflow is the signer, so name it;
+# `--repo` alone checks the signer against the caller repository and fails):
+#   gh attestation verify <file> --repo <owner>/<repo> \
+#     --signer-workflow netresearch/.github/.github/workflows/attest-release-files.yml
 #
 # SECURITY: pinned action SHAs, harden-runner, least-privilege job
 # permissions. `subject-path` reaches the run block only through `env:` and
