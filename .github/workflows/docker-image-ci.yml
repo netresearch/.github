@@ -102,6 +102,10 @@ on:
         description: "Space-separated compose files to validate (forwarded to lint-compose)."
         type: string
         default: "compose.yml"
+      compose-version:
+        description: "Docker Compose version to validate against (forwarded to lint-compose)."
+        type: string
+        default: "latest"
       env-substitutions:
         description: "Newline-separated KEY=VALUE placeholder pairs for compose validation (forwarded to lint-compose)."
         type: string
@@ -214,6 +218,7 @@ jobs:
       contents: read
     with:
       compose-files: ${{ inputs.compose-files }}
+      compose-version: ${{ inputs.compose-version }}
       env-substitutions: ${{ inputs.env-substitutions }}
 
   build:

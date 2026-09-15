@@ -60,6 +60,14 @@ on:
         description: "Copy `.env.example` to `.env` (when the example file exists) before validating, so committed placeholders resolve."
         type: boolean
         default: true
+      compose-version:
+        description: >-
+          Docker Compose version to validate against, e.g. "v5.5.1" or
+          "latest". The runner's preinstalled version lags behind and rejects
+          keys that current compose accepts, so validation would otherwise
+          fail on files that are in fact valid.
+        type: string
+        default: "latest"
       env-substitutions:
         description: >-
           Newline-separated KEY=VALUE pairs. For each pair, an empty
@@ -148,6 +156,17 @@ jobs:
             done < "$subs_file"
             rm -f "$subs_file"
           fi
+
+      # The runner image ships whatever compose version it happens to carry
+      # (v2.38 as of writing), which rejects keys that current compose
+      # accepts - `pre_start` among them. Validating against an older parser
+      # than the one deployments run would report valid files as broken, so
+      # this pins the version being validated against instead of inheriting
+      # the runner's.
+      - name: Set up Docker Compose
+        uses: docker/setup-compose-action@4eb059ff7f16592f9c84d5ca339c53cb7c5064e2 # v2.3.0
+        with:
+          version: ${{ inputs.compose-version }}
 
       - name: Validate compose configuration
         env:
