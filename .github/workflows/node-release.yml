@@ -37,7 +37,10 @@
 # │ A package that does NOT yet exist on the registry cannot be staged   │
 # │ (npm-stage(1), Prerequisites), so the first-ever release of a new    │
 # │ package runs once with `staged-publish: false` and is staged from    │
-# │ the second release on. The guard checks this and says so.            │
+# │ the second release on. The guard checks this for a PUBLIC package    │
+# │ and says so; for `npm-access: restricted` it skips the check,        │
+# │ because an unauthenticated probe cannot see a restricted package     │
+# │ and would report an existing one as new.                             │
 # │                                                                      │
 # │ Three consequences of the default, none of them papered over:        │
 # │  - `github-release` has `needs: publish`, so the GitHub Release is   │
@@ -589,6 +592,7 @@ jobs:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           STAGED: ${{ inputs.staged-publish }}
           PKG_NAME: ${{ steps.pkg.outputs.name }}
+          NPM_ACCESS: ${{ inputs.npm-access }}
         # Two floors, and they are not the same one. OIDC Trusted Publishing
         # needs npm >= 11.5.1; `npm stage` does not exist below 11.15.0. The
         # staging floor is checked even under a legacy token, because the
@@ -619,21 +623,35 @@ jobs:
             # same contract: only a genuine 404 means "this package does not
             # exist". Anything else is the registry being unreachable, and a
             # network blip must never be reported as a missing package.
-            PKG_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' --retry 3 --retry-connrefused \
-              "https://registry.npmjs.org/${PKG_NAME}")"
-            case "$PKG_STATUS" in
-              200)
-                echo "Package $PKG_NAME exists on npm; it can be staged."
-                ;;
-              404)
-                echo "::error title=Cannot stage a package that does not exist yet::$PKG_NAME is not on the npm registry, and 'npm stage publish' requires the package to exist (npm-stage(1), Prerequisites). Publish the first version directly — set staged-publish: false for that one release, using an NPM_TOKEN or a Trusted Publisher permitted to publish directly — then remove the override so later releases are staged."
-                exit 1
-                ;;
-              *)
-                echo "::error title=Registry probe failed::registry.npmjs.org answered HTTP $PKG_STATUS for ${PKG_NAME}; refusing to guess whether the package exists."
-                exit 1
-                ;;
-            esac
+            #
+            # It only answers for a PUBLIC package. A restricted one is not
+            # publicly readable, so the unauthenticated request 404s for a
+            # package that exists — and this guard would then tell the
+            # maintainer to do a first-ever direct publish of something already
+            # published, which is worse than saying nothing. There is no
+            # authenticated alternative here: the OIDC exchange happens inside
+            # `npm publish`, so no registry credential exists at this point in
+            # the job. Skip instead; npm still refuses the stage, just with its
+            # own less legible message.
+            if [ "$NPM_ACCESS" = "public" ]; then
+              PKG_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' --retry 3 --retry-connrefused \
+                "https://registry.npmjs.org/${PKG_NAME}")"
+              case "$PKG_STATUS" in
+                200)
+                  echo "Package $PKG_NAME exists on npm; it can be staged."
+                  ;;
+                404)
+                  echo "::error title=Cannot stage a package that does not exist yet::$PKG_NAME is not on the npm registry, and 'npm stage publish' requires the package to exist (npm-stage(1), Prerequisites). Publish the first version directly — set staged-publish: false for that one release, using an NPM_TOKEN or a Trusted Publisher permitted to publish directly — then remove the override so later releases are staged."
+                  exit 1
+                  ;;
+                *)
+                  echo "::error title=Registry probe failed::registry.npmjs.org answered HTTP $PKG_STATUS for ${PKG_NAME}; refusing to guess whether the package exists."
+                  exit 1
+                  ;;
+              esac
+            else
+              echo "npm-access is '$NPM_ACCESS', so the public registry cannot answer whether $PKG_NAME exists; skipping the existence check. Staging still requires the package to exist — if it does not, npm refuses the stage and the publish step reports it."
+            fi
           fi
 
           if [ -n "${NPM_TOKEN:-}" ]; then
