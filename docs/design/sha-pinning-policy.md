@@ -49,6 +49,7 @@ everything else is hash-pinned.
 | **Renovate** | Dependency updates | Not pinned by default; repos opt into the `:pinning` sub-preset, which pins third-party actions and exempts `netresearch/**`. |
 | **SonarCloud** | Secondary audit | Rule `githubactions:S7637` flags external actions without a SHA. |
 | **OpenSSF Scorecard** | Score signal | `Pinned-Dependencies` check; org-owned ref-pins lower the sub-score by design. |
+| **CodeQL** | Secondary audit, not configurable through the shared reusable workflow | Rule `actions/unpinned-tag` flags org-owned `@main` too; the shared `codeql.yml` exposes no ownership-policy or model-pack input. Findings on `netresearch/*` are dismissed as `won't fix`, citing this ADR. |
 
 ### GitHub
 
@@ -125,9 +126,44 @@ accepted trade-off: propagating first-party fixes without per-consumer digest
 bumps outweighs a few points on a check whose threat model (untrusted upstream)
 does not apply to our own repositories.
 
+### CodeQL
+
+CodeQL's `actions/unpinned-tag` flags any `uses:` on a mutable ref. It carries
+CodeQL severity `warning` and GitHub `security_severity_level: medium`, and it
+ships in the `security-extended` and `security-and-quality` suites — the
+reusable `codeql.yml` selects `security-and-quality`. The rule is wanted for
+third-party actions, so it is not switched off.
+
+Unlike zizmor and Renovate, **the shared reusable workflow exposes no ownership
+policy**: its inputs are `languages` and two pre-build hooks, with no
+`config-file`, so a caller can pass neither a `query-filters` block nor a model
+pack. CodeQL itself is not incapable of the distinction — the query consults a
+`trustedActionsOwnerDataModel` that a model pack can extend — but nothing in
+this org's setup reaches it today. Note also that a `query-filters` exclusion
+would suppress the rule for external actions as well, which is the case it
+exists for; a model pack would not, which is why that is the better lever if
+anyone builds it.
+
+The consequence is manual: findings on `netresearch/*` references are dismissed
+as `won't fix` with a comment naming this ADR. The dismissal comment is capped
+at 280 characters. The API's full enum is `false positive`, `won't fix`,
+`used in tests`, `mitigated` — spaces, not underscores; this ADR uses
+`won't fix`.
+
+```bash
+gh api -X PATCH repos/OWNER/REPO/code-scanning/alerts/N \
+  -f state=dismissed -f dismissed_reason="won't fix" \
+  -f dismissed_comment="Correct by policy: netresearch/.github docs/design/sha-pinning-policy.md requires org-owned netresearch/* reusable workflows to be referenced @main, never SHA-pinned."
+```
+
+A dismissal is re-minted when the surrounding lines change, so a workflow edit
+can resurface an already-dismissed finding under a new alert number. Check the
+alert really is an org-owned ref before dismissing — the same rule on a
+third-party action is a genuine finding.
+
 ## Consequences
 
-- One policy, five tools, no drift: ownership decides ref-pin vs. hash-pin, and
+- One policy, six tools, no drift: ownership decides ref-pin vs. hash-pin, and
   zizmor is the enforcement of record.
 - A repo that wants Renovate action-pinning extends the `:pinning` sub-preset,
   which carries the `netresearch/**` exemption. Extending
@@ -138,6 +174,8 @@ does not apply to our own repositories.
   repos that consume org-owned reusable workflows.
 - SonarCloud `githubactions:S7637` findings on `netresearch/*` are triaged as
   safe, not fixed.
+- CodeQL `actions/unpinned-tag` findings on `netresearch/*` are dismissed as
+  `won't fix`, not fixed, and recur whenever the surrounding lines change.
 
 ## Checklist for a new repository
 
@@ -147,3 +185,6 @@ does not apply to our own repositories.
    `github>netresearch/renovate-config:pinning` — never
    `helpers:pinGitHubActionDigests` directly.
 4. Keep `.github/zizmor.yml` `unpinned-uses` policies aligned with this ADR.
+5. If the repo runs CodeQL with the `security-extended` or `security-and-quality`
+   suite, or otherwise enables `actions/unpinned-tag`, expect alerts on every
+   org-owned `uses:` and dismiss them as `won't fix` citing this ADR.
