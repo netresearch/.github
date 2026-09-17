@@ -1,0 +1,67 @@
+name: zz-probe-empty-exclude
+
+# THROWAWAY, second probe for netresearch/.github#287.
+#
+# The first probe proved an object-valued `exclude` entry matches. It did NOT
+# test the shape every EXISTING caller will get once `matrix-exclude` lands
+# with its default of "[]": an exclude key present but empty, produced through
+# fromJSON exactly as php-ci.yml produces it.
+#
+# If GitHub rejects or mishandles that, the input breaks every current caller
+# of php-ci.yml — which is the one thing #287's acceptance criteria forbid.
+#
+#   4 jobs -> empty exclude is a no-op, existing callers unaffected
+#   fewer / startup failure -> the default must be handled another way
+#
+# Delete with its branch once recorded in #287.
+
+on:
+  push:
+    branches: [fix/matrix-exclude-and-merge-queue]
+
+permissions: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ["8.2", "8.4"]
+        extra:
+          - { sf: "7.4" }
+          - { sf: "8.0" }
+        # The default value of the new `matrix-exclude` input, through the same
+        # fromJSON path php-ci.yml uses.
+        exclude: ${{ fromJSON('[]') }}
+    steps:
+      - name: Report cell
+        run: echo "CELL php=${{ matrix.php }} sf=${{ matrix.extra.sf }}"
+
+  count:
+    needs: probe
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    steps:
+      - name: Count the probe jobs that actually ran
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -o pipefail
+          n=$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" --paginate \
+                --jq '[.jobs[] | select(.name | startswith("probe"))] | length')
+          gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" --paginate \
+            --jq '.jobs[] | select(.name | startswith("probe")) | .name'
+          echo "probe jobs: $n"
+          if [ "$n" -eq 4 ]; then
+            echo "VERDICT: empty exclude is a no-op — existing callers unaffected"
+          else
+            echo "VERDICT: empty exclude changed the matrix ($n of 4) — default needs rework"
+            exit 1
+          fi

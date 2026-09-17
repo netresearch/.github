@@ -159,8 +159,29 @@ jobs:
           # of them (netresearch/.github included; only timetracker carried a
           # required-status-checks rule). So establish that a real gate exists
           # before trusting GitHub to enforce one.
+          # A merge queue disqualifies the native path entirely, whatever else
+          # the branch requires. `gh pr merge --auto` on a queued branch arms a
+          # request that never becomes a queue entry: the command succeeds, the
+          # job exits 0, and the PR sits mergeable and unmerged. Measured in
+          # netresearch/t3x-nr-llm on #926, #933 and #934 — stalled ~7 h, ~25 h
+          # and ~19 h, each with mergeStateStatus CLEAN, review APPROVED,
+          # isInMergeQueue false and mergeQueueEntry null, while this workflow's
+          # own runs reported success. Recovery was always the same: drop the
+          # request, then enqueue without --auto.
+          #
+          # That branch carries `merge_queue` AND `required_status_checks` in
+          # one ruleset, which is why the check below used to pass and the
+          # native path was taken.
+          MERGE_QUEUE=false
+          if QRULES=$(gh api "repos/$REPO/rules/branches/$BASE_REF" 2>/dev/null); then
+            if printf '%s' "$QRULES" | jq -e 'any(.[]?; .type == "merge_queue")' >/dev/null 2>&1; then
+              MERGE_QUEUE=true
+              echo "Base branch '$BASE_REF' has a merge queue - enqueueing directly instead of arming native auto-merge."
+            fi
+          fi
+
           NATIVE_GATE=false
-          if [ "$ALLOW_AUTO_MERGE" = "true" ]; then
+          if [ "$ALLOW_AUTO_MERGE" = "true" ] && [ "$MERGE_QUEUE" != "true" ]; then
             # Rulesets are readable with ordinary read access.
             if RULES=$(gh api "repos/$REPO/rules/branches/$BASE_REF" 2>/dev/null); then
               if printf '%s' "$RULES" | jq -e 'any(.[]?; .type == "required_status_checks")' >/dev/null 2>&1; then
@@ -236,7 +257,24 @@ jobs:
           # This is why repos in that state used to keep a hand-rolled copy of
           # this workflow. They no longer have to.
           if [ "$NATIVE_GATE" != "true" ]; then
-            echo "No required status checks on '$BASE_REF' (allow_auto_merge=$ALLOW_AUTO_MERGE) - gating on the checks here."
+            if [ "$MERGE_QUEUE" = "true" ]; then
+              echo "Merge queue on '$BASE_REF' - gating on the checks here, then enqueueing."
+            else
+              echo "No required status checks on '$BASE_REF' (allow_auto_merge=$ALLOW_AUTO_MERGE) - gating on the checks here."
+            fi
+
+            # An auto-merge request left on the PR swallows the merge below:
+            # the command reports success and nothing happens, which is the
+            # failure this whole path exists to avoid. The native branch above
+            # clears one before re-arming; this path has to clear one too,
+            # because on a merge-queue repo the stale request is exactly what a
+            # previous run of this workflow armed. Without this, the fix does
+            # nothing for the PRs that are already stuck.
+            if gh pr view "$PR_URL" --json autoMergeRequest \
+                 --jq '.autoMergeRequest != null' 2>/dev/null | grep -q true; then
+              echo "::notice::Clearing a pre-existing auto-merge request before merging directly."
+              gh pr merge --disable-auto "$PR_URL" || true
+            fi
           fi
 
           DEADLINE=$(( $(date +%s) + ${CHECKS_TIMEOUT_MINUTES:-15} * 60 ))

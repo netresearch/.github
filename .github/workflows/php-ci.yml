@@ -287,6 +287,27 @@ on:
         required: false
         type: string
         default: "[{}]"
+      matrix-exclude:
+        description: >-
+          JSON array of cells to drop from the `php-versions` x `extra-matrix`
+          cross product, passed through to `strategy.matrix.exclude`. Needed
+          because framework majors raise their PHP floor: Symfony 8.0 requires
+          PHP 8.4+, so in 8.2/8.3/8.4 x 5.4/6.4/7.4/8.0 the cells 8.0x8.2 and
+          8.0x8.3 are unresolvable. Without this a caller needs a second job
+          purely to carry a shorter `php-versions` list.
+
+          An entry matches partially, and object-valued keys DO compare —
+          verified on a real run, not assumed from the documentation, which is
+          silent on object values (netresearch/.github#287):
+
+            matrix-exclude: '[{"php":"8.2","extra":{"symfony":"8.0"}},
+                              {"php":"8.3","extra":{"symfony":"8.0"}}]'
+
+          The default empty array excludes nothing, so existing callers are
+          unaffected.
+        required: false
+        type: string
+        default: "[]"
       # PHPStan
       run-phpstan:
         description: "Run PHPStan static analysis."
@@ -439,6 +460,7 @@ jobs:
       matrix:
         php: ${{ fromJSON(inputs.php-versions) }}
         extra: ${{ fromJSON(inputs.extra-matrix) }}
+        exclude: ${{ fromJSON(inputs.matrix-exclude) }}
     defaults:
       run:
         working-directory: ${{ inputs.working-directory }}
