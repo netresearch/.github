@@ -7,6 +7,42 @@
 # migration path for packages whose Trusted Publisher is not configured
 # yet; configure the publisher and drop the secret.
 #
+# On precedence, because it is easy to get backwards: npm runs the OIDC
+# exchange unconditionally and its token overrides any configured credential
+# (`lib/commands/publish.js` calls `oidc()` before resolving credentials, and
+# `lib/utils/oidc.js` then overwrites the `_authToken` key). A forwarded
+# NPM_TOKEN is a FALLBACK for a failed exchange, not something that shadows
+# the publisher.
+#
+# ┌─────────────────────────────────────────────────────────────────────┐
+# │ STAGED PUBLISHING IS THE DEFAULT (`staged-publish: true`).          │
+# │ The publish runs `npm stage publish`, so the version lands in npm's │
+# │ staging area and is NOT installable until a maintainer approves it  │
+# │ with 2FA — `npm stage approve <stage-id>` or the "Staged Packages"  │
+# │ tab on npmjs.com. npm's trusted publishers always permit staging;   │
+# │ permitting DIRECT publish is a separate opt-in checkbox that npm     │
+# │ labels "not recommended", so a publisher left at its defaults can    │
+# │ ONLY stage — a direct publish there fails with                       │
+# │ `E403 … OIDC permission denied for this action`.                     │
+# │ Requires npm >= 11.15.0. Node 22 (npm 10.x) cannot do it; such a    │
+# │ caller must raise node-version or set `staged-publish: false`.      │
+# │                                                                      │
+# │ Three consequences of the default, none of them papered over:        │
+# │  - `github-release` has `needs: publish`, so the GitHub Release is   │
+# │    created once the version is STAGED, before it is installable.     │
+# │    GitHub releases are immutable, so a staged version that is never  │
+# │    approved leaves the tag burned with nothing on npm; recovery is   │
+# │    a new version, not a re-run.                                      │
+# │  - `skip-if-published` probes the public registry, where a staged    │
+# │    version is still absent, so a re-run ATTEMPTS to stage it again   │
+# │    rather than skipping. Whether npmjs.com accepts a second stage of │
+# │    the same version or rejects it is not measured here.              │
+# │  - Under a legacy NPM_TOKEN the CLI path is identical — StagePublish │
+# │    inherits Publish's auth resolution unchanged — but whether        │
+# │    npmjs.com accepts a token-authenticated stage is likewise         │
+# │    unmeasured; no current caller combines a token with npm >= 11.15. │
+# └─────────────────────────────────────────────────────────────────────┘
+#
 # ┌─────────────────────────────────────────────────────────────────────┐
 # │ PREREQUISITE — the npm Trusted Publisher names the CALLER workflow. │
 # │ On npmjs.com → package → Settings → Trusted Publisher, configure:   │
@@ -141,7 +177,11 @@ on:
         type: string
         default: "bun"
       node-version:
-        description: "Node.js version. Must be 22.14 or newer for OIDC Trusted Publishing."
+        description: >-
+          Node.js version. Must be 22.14 or newer for OIDC Trusted Publishing,
+          and 24.18 or newer for staged publishing (`npm stage` first shipped in
+          npm 11.15.0; Node 22 still bundles npm 10.9.x). The default satisfies
+          both.
         type: string
         default: "24"
       bun-version:
@@ -188,6 +228,19 @@ on:
         description: "Value passed to npm publish --access (public or restricted)."
         type: string
         default: "public"
+      staged-publish:
+        description: >-
+          Publish through npm's staging area (`npm stage publish`) instead of
+          straight to the registry. A maintainer then approves the staged
+          version with 2FA — `npm stage approve <stage-id>`, or the "Staged
+          Packages" tab on npmjs.com — and only then is it installable.
+          npm's trusted publishers ALWAYS allow staging; allowing direct
+          publish is a separate opt-in checkbox that npm itself labels "not
+          recommended", so a publisher left at its defaults requires this.
+          Needs npm >= 11.15.0: `npm stage` does not exist below that, and
+          Node 22 (npm 10.x) cannot do it at all.
+        type: boolean
+        default: true
       provenance:
         description: "Pass --provenance on the npmjs.com publish. Requires a public repository."
         type: boolean
@@ -513,17 +566,31 @@ jobs:
         if: ${{ inputs.publish-npm }}
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        # OIDC Trusted Publishing needs npm >= 11.5.1. When a legacy NPM_TOKEN
-        # is supplied the publish uses token auth and this floor does not apply.
+          STAGED: ${{ inputs.staged-publish }}
+        # Two floors, and they are not the same one. OIDC Trusted Publishing
+        # needs npm >= 11.5.1; `npm stage` does not exist below 11.15.0. The
+        # staging floor is checked even under a legacy token, because the
+        # command is missing from the CLI either way — the npm version is what
+        # makes `npm stage` exist, not the auth mode.
         # Fail here, not at the registry, so the diagnosis names the npm version
         # rather than surfacing as an opaque ENEEDAUTH/401.
         run: |
           set -euo pipefail
+          NPM_V="$(npm --version)"
+
+          if [ "$STAGED" = "true" ]; then
+            MIN_STAGE="11.15.0"
+            if [ "$(printf '%s\n%s\n' "$MIN_STAGE" "$NPM_V" | sort -V | head -n1)" != "$MIN_STAGE" ]; then
+              echo "::error title=npm too old for staged publishing::npm $NPM_V has no 'npm stage' command (need >= $MIN_STAGE; it first shipped in npm 11.15.0). Raise node-version to 24 — 24.18.0 and newer bundle npm >= 11.16 — or set staged-publish: false to publish straight to the registry."
+              exit 1
+            fi
+            echo "npm $NPM_V supports staged publishing (>= $MIN_STAGE)."
+          fi
+
           if [ -n "${NPM_TOKEN:-}" ]; then
             echo "NPM_TOKEN supplied; publishing via token auth, the OIDC npm floor does not apply."
             exit 0
           fi
-          NPM_V="$(npm --version)"
           MIN="11.5.1"
           if [ "$(printf '%s\n%s\n' "$MIN" "$NPM_V" | sort -V | head -n1)" != "$MIN" ]; then
             echo "::error title=npm too old for OIDC::npm $NPM_V on this runner has no Trusted Publishing support (need >= $MIN). Raise node-version to 24 (its bundled npm satisfies this), or supply an NPM_TOKEN secret to publish via token auth."
@@ -569,6 +636,7 @@ jobs:
           NPM_ACCESS: ${{ inputs.npm-access }}
           PROVENANCE: ${{ inputs.provenance }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          STAGED: ${{ inputs.staged-publish }}
         run: |
           set -euo pipefail
           ARGS=( --access "$NPM_ACCESS" )
@@ -582,7 +650,18 @@ jobs:
             echo "::warning title=Legacy npm token::Publishing with NPM_TOKEN. Configure a Trusted Publisher for this package and drop the secret."
             export NODE_AUTH_TOKEN="$NPM_TOKEN"
           fi
-          npm publish "${ARGS[@]}"
+          # `npm stage publish` is the same command with staging semantics:
+          # StagePublish extends Publish and inherits its parameters, so
+          # --access, --provenance and the OIDC exchange behave identically.
+          # The difference is where the version lands — the staging area, not
+          # the registry — and that it is NOT installable until a maintainer
+          # approves it with 2FA.
+          if [ "$STAGED" = "true" ]; then
+            npm stage publish "${ARGS[@]}"
+            echo "::notice title=Staged, not published::The version is in npm's staging area and is not installable yet. Approve it with 2FA — 'npm stage approve <stage-id>' or the Staged Packages tab on npmjs.com."
+          else
+            npm publish "${ARGS[@]}"
+          fi
 
       - name: Set up Node.js for GitHub Packages
         if: ${{ inputs.publish-github-packages }}
@@ -624,6 +703,9 @@ jobs:
         env:
           NPM_ACCESS: ${{ inputs.npm-access }}
           NODE_AUTH_TOKEN: ${{ github.token }}
+        # `staged-publish` deliberately does not reach this step: staging is an
+        # npmjs.com feature, and GitHub Packages has no approval queue to stage
+        # into. The asymmetry is intended, not an oversight.
         run: npm publish --access "$NPM_ACCESS"
 
       - name: Upload release assets
