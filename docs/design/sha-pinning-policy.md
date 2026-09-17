@@ -49,7 +49,7 @@ everything else is hash-pinned.
 | **Renovate** | Dependency updates | Not pinned by default; repos opt into the `:pinning` sub-preset, which pins third-party actions and exempts `netresearch/**`. |
 | **SonarCloud** | Secondary audit | Rule `githubactions:S7637` flags external actions without a SHA. |
 | **OpenSSF Scorecard** | Score signal | `Pinned-Dependencies` check; org-owned ref-pins lower the sub-score by design. |
-| **CodeQL** | Secondary audit, cannot be configured | Rule `actions/unpinned-tag` flags org-owned `@main` too — it has no ownership policy. Findings on `netresearch/*` are dismissed as `won't fix`, citing this ADR. |
+| **CodeQL** | Secondary audit, not configurable through the shared reusable workflow | Rule `actions/unpinned-tag` flags org-owned `@main` too; the shared `codeql.yml` exposes no ownership-policy or model-pack input. Findings on `netresearch/*` are dismissed as `won't fix`, citing this ADR. |
 
 ### GitHub
 
@@ -128,21 +128,27 @@ does not apply to our own repositories.
 
 ### CodeQL
 
-CodeQL's `actions/unpinned-tag` (in the `security-and-quality` suite the
-reusable `codeql.yml` runs) flags any `uses:` on a mutable ref. Unlike zizmor
-and Renovate it has **no ownership policy**, so every org-owned `@main`
-reference produces a medium-severity alert. The rule is still wanted for
+CodeQL's `actions/unpinned-tag` flags any `uses:` on a mutable ref. It carries
+CodeQL severity `warning` and GitHub `security_severity_level: medium`, and it
+ships in the `security-extended` and `security-and-quality` suites — the
+reusable `codeql.yml` selects `security-and-quality`. The rule is wanted for
 third-party actions, so it is not switched off.
 
-There is no per-repo exemption to configure: the reusable `codeql.yml` exposes
-`languages` and two pre-build hooks, not `config-file`, so a caller cannot pass
-a `query-filters` block — and excluding the rule there would suppress it for
-external actions as well, which is the case it exists for.
+Unlike zizmor and Renovate, **the shared reusable workflow exposes no ownership
+policy**: its inputs are `languages` and two pre-build hooks, with no
+`config-file`, so a caller can pass neither a `query-filters` block nor a model
+pack. CodeQL itself is not incapable of the distinction — the query consults a
+`trustedActionsOwnerDataModel` that a model pack can extend — but nothing in
+this org's setup reaches it today. Note also that a `query-filters` exclusion
+would suppress the rule for external actions as well, which is the case it
+exists for; a model pack would not, which is why that is the better lever if
+anyone builds it.
 
 The consequence is manual: findings on `netresearch/*` references are dismissed
 as `won't fix` with a comment naming this ADR. The dismissal comment is capped
-at 280 characters, and the reason values are `false positive`, `won't fix`,
-`used in tests` — spaces, not underscores.
+at 280 characters. The API's full enum is `false positive`, `won't fix`,
+`used in tests`, `mitigated` — spaces, not underscores; this ADR uses
+`won't fix`.
 
 ```bash
 gh api -X PATCH repos/OWNER/REPO/code-scanning/alerts/N \
@@ -179,5 +185,6 @@ third-party action is a genuine finding.
    `github>netresearch/renovate-config:pinning` — never
    `helpers:pinGitHubActionDigests` directly.
 4. Keep `.github/zizmor.yml` `unpinned-uses` policies aligned with this ADR.
-5. If the repo runs CodeQL, expect `actions/unpinned-tag` alerts on every
+5. If the repo runs CodeQL with the `security-extended` or `security-and-quality`
+   suite, or otherwise enables `actions/unpinned-tag`, expect alerts on every
    org-owned `uses:` and dismiss them as `won't fix` citing this ADR.
