@@ -172,16 +172,28 @@ jobs:
           # That branch carries `merge_queue` AND `required_status_checks` in
           # one ruleset, which is why the check below used to pass and the
           # native path was taken.
+          # The lookup can only PROVE a queue exists. Its failure proves
+          # nothing, and taking `MERGE_QUEUE=false` from an unreadable response
+          # would reintroduce the bug by the back door: the rules call fails,
+          # the classic-protection branch below still finds required checks,
+          # NATIVE_GATE goes true, and a queued branch gets an armed request
+          # again. So track whether the answer is known, and require a positive
+          # "no queue here" before trusting the native path - the same
+          # fail-safe the protection lookup below already applies.
           MERGE_QUEUE=false
+          MERGE_QUEUE_KNOWN=false
           if QRULES=$(gh api "repos/$REPO/rules/branches/$BASE_REF" 2>/dev/null); then
+            MERGE_QUEUE_KNOWN=true
             if printf '%s' "$QRULES" | jq -e 'any(.[]?; .type == "merge_queue")' >/dev/null 2>&1; then
               MERGE_QUEUE=true
               echo "Base branch '$BASE_REF' has a merge queue - enqueueing directly instead of arming native auto-merge."
             fi
+          else
+            echo "::notice::Could not read branch rules for '$BASE_REF' - cannot rule out a merge queue, gating here instead."
           fi
 
           NATIVE_GATE=false
-          if [ "$ALLOW_AUTO_MERGE" = "true" ] && [ "$MERGE_QUEUE" != "true" ]; then
+          if [ "$ALLOW_AUTO_MERGE" = "true" ] && [ "$MERGE_QUEUE_KNOWN" = "true" ] && [ "$MERGE_QUEUE" != "true" ]; then
             # Rulesets are readable with ordinary read access.
             if RULES=$(gh api "repos/$REPO/rules/branches/$BASE_REF" 2>/dev/null); then
               if printf '%s' "$RULES" | jq -e 'any(.[]?; .type == "required_status_checks")' >/dev/null 2>&1; then
@@ -274,6 +286,18 @@ jobs:
                  --jq '.autoMergeRequest != null' 2>/dev/null | grep -q true; then
               echo "::notice::Clearing a pre-existing auto-merge request before merging directly."
               gh pr merge --disable-auto "$PR_URL" || true
+
+              # Confirm it is actually gone. `--disable-auto` can fail, and a
+              # surviving request makes the merge below report success while
+              # nothing happens - the exact silent stall this path exists to
+              # end. Report and stop rather than merge into that state: the PR
+              # stays approved and open, which is what the two notices further
+              # down already treat as an acceptable outcome.
+              if gh pr view "$PR_URL" --json autoMergeRequest \
+                   --jq '.autoMergeRequest != null' 2>/dev/null | grep -q true; then
+                echo "::notice::Auto-merge request could not be cleared - approved, not merged."
+                exit 0
+              fi
             fi
           fi
 
