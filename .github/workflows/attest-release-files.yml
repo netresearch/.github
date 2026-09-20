@@ -42,6 +42,43 @@
 #       with:
 #         subject-path: 'dist/*'  # same value as release-files
 #
+# ATTACHING THE PROVENANCE TO THE RELEASE
+# =======================================
+# `gh attestation verify` finds the attestation in GitHub's store without any
+# release asset, and that is enough for a consumer who knows to look. It is
+# NOT enough for OpenSSF Scorecard: its releasesHaveProvenance probe reads
+# release assets and matches a `.intoto.jsonl` suffix, so a release with no
+# such asset scores as carrying no provenance however well it is attested.
+#
+# Pass `emit-bundle: true` to get the DSSE envelopes back as a workflow
+# artifact, one `<subject>.intoto.jsonl` per attested file, and attach them
+# in a third job:
+#
+#     attest:
+#       needs: release
+#       uses: netresearch/.github/.github/workflows/attest-release-files.yml@main
+#       permissions:
+#         id-token: write
+#         attestations: write
+#       with:
+#         subject-path: 'dist/*'
+#         emit-bundle: true
+#
+#     publish-provenance:
+#       needs: attest
+#       runs-on: ubuntu-latest
+#       permissions:
+#         contents: write
+#       steps:
+#         - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+#           with:
+#             name: ${{ needs.attest.outputs.bundle-artifact }}
+#             path: provenance
+#         - env:
+#             GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+#             TAG: ${{ github.event.release.tag_name }}
+#           run: gh release upload "$TAG" provenance/* --clobber
+#
 # Verify afterwards with (this reusable workflow is the signer, so name it;
 # `--repo` alone checks the signer against the caller repository and fails):
 #   gh attestation verify <file> --repo <owner>/<repo> \
@@ -71,6 +108,26 @@ on:
         required: false
         type: string
         default: "dist"
+      emit-bundle:
+        description: >-
+          Upload the attestation's DSSE envelope as a workflow artifact, so
+          the caller can attach it to its GitHub Release. Off by default:
+          `gh attestation verify` finds the attestation in GitHub's store
+          without it, and an extra artifact per run is not free. Turn it on
+          where the attestation has to be VISIBLE on the release — OpenSSF
+          Scorecard's releasesHaveProvenance probe reads release assets and
+          matches a `.intoto.jsonl` suffix, so nothing in GitHub's store
+          counts for it.
+        required: false
+        type: boolean
+        default: false
+    outputs:
+      bundle-artifact:
+        description: >-
+          Name of the workflow artifact holding one `<subject>.intoto.jsonl`
+          per attested file, or the empty string when `emit-bundle` is off.
+          Download it with actions/download-artifact in the calling job.
+        value: ${{ jobs.attest.outputs.bundle-artifact }}
 
 # CALLER REQUIREMENTS
 # ===================
@@ -79,6 +136,7 @@ on:
 #
 #   id-token: write        — Sigstore OIDC identity
 #   attestations: write    — write the attestation to GitHub
+
 permissions: {}
 
 jobs:
@@ -89,6 +147,8 @@ jobs:
     permissions:
       id-token: write
       attestations: write
+    outputs:
+      bundle-artifact: ${{ steps.envelope.outputs.artifact }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
@@ -161,6 +221,73 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Attest build provenance
+        id: attest
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: ${{ steps.resolve.outputs.files }}
+
+      # The step above files the attestation in GitHub's attestation store,
+      # where `gh attestation verify` finds it but a release consumer does
+      # not: nothing about the release itself says it carries provenance.
+      #
+      # What the action writes is a Sigstore bundle wrapping a DSSE envelope.
+      # Renaming that to `.intoto.jsonl` would satisfy a suffix check while
+      # misdescribing the format, so the envelope is unwrapped instead: one
+      # DSSE envelope on one line IS the JSON Lines provenance the extension
+      # denotes, and it is the same in-toto statement.
+      - name: Unwrap the DSSE envelope
+        id: envelope
+        if: inputs.emit-bundle
+        env:
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BUNDLE_PATH}" ] || [ ! -f "${BUNDLE_PATH}" ]; then
+            echo "::error title=No bundle::attest-build-provenance reported no bundle at '${BUNDLE_PATH}'."
+            exit 1
+          fi
+          mkdir -p provenance
+
+          # How the action frames several attestations in one file is not
+          # stated in its action.yml, and only the single-subject case has
+          # been observed here, so nothing below depends on the framing: jq
+          # reads a STREAM of JSON values, so one pretty-printed object and a
+          # run of concatenated ones both come out as one envelope per line.
+          jq -c '.dsseEnvelope' "${BUNDLE_PATH}" > envelopes.jsonl
+
+          count=0
+          while IFS= read -r envelope; do
+            [ -n "$envelope" ] || continue
+            # An absent field leaves jq printing "null", which would ship a
+            # file that looks like provenance and carries none.
+            if [ "$envelope" = "null" ]; then
+              echo "::error title=No envelope::an attestation in '${BUNDLE_PATH}' has no dsseEnvelope."
+              exit 1
+            fi
+            # Name each envelope after the file it attests, so a caller
+            # attaching several of them can tell them apart.
+            subject=$(printf '%s' "$envelope" | jq -r '.payload' | base64 -d \
+                      | jq -r '.subject[0].name // empty')
+            if [ -z "$subject" ]; then
+              echo "::error title=No subject::an attestation in '${BUNDLE_PATH}' names no subject."
+              exit 1
+            fi
+            printf '%s\n' "$envelope" > "provenance/$(basename "$subject").intoto.jsonl"
+            count=$((count + 1))
+          done < envelopes.jsonl
+
+          if [ "$count" -eq 0 ]; then
+            echo "::error title=Empty bundle::'${BUNDLE_PATH}' held no attestation."
+            exit 1
+          fi
+          echo "Wrote ${count} envelope(s):"
+          ls -1 provenance/
+          echo "artifact=attestation-bundle" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the envelopes
+        if: inputs.emit-bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: attestation-bundle
+          path: provenance/
+          if-no-files-found: error
