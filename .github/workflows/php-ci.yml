@@ -753,7 +753,7 @@ jobs:
         # from every matrix entry. Coverage driver must be enabled and the
         # phpunit-cmd must have produced the coverage file.
         if: ${{ inputs.upload-coverage-codecov && matrix.php == inputs.coverage-php-version && inputs.coverage != 'none' }}
-        uses: codecov/codecov-action@0b35c9ecc4f0529d0eb674914510c22f85b196b4 # v7.1.0
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ${{ inputs.coverage-file }}
