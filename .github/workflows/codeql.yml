@@ -200,6 +200,21 @@ jobs:
               - '**/vendor/**'
               - '**/node_modules/**'
               - '.Build/**'
+            query-filters:
+              # actions/unpinned-tag fires on every `uses: netresearch/.github/...@main`,
+              # which is this org's documented convention (AGENTS.md): first-party
+              # reusables track @main so a fix reaches every consumer, and the
+              # third-party actions they call are SHA-pinned inside them — which is
+              # where foreign code actually enters.
+              #
+              # The distinction the rule cannot make is already enforced elsewhere:
+              # .github/zizmor.yml sets `netresearch/* -> ref-pin` and `* -> hash-pin`,
+              # and the shared zizmor workflow installs that config in any consumer
+              # that has none. So an unpinned THIRD-PARTY action still fails an audit;
+              # what this filter removes is the first-party noise, which every
+              # consumer repo would otherwise dismiss by hand, one alert per caller.
+              - exclude:
+                  id: actions/unpinned-tag
 
       - name: Run Go pre-build command
         if: ${{ matrix.language == 'go' && inputs.pre-build-cmd-go != '' }}
