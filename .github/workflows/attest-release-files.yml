@@ -63,6 +63,8 @@
 #       with:
 #         subject-path: 'dist/*'
 #         emit-bundle: true
+#         # Only when the caller attests MORE THAN ONCE in one workflow:
+#         # bundle-artifact-name: attestation-bundle-<what-this-call-attests>
 #
 #     publish-provenance:
 #       needs: attest
@@ -121,12 +123,25 @@ on:
         required: false
         type: boolean
         default: false
+      bundle-artifact-name:
+        description: >-
+          Name of the artifact the envelopes are uploaded under. Give each
+          call its own name where a caller invokes this workflow MORE THAN
+          ONCE with `emit-bundle: true` — actions/upload-artifact refuses a
+          name that already exists in the run, so the second call would fail.
+          A caller with one attesting job can leave it alone.
+        required: false
+        type: string
+        default: "attestation-bundle"
     outputs:
       bundle-artifact:
         description: >-
           Name of the workflow artifact holding one `<subject>.intoto.jsonl`
           per attested file, or the empty string when `emit-bundle` is off.
-          Download it with actions/download-artifact in the calling job.
+          Download it with actions/download-artifact in the calling job, by
+          THIS value rather than by a literal, so a changed
+          `bundle-artifact-name` cannot leave the download pointing at a name
+          nothing was uploaded under.
         value: ${{ jobs.attest.outputs.bundle-artifact }}
 
 # CALLER REQUIREMENTS
@@ -240,8 +255,13 @@ jobs:
         if: inputs.emit-bundle
         env:
           BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+          ARTIFACT_NAME: ${{ inputs.bundle-artifact-name }}
         run: |
           set -euo pipefail
+          if [ -z "${ARTIFACT_NAME//[[:space:]]/}" ]; then
+            echo "::error title=No artifact name::bundle-artifact-name is empty."
+            exit 1
+          fi
           if [ -z "${BUNDLE_PATH}" ] || [ ! -f "${BUNDLE_PATH}" ]; then
             echo "::error title=No bundle::attest-build-provenance reported no bundle at '${BUNDLE_PATH}'."
             exit 1
@@ -282,12 +302,12 @@ jobs:
           fi
           echo "Wrote ${count} envelope(s):"
           ls -1 provenance/
-          echo "artifact=attestation-bundle" >> "$GITHUB_OUTPUT"
+          echo "artifact=${ARTIFACT_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Upload the envelopes
         if: inputs.emit-bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: attestation-bundle
+          name: ${{ inputs.bundle-artifact-name }}
           path: provenance/
           if-no-files-found: error
