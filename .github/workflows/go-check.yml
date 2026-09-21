@@ -522,6 +522,16 @@ jobs:
 
       - name: Run gosec
         uses: securego/gosec@681347199262bc33b9b5119ae2b448dec5718240 # master
+        env:
+          # gosec runs in its own container with the Go that image ships, not
+          # the one "Set up Go" installed. setup-go exports GOTOOLCHAIN=local
+          # for the rest of the job and the container inherits it. When the
+          # caller's go directive is newer than the image's Go, `go list` then
+          # refuses the module ("go.mod requires go >= X (running go Y;
+          # GOTOOLCHAIN=local)"); gosec swallows that error and exits 1 with an
+          # empty SARIF and no message. `auto` lets the container fetch the
+          # toolchain go.mod asks for, so the scan runs instead of dying mute.
+          GOTOOLCHAIN: auto
         with:
           # Findings fail the job unless gosec-strict is set false. They also
           # reach the Security tab through the SARIF upload below, which runs
