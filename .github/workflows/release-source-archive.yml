@@ -33,8 +33,12 @@
 #   an immutable release refuses. Creating the release at the end of the run
 #   that built everything avoids both.
 # - Nothing is edited after publication. The draft flag flips at the end of
-#   the release job, once every asset is present; a re-run completes its own
-#   draft and refuses a release that is already published.
+#   the release job, once every asset is present and nothing else is; a
+#   re-run discards a draft an earlier run left and refuses a release that is
+#   already published.
+#
+# Check a release the way a user would with verify-release.yml here, passing
+# this workflow as signer-workflow and in identity-regexp.
 #
 # Caller pattern (.github/workflows/release.yml):
 #
@@ -149,10 +153,12 @@ jobs:
           fi
           tag="$GITHUB_REF_NAME"
           base="${NAME:-${GITHUB_REPOSITORY##*/}}"
-          # Both become part of a file name and of the archive's path prefix.
+          # Both become part of a file name, of the archive's path prefix and
+          # of checksums.txt, whose readers split lines on whitespace. Allow
+          # only characters every one of those consumers handles.
           for v in "$tag" "$base"; do
-            if [[ -z "$v" || "$v" == */* || "$v" == *..* || "$v" == -* ]]; then
-              echo "::error::'$v' is not usable as a file name."
+            if ! [[ "$v" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || [[ "$v" == *..* ]]; then
+              echo "::error::'$v' is not usable as a file name: use letters, digits, '.', '_' and '-'."
               exit 1
             fi
           done
@@ -237,6 +243,17 @@ jobs:
           subject-path: dist/${{ steps.names.outputs.archive }}
           sbom-path: dist/${{ steps.names.outputs.stem }}.sbom.spdx.json
 
+      # The SBOM files are built here too, and verify-release.yml checks build
+      # provenance on every asset that is not a signature, a checksum list or
+      # an `.intoto.jsonl` -- which includes the CycloneDX file.
+      - name: Generate build-provenance attestation for the SBOMs
+        if: inputs.include-sbom
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/${{ steps.names.outputs.stem }}.sbom.spdx.json
+            dist/${{ steps.names.outputs.stem }}.sbom.cdx.json
+
       # The attestation lives in GitHub's store, where `gh attestation verify`
       # finds it and a release consumer does not. Scorecard reads release
       # assets, so the DSSE envelope is attached as `.intoto.jsonl` -- unwrapped
@@ -270,7 +287,9 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          sha256sum ./* > checksums.txt
+          # Bare names, not ./name: verify-release.yml compares field 2 with
+          # the asset names, and `sha256sum -c` accepts either.
+          sha256sum -- * > checksums.txt
           cat checksums.txt
 
       - name: Install Cosign
@@ -334,23 +353,26 @@ jobs:
         run: |
           set -euo pipefail
           if gh release view "$TAG" --repo "$REPO" --json isDraft --jq '.isDraft' > state.txt 2> view.err; then
-            # A re-run after a failed upload finds its own draft and completes
-            # it. A published release is never touched: its files are fixed.
+            # A published release is never touched: its files are fixed.
             if [[ "$(< state.txt)" != "true" ]]; then
               echo "::error::Release ${TAG} is already published. Its files are fixed; push a new tag instead."
               exit 1
             fi
-            echo "Draft for ${TAG} exists; completing it."
-          else
-            if ! grep -qi 'not found' view.err; then
-              echo "::error::Could not read release ${TAG}: $(< view.err)"
-              exit 1
-            fi
-            # --verify-tag: never let gh create a missing tag, which would be
-            # lightweight and burn the name.
-            gh release create "$TAG" --repo "$REPO" --draft --verify-tag \
-              --title "$TAG" --generate-notes
+            # A draft left by an earlier run holds that run's SBOMs and
+            # signatures, which differ from this run's (timestamps, fresh
+            # certificates). Completing it would mix two runs under one
+            # checksums.txt, so it is discarded. A draft is not immutable, and
+            # deleting it leaves the tag in place.
+            echo "Discarding the draft an earlier run left for ${TAG}."
+            gh release delete "$TAG" --repo "$REPO" --yes
+          elif ! grep -qi 'not found' view.err; then
+            echo "::error::Could not read release ${TAG}: $(< view.err)"
+            exit 1
           fi
+          # --verify-tag: never let gh create a missing tag, which would be
+          # lightweight and burn the name.
+          gh release create "$TAG" --repo "$REPO" --draft --verify-tag \
+            --title "$TAG" --generate-notes
 
       # From release-typo3-extension.yml: upload what is missing, per asset,
       # sequentially and with retries; publish only once the set is complete.
@@ -406,7 +428,14 @@ jobs:
             echo "::error::Still missing after ${ATTEMPTS} attempts: $(paste -sd' ' missing.txt). The release stays an unpublished draft."
             exit 1
           fi
-          echo "All $(wc -l < expected.txt) assets are on the release."
+          # The other direction: a file on the draft that this run did not
+          # build would ship unchecksummed and unsigned.
+          comm -13 expected.txt present.txt > extra.txt
+          if [[ -s extra.txt ]]; then
+            echo "::error::The draft carries files this run did not build: $(paste -sd' ' extra.txt). The release stays an unpublished draft."
+            exit 1
+          fi
+          echo "All $(wc -l < expected.txt) assets are on the release, and nothing else."
 
           echo "Publishing the completed release."
           gh release edit "$TAG" --repo "$REPO" --draft=false --latest="$MAKE_LATEST"
