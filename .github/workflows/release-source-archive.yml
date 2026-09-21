@@ -4,13 +4,13 @@
 # Reusable "Release source archive" — for a project whose release artefact is
 # its source tree (an application, a library without a package build). On a
 # tag push it builds the source archive, SBOMs, checksums, Cosign signatures
-# and build provenance, then creates the GitHub Release LAST, in one call,
-# with every file attached.
+# and build provenance, then creates the GitHub Release LAST, as a draft that
+# is published only once every file is attached.
 #
 # Same shape as typo3-ci-workflows/release-typo3-extension.yml
 # (build-and-sign + create-release) and release-go-app.yml here, minus the
-# ecosystem-specific publishing. The two jobs below are copied from the TYPO3
-# one; the comments there explain each guard in more detail.
+# ecosystem-specific publishing. The build job and the upload loop are copied
+# from the TYPO3 one; the comments there explain each guard in more detail.
 #
 # WHY THIS REACHES SLSA BUILD LEVEL 3
 # ===================================
@@ -32,8 +32,9 @@
 #   release created by hand has to be completed afterwards by uploads, which
 #   an immutable release refuses. Creating the release at the end of the run
 #   that built everything avoids both.
-# - Nothing is edited after publication except the draft flag, which the
-#   completion step flips once every asset is present.
+# - Nothing is edited after publication. The draft flag flips at the end of
+#   the release job, once every asset is present; a re-run completes its own
+#   draft and refuses a release that is already published.
 #
 # Caller pattern (.github/workflows/release.yml):
 #
@@ -315,30 +316,50 @@ jobs:
           name: release-dist
           path: dist/
 
-      - name: Create GitHub Release (atomic, all assets)
-        # The action creates a draft, uploads, then publishes; an upload that
-        # dies leaves a draft with a partial asset set. The completion step
-        # below finishes it or fails loudly, and continue-on-error lets it run.
-        continue-on-error: true
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
-        with:
-          make_latest: ${{ inputs.make-latest }}
-          files: |
-            dist/*
-          fail_on_unmatched_files: true
-          # Sequential uploads: concurrent ones make GitHub's asset endpoint
-          # answer `Error creating asset temp dir`.
-          preserve_order: true
-          generate_release_notes: true
-
-      # Copied from release-typo3-extension.yml: upload what is missing, per
-      # asset, with retries; publish only once the set is complete.
-      - name: Complete and publish the release
+      # A draft first, published only once every file is on it. Nobody sees a
+      # release with a partial asset set, and the only edit after publication
+      # is none: the draft flag flips at the end of this job.
+      #
+      # `gh` rather than softprops/action-gh-release: the upload loop below
+      # has to exist anyway, because GitHub's asset endpoint answers `Error
+      # creating asset temp dir` often enough that an action without per-asset
+      # retries loses whole releases (see release-typo3-extension.yml). With
+      # the loop in place the action adds nothing but a third-party dependency.
+      - name: Create the draft release
         env:
           GH_TOKEN: ${{ github.token }}
           # No checkout in this job, so every gh call names the repository.
           REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$REPO" --json isDraft --jq '.isDraft' > state.txt 2> view.err; then
+            # A re-run after a failed upload finds its own draft and completes
+            # it. A published release is never touched: its files are fixed.
+            if [[ "$(< state.txt)" != "true" ]]; then
+              echo "::error::Release ${TAG} is already published. Its files are fixed; push a new tag instead."
+              exit 1
+            fi
+            echo "Draft for ${TAG} exists; completing it."
+          else
+            if ! grep -qi 'not found' view.err; then
+              echo "::error::Could not read release ${TAG}: $(< view.err)"
+              exit 1
+            fi
+            # --verify-tag: never let gh create a missing tag, which would be
+            # lightweight and burn the name.
+            gh release create "$TAG" --repo "$REPO" --draft --verify-tag \
+              --title "$TAG" --generate-notes
+          fi
+
+      # From release-typo3-extension.yml: upload what is missing, per asset,
+      # sequentially and with retries; publish only once the set is complete.
+      - name: Upload the files and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          MAKE_LATEST: ${{ inputs.make-latest }}
           ATTEMPTS: '4'
         run: |
           set -euo pipefail
@@ -387,7 +408,5 @@ jobs:
           fi
           echo "All $(wc -l < expected.txt) assets are on the release."
 
-          if [[ "$(gh release view "$TAG" --repo "$REPO" --json isDraft --jq '.isDraft')" == "true" ]]; then
-            echo "Publishing the completed release."
-            gh release edit "$TAG" --repo "$REPO" --draft=false
-          fi
+          echo "Publishing the completed release."
+          gh release edit "$TAG" --repo "$REPO" --draft=false --latest="$MAKE_LATEST"
