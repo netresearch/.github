@@ -1,0 +1,456 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# Reusable "Release source archive" — for a project whose release artefact is
+# its source tree (an application, a library without a package build). On a
+# tag push it builds the source archive, SBOMs, checksums, Cosign signatures
+# and build provenance, then creates the GitHub Release LAST, as a draft that
+# is published only once every file is attached.
+#
+# Same shape as typo3-ci-workflows/release-typo3-extension.yml
+# (build-and-sign + create-release) and release-go-app.yml here, minus the
+# ecosystem-specific publishing. The build job and the upload loop are copied
+# from the TYPO3 one; the comments there explain each guard in more detail.
+#
+# WHY THIS REACHES SLSA BUILD LEVEL 3
+# ===================================
+# GitHub: "Artifact attestations by itself provides SLSA v1.0 Build Level 2.
+# Reusable workflows can provide isolation between the build process and the
+# calling workflow, to meet SLSA v1.0 Build Level 3."
+# (https://docs.github.com/en/actions/concepts/security/artifact-attestations)
+#
+# Checkout, `git archive`, the SBOMs and the signatures all run in a job of
+# THIS workflow, which the calling repository cannot edit. The caller chooses
+# the tag by pushing it, and passes no command. Contrast
+# attest-release-files.yml, which signs files a job in the caller built:
+# the signer is isolated there, the build is not, so that is Level 2.
+#
+# WHY TAG PUSH, AND WHY THE RELEASE IS CREATED LAST
+# =================================================
+# - A release created by a workflow with GITHUB_TOKEN starts no other
+#   workflow, so "attest on `release: published`" never runs for it; and a
+#   release created by hand has to be completed afterwards by uploads, which
+#   an immutable release refuses. Creating the release at the end of the run
+#   that built everything avoids both.
+# - Nothing is edited after publication. The draft flag flips at the end of
+#   the release job, once every asset is present and nothing else is; a
+#   re-run discards a draft an earlier run left and refuses a release that is
+#   already published.
+#
+# Check a release the way a user would with verify-release.yml here, passing
+# this workflow as signer-workflow and in identity-regexp.
+#
+# Caller pattern (.github/workflows/release.yml):
+#
+#   on:
+#     push:
+#       tags: ['v*']
+#   permissions: {}
+#   jobs:
+#     release:
+#       uses: netresearch/.github/.github/workflows/release-source-archive.yml@main
+#       permissions:
+#         contents: write        # create the release
+#         id-token: write        # Sigstore OIDC identity (cosign + attestations)
+#         attestations: write    # file the attestations with GitHub
+#
+# WHAT LANDS ON THE RELEASE
+# =========================
+#   <name>-<tag>-source.tar.gz                  the archive
+#   <name>-<tag>-source.tar.gz.intoto.jsonl     build provenance (DSSE envelope)
+#   <name>-<tag>-source.sbom.spdx.json          SBOM, SPDX
+#   <name>-<tag>-source.sbom.cdx.json           SBOM, CycloneDX
+#   checksums.txt                               SHA-256 of all of the above
+#   <each file>.sigstore.json                   Cosign keyless signature bundle
+#
+# OpenSSF Scorecard reads release assets: Signed-Releases matches
+# `.sigstore.json` and `.intoto.jsonl`, the SBOM check matches the SBOM names.
+#
+# VERIFYING
+# =========
+#   gh attestation verify <name>-<tag>-source.tar.gz --repo <owner>/<repo> \
+#     --signer-workflow netresearch/.github/.github/workflows/release-source-archive.yml
+#
+# REPRODUCIBILITY
+# ===============
+# `git archive --format=tar | gzip -9 -n`: tar entries carry the commit time
+# and `gzip -n` writes no name or timestamp, so the digest is stable for one
+# tag and one git version. Not `--format=tar.gz`: git's built-in gzip is a
+# different encoder, and a consumer rebuilding with plain `gzip` would get a
+# different digest.
+
+name: Release source archive (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      name:
+        description: >-
+          Base name of the archive. Empty uses the repository name, giving
+          `<repo>-<tag>-source.tar.gz` with top-level directory `<repo>-<tag>/`.
+        required: false
+        type: string
+        default: ""
+      include-sbom:
+        description: Attach SPDX and CycloneDX SBOMs of the archive's contents, and attest the SPDX one.
+        required: false
+        type: boolean
+        default: true
+      sign-artifacts:
+        description: Sign every asset with Cosign keyless signing.
+        required: false
+        type: boolean
+        default: true
+      make-latest:
+        description: >-
+          Mark this release as "Latest". Set false on a backport branch so an
+          older line does not take the badge and the /releases/latest redirect.
+          A tag with a suffix (v1.2.3-rc.1) is published as a pre-release and
+          never as Latest, whatever this says.
+        required: false
+        type: boolean
+        default: true
+    outputs:
+      archive:
+        description: File name of the source archive on the release.
+        value: ${{ jobs.build-and-sign.outputs.archive }}
+
+# CALLER REQUIREMENTS
+# ===================
+# The calling job MUST grant every scope below, or the run fails with
+# `startup_failure` before any job executes:
+#
+#   contents: write        — create the release
+#   id-token: write        — Sigstore OIDC identity
+#   attestations: write    — file the attestations with GitHub
+
+permissions: {}
+
+jobs:
+  build-and-sign:
+    name: Build & sign artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    outputs:
+      archive: ${{ steps.names.outputs.archive }}
+      prerelease: ${{ steps.names.outputs.prerelease }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Resolve the names
+        id: names
+        env:
+          NAME: ${{ inputs.name }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != refs/tags/* ]]; then
+            echo "::error::This workflow runs on a tag push; got ref ${GITHUB_REF}."
+            exit 1
+          fi
+          tag="$GITHUB_REF_NAME"
+          base="${NAME:-${GITHUB_REPOSITORY##*/}}"
+          # Both become part of a file name, of the archive's path prefix and
+          # of checksums.txt, whose readers split lines on whitespace. Allow
+          # only characters every one of those consumers handles.
+          for v in "$tag" "$base"; do
+            if ! [[ "$v" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || [[ "$v" == *..* ]]; then
+              echo "::error::'$v' is not usable as a file name: use letters, digits, '.', '_' and '-'."
+              exit 1
+            fi
+          done
+          # A tag with a suffix (v1.2.3-rc.1) is a pre-release: marked as
+          # such, and never "Latest".
+          prerelease=false
+          [[ "$tag" == *-* ]] && prerelease=true
+          {
+            echo "tag=$tag"
+            echo "prerelease=$prerelease"
+            echo "prefix=${base}-${tag}"
+            echo "archive=${base}-${tag}-source.tar.gz"
+            echo "stem=${base}-${tag}-source"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # A lightweight tag carries no tagger and no signature. Asked of the API
+      # rather than of git: checkout stores the tag as the commit it points
+      # to, and a credential-less re-fetch fails on a private repository.
+      - name: Require an annotated tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.names.outputs.tag }}
+        run: |
+          set -euo pipefail
+          type=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.type')
+          if [[ "$type" != "tag" ]]; then
+            echo "::error::${TAG} is a lightweight tag (${type}). Push an annotated, signed tag: git tag -s ${TAG} -m ${TAG}"
+            exit 1
+          fi
+
+      - name: Create the source archive
+        env:
+          PREFIX: ${{ steps.names.outputs.prefix }}
+          ARCHIVE: ${{ steps.names.outputs.archive }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # HEAD, not the tag name: checkout resolved the ref to this commit.
+          git archive --format=tar --prefix="${PREFIX}/" HEAD | gzip -9 -n > "dist/${ARCHIVE}"
+          sha256sum "dist/${ARCHIVE}"
+
+      # The SBOM describes what is IN the archive, so it is taken from the
+      # unpacked archive, not from the checkout with its .git directory.
+      - name: Unpack the archive for the SBOM
+        if: inputs.include-sbom
+        env:
+          ARCHIVE: ${{ steps.names.outputs.archive }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/unpacked"
+          tar -xzf "dist/${ARCHIVE}" -C "${RUNNER_TEMP}/unpacked"
+
+      - name: Generate SBOM (SPDX)
+        if: inputs.include-sbom
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          path: ${{ runner.temp }}/unpacked
+          format: spdx-json
+          output-file: dist/${{ steps.names.outputs.stem }}.sbom.spdx.json
+          # This job is contents: read; the release job attaches the assets.
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Generate SBOM (CycloneDX)
+        if: inputs.include-sbom
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          path: ${{ runner.temp }}/unpacked
+          format: cyclonedx-json
+          output-file: dist/${{ steps.names.outputs.stem }}.sbom.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Generate build-provenance attestation
+        id: provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/${{ steps.names.outputs.archive }}
+
+      - name: Attest the SBOM
+        if: inputs.include-sbom
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: dist/${{ steps.names.outputs.archive }}
+          sbom-path: dist/${{ steps.names.outputs.stem }}.sbom.spdx.json
+
+      # The SBOM files are built here too, and verify-release.yml checks build
+      # provenance on every asset that is not a signature, a checksum list or
+      # an `.intoto.jsonl` -- which includes the CycloneDX file.
+      - name: Generate build-provenance attestation for the SBOMs
+        if: inputs.include-sbom
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/${{ steps.names.outputs.stem }}.sbom.spdx.json
+            dist/${{ steps.names.outputs.stem }}.sbom.cdx.json
+
+      # The attestation lives in GitHub's store, where `gh attestation verify`
+      # finds it and a release consumer does not. Scorecard reads release
+      # assets, so the DSSE envelope is attached as `.intoto.jsonl` -- unwrapped
+      # from the Sigstore bundle rather than the bundle renamed, because one
+      # envelope on one line is what that extension denotes.
+      - name: Unwrap the provenance envelope
+        env:
+          BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
+          ARCHIVE: ${{ steps.names.outputs.archive }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$BUNDLE_PATH" || ! -s "$BUNDLE_PATH" ]]; then
+            echo "::error::attest-build-provenance reported no bundle at '${BUNDLE_PATH}'."
+            exit 1
+          fi
+          envelope=$(jq -c '.dsseEnvelope' "$BUNDLE_PATH")
+          # An absent field makes jq print "null": a file that looks like
+          # provenance and carries none.
+          if [[ -z "$envelope" || "$envelope" == "null" ]]; then
+            echo "::error::'${BUNDLE_PATH}' holds no dsseEnvelope."
+            exit 1
+          fi
+          subject=$(printf '%s' "$envelope" | jq -r '.payload' | base64 -d | jq -r '.subject[0].name // empty')
+          if [[ "$subject" != "$ARCHIVE" ]]; then
+            echo "::error::the provenance names '${subject}', expected '${ARCHIVE}'."
+            exit 1
+          fi
+          printf '%s\n' "$envelope" > "dist/${ARCHIVE}.intoto.jsonl"
+
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          # Bare names, not ./name: verify-release.yml compares field 2 with
+          # the asset names, and `sha256sum -c` accepts either.
+          sha256sum -- * > checksums.txt
+          cat checksums.txt
+
+      - name: Install Cosign
+        if: inputs.sign-artifacts
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign artifacts with Cosign (keyless)
+        if: inputs.sign-artifacts
+        run: |
+          set -euo pipefail
+          cd dist
+          for file in *; do
+            [[ -f "$file" ]] || continue
+            # .sigstore.json, the Sigstore bundle format, is what Scorecard
+            # recognises as a signature. Bytes are cosign's --bundle output.
+            cosign sign-blob --yes "$file" --bundle "${file}.sigstore.json"
+          done
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-dist
+          path: dist/
+          retention-days: 1
+          if-no-files-found: error
+
+  create-release:
+    name: Create GitHub Release
+    needs: build-and-sign
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Download dist artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-dist
+          path: dist/
+
+      # A draft first, published only once every file is on it. Nobody sees a
+      # release with a partial asset set, and the only edit after publication
+      # is none: the draft flag flips at the end of this job.
+      #
+      # `gh` rather than softprops/action-gh-release: the upload loop below
+      # has to exist anyway, because GitHub's asset endpoint answers `Error
+      # creating asset temp dir` often enough that an action without per-asset
+      # retries loses whole releases (see release-typo3-extension.yml). With
+      # the loop in place the action adds nothing but a third-party dependency.
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # No checkout in this job, so every gh call names the repository.
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          PRERELEASE: ${{ needs.build-and-sign.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$REPO" --json isDraft --jq '.isDraft' > state.txt 2> view.err; then
+            # A published release is never touched: its files are fixed.
+            if [[ "$(< state.txt)" != "true" ]]; then
+              echo "::error::Release ${TAG} is already published. Its files are fixed; push a new tag instead."
+              exit 1
+            fi
+            # A draft left by an earlier run holds that run's SBOMs and
+            # signatures, which differ from this run's (timestamps, fresh
+            # certificates). Completing it would mix two runs under one
+            # checksums.txt, so it is discarded. A draft is not immutable, and
+            # deleting it leaves the tag in place.
+            echo "Discarding the draft an earlier run left for ${TAG}."
+            gh release delete "$TAG" --repo "$REPO" --yes
+          elif ! grep -qi 'not found' view.err; then
+            echo "::error::Could not read release ${TAG}: $(< view.err)"
+            exit 1
+          fi
+          # --verify-tag: never let gh create a missing tag, which would be
+          # lightweight and burn the name.
+          gh release create "$TAG" --repo "$REPO" --draft --verify-tag \
+            --title "$TAG" --generate-notes --prerelease="$PRERELEASE"
+
+      # From release-typo3-extension.yml: upload what is missing, per asset,
+      # sequentially and with retries; publish only once the set is complete.
+      - name: Upload the files and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          MAKE_LATEST: ${{ inputs.make-latest }}
+          PRERELEASE: ${{ needs.build-and-sign.outputs.prerelease }}
+          ATTEMPTS: '4'
+        run: |
+          set -euo pipefail
+
+          [[ -d dist ]] || { echo "::error::dist/ is missing; nothing to upload."; exit 1; }
+          find dist -maxdepth 1 -type f -printf '%f\n' | sort > expected.txt
+          [[ -s expected.txt ]] || { echo "::error::dist/ holds no files."; exit 1; }
+
+          # Only assets in state `uploaded` count; a failed upload can leave an
+          # empty `starter` asset behind under the same name.
+          read_present() {
+            if ! gh release view "$TAG" --repo "$REPO" --json assets \
+                --jq '.assets[] | select(.state == "uploaded") | .name' > present.raw 2> present.err; then
+              echo "::error::No release for ${TAG} to complete: $(cat present.err)"
+              exit 1
+            fi
+            sort present.raw > present.txt
+          }
+
+          for attempt in $(seq 1 "$ATTEMPTS"); do
+            read_present
+            comm -23 expected.txt present.txt > missing.txt
+            [[ -s missing.txt ]] || break
+
+            echo "Attempt ${attempt}/${ATTEMPTS}: $(wc -l < missing.txt) asset(s) missing:"
+            cat missing.txt
+
+            while IFS= read -r name; do
+              if gh release upload "$TAG" "dist/${name}" --repo "$REPO" --clobber; then
+                echo "  uploaded ${name}"
+              else
+                echo "::warning::upload of ${name} failed on attempt ${attempt}; retrying"
+              fi
+            done < missing.txt
+
+            if [[ "$attempt" -lt "$ATTEMPTS" ]]; then
+              sleep $(( attempt * 5 ))
+            fi
+          done
+
+          read_present
+          comm -23 expected.txt present.txt > missing.txt
+          if [[ -s missing.txt ]]; then
+            echo "::error::Still missing after ${ATTEMPTS} attempts: $(paste -sd' ' missing.txt). The release stays an unpublished draft."
+            exit 1
+          fi
+          # The other direction: a file on the draft that this run did not
+          # build would ship unchecksummed and unsigned.
+          comm -13 expected.txt present.txt > extra.txt
+          if [[ -s extra.txt ]]; then
+            echo "::error::The draft carries files this run did not build: $(paste -sd' ' extra.txt). The release stays an unpublished draft."
+            exit 1
+          fi
+          echo "All $(wc -l < expected.txt) assets are on the release, and nothing else."
+
+          # A pre-release never takes the "Latest" badge or /releases/latest.
+          latest="$MAKE_LATEST"
+          [[ "$PRERELEASE" == "true" ]] && latest=false
+          echo "Publishing the completed release (latest=${latest}, prerelease=${PRERELEASE})."
+          gh release edit "$TAG" --repo "$REPO" --draft=false --latest="$latest"

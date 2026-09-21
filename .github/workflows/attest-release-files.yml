@@ -21,6 +21,16 @@
 # Consequence: the attestation is recorded right after the release job, not
 # before the Release is published.
 #
+# SLSA LEVEL: 2, NOT 3
+# ====================
+# The files attested here were built by a job in the CALLING repository, from
+# steps that repository can edit. The signer is isolated, the build is not, so
+# this is SLSA Build Level 2 ("Artifact attestations by itself provides SLSA
+# v1.0 Build Level 2" — GitHub docs, artifact attestations). Level 3 needs the
+# build itself inside a reusable: release-source-archive.yml for a source
+# archive, release-go-app.yml for Go, typo3-ci-workflows'
+# release-typo3-extension.yml for TYPO3 extensions.
+#
 # Caller pattern (pairs with python-release.yml):
 #
 #   jobs:
