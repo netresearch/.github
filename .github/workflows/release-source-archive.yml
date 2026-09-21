@@ -105,6 +105,8 @@ on:
         description: >-
           Mark this release as "Latest". Set false on a backport branch so an
           older line does not take the badge and the /releases/latest redirect.
+          A tag with a suffix (v1.2.3-rc.1) is published as a pre-release and
+          never as Latest, whatever this says.
         required: false
         type: boolean
         default: true
@@ -135,6 +137,7 @@ jobs:
       attestations: write
     outputs:
       archive: ${{ steps.names.outputs.archive }}
+      prerelease: ${{ steps.names.outputs.prerelease }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
@@ -162,8 +165,13 @@ jobs:
               exit 1
             fi
           done
+          # A tag with a suffix (v1.2.3-rc.1) is a pre-release: marked as
+          # such, and never "Latest".
+          prerelease=false
+          [[ "$tag" == *-* ]] && prerelease=true
           {
             echo "tag=$tag"
+            echo "prerelease=$prerelease"
             echo "prefix=${base}-${tag}"
             echo "archive=${base}-${tag}-source.tar.gz"
             echo "stem=${base}-${tag}-source"
@@ -174,14 +182,16 @@ jobs:
         with:
           persist-credentials: false
 
-      # A lightweight tag carries no tagger and no signature.
+      # A lightweight tag carries no tagger and no signature. Asked of the API
+      # rather than of git: checkout stores the tag as the commit it points
+      # to, and a credential-less re-fetch fails on a private repository.
       - name: Require an annotated tag
         env:
+          GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.names.outputs.tag }}
         run: |
           set -euo pipefail
-          git fetch --no-tags --depth=1 origin "+refs/tags/${TAG}:refs/tags/${TAG}"
-          type=$(git cat-file -t "refs/tags/${TAG}")
+          type=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.type')
           if [[ "$type" != "tag" ]]; then
             echo "::error::${TAG} is a lightweight tag (${type}). Push an annotated, signed tag: git tag -s ${TAG} -m ${TAG}"
             exit 1
@@ -350,6 +360,7 @@ jobs:
           # No checkout in this job, so every gh call names the repository.
           REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
+          PRERELEASE: ${{ needs.build-and-sign.outputs.prerelease }}
         run: |
           set -euo pipefail
           if gh release view "$TAG" --repo "$REPO" --json isDraft --jq '.isDraft' > state.txt 2> view.err; then
@@ -372,7 +383,7 @@ jobs:
           # --verify-tag: never let gh create a missing tag, which would be
           # lightweight and burn the name.
           gh release create "$TAG" --repo "$REPO" --draft --verify-tag \
-            --title "$TAG" --generate-notes
+            --title "$TAG" --generate-notes --prerelease="$PRERELEASE"
 
       # From release-typo3-extension.yml: upload what is missing, per asset,
       # sequentially and with retries; publish only once the set is complete.
@@ -382,6 +393,7 @@ jobs:
           REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
           MAKE_LATEST: ${{ inputs.make-latest }}
+          PRERELEASE: ${{ needs.build-and-sign.outputs.prerelease }}
           ATTEMPTS: '4'
         run: |
           set -euo pipefail
@@ -437,5 +449,8 @@ jobs:
           fi
           echo "All $(wc -l < expected.txt) assets are on the release, and nothing else."
 
-          echo "Publishing the completed release."
-          gh release edit "$TAG" --repo "$REPO" --draft=false --latest="$MAKE_LATEST"
+          # A pre-release never takes the "Latest" badge or /releases/latest.
+          latest="$MAKE_LATEST"
+          [[ "$PRERELEASE" == "true" ]] && latest=false
+          echo "Publishing the completed release (latest=${latest}, prerelease=${PRERELEASE})."
+          gh release edit "$TAG" --repo "$REPO" --draft=false --latest="$latest"
