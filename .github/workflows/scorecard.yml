@@ -52,6 +52,8 @@ jobs:
           results_file: results.sarif
           results_format: sarif
           publish_results: true
+          # Include files hidden from archives by .gitattributes export-ignore.
+          file_mode: git
 
       - name: Upload SARIF
         # Skip on merge_group: the gh-readonly-queue ref is deleted by GitHub
