@@ -31,6 +31,17 @@ on:
           open for a human.
         type: number
         default: 15
+    secrets:
+      merge-app-id:
+        description: >-
+          App id of a GitHub App to merge with (#450). A merge made with
+          GITHUB_TOKEN raises no event, so CI never runs on the merge commit;
+          one made with an App installation token does. Optional: without it
+          the merge uses GITHUB_TOKEN as before.
+        required: false
+      merge-app-private-key:
+        description: Private key of the App named by merge-app-id.
+        required: false
 
 # CALLER REQUIREMENTS
 # ===================
@@ -79,6 +90,10 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+    env:
+      # Secrets are not allowed in a step's if:, so their presence is
+      # carried as an env flag.
+      MERGE_APP_CONFIGURED: ${{ secrets.merge-app-id != '' && secrets.merge-app-private-key != '' }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
@@ -97,6 +112,31 @@ jobs:
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Merging with GITHUB_TOKEN raises no event, so the merge commit on the
+      # base branch never gets a CI run (#450). An App installation token
+      # raises one. The token is scoped to this repository and to the two
+      # permissions a merge needs. When the App is not configured, or cannot
+      # issue a token with those permissions, the merge falls back to
+      # GITHUB_TOKEN exactly as before - a missing grant must not stop
+      # dependency updates from merging.
+      - name: Mint merge token
+        id: app-token
+        if: env.MERGE_APP_CONFIGURED == 'true'
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.merge-app-id }}
+          private-key: ${{ secrets.merge-app-private-key }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Report merge token fallback
+        if: env.MERGE_APP_CONFIGURED == 'true' && steps.app-token.outcome != 'success'
+        run: >-
+          echo "::warning::The merge App's token could not be minted - merging
+          with GITHUB_TOKEN, so the merge commit gets no CI run (#450). Check
+          that the App has Contents and Pull requests write access."
 
       # The `deps-no-automerge` label comes from netresearch/renovate-config
       # and marks an update Renovate deliberately did NOT mark for automerge:
@@ -123,7 +163,7 @@ jobs:
             steps.metadata.outputs.update-type != 'version-update:semver-major'))
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           STRATEGY_OVERRIDE: ${{ inputs.merge-strategy }}
