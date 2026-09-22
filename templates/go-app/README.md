@@ -14,7 +14,7 @@ Canonical workflow set for a netresearch Go application repository
 | `.github/workflows/container.yml` | Multi-arch container build + push + sign + SBOM + trivy + hadolint. |
 | `.github/workflows/container-retention.yml` | Weekly GHCR cleanup — releases forever, edge >30d deleted, orphan untagged pruned. |
 | `.github/workflows/dependency-review.yml` | PR dependency review. |
-| `.github/workflows/gitleaks.yml` | Secret scan on push + PR. |
+| `.github/workflows/betterleaks.yml` | Secret scan on push + PR. |
 | `.github/workflows/labeler.yml` | PR labeling via `.github/labeler.yml` config. |
 | `.github/workflows/mutation.yml` | Weekly + on-PR gremlins mutation testing (diff-only on PR). |
 | `.github/workflows/pr-quality.yml` | PR size check + auto-approve for maintainers. |

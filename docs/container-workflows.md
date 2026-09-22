@@ -17,7 +17,7 @@ Consumer repos: [snipe-it-docker-compose-stack](https://github.com/netresearch/s
 | [`smoke-test-container.yml`](../.github/workflows/smoke-test-container.yml) | Build locally + run container-structure-test | New |
 | [`scorecard.yml`](../.github/workflows/scorecard.yml) | OpenSSF Scorecard | Pre-existing |
 | [`ghcr-retention.yml`](../.github/workflows/ghcr-retention.yml) | GHCR tag retention / cleanup | Pre-existing |
-| [`gitleaks.yml`](../.github/workflows/gitleaks.yml) | Secret scanning | Pre-existing |
+| [`betterleaks.yml`](../.github/workflows/betterleaks.yml) | Secret scanning | Pre-existing (was `gitleaks.yml`, kept as a deprecated copy) |
 | [`lint-workflows.yml`](../.github/workflows/lint-workflows.yml) | actionlint | Pre-existing |
 | [`lint-yaml.yml`](../.github/workflows/lint-yaml.yml) | yamllint | Pre-existing |
 | [`auto-merge-deps.yml`](../.github/workflows/auto-merge-deps.yml) | Auto-merge Renovate / Dependabot | Pre-existing |

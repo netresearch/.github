@@ -49,7 +49,8 @@ truth; this table is the index.)
 | reusable | required caller permissions |
 | --- | --- |
 | `codeql.yml` | `contents: read`, `security-events: write`, `actions: read` |
-| `gitleaks.yml` | `contents: read`, `security-events: write` |
+| `betterleaks.yml` | `contents: read`, `security-events: write` |
+| `gitleaks.yml` (deprecated copy of `betterleaks.yml`) | `contents: read`, `security-events: write` |
 | `scorecard.yml` | `contents: read`, `security-events: write`, `id-token: write`, `actions: read` |
 | `zizmor.yml` | `contents: read`, `security-events: write` |
 | `dependency-review.yml` | `contents: read`, `pull-requests: write` |
