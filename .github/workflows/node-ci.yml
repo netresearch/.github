@@ -90,8 +90,12 @@ on:
         description: "Run the Prettier format check in the TS job."
         type: boolean
         default: true
+      enable-betterleaks:
+        description: "Run the betterleaks secret-scanning job."
+        type: boolean
+        default: true
       enable-gitleaks:
-        description: "Run the secret-scanning job. Named `gitleaks` for backwards compatibility; the scan itself runs betterleaks, which needs no license."
+        description: "Deprecated alias of enable-betterleaks, kept so callers that set it keep working. Setting either to false skips the scan."
         type: boolean
         default: true
       enable-test:
@@ -219,10 +223,10 @@ jobs:
     with:
       languages: ${{ inputs.codeql-languages }}
 
-  gitleaks:
+  betterleaks:
     name: Secret Scanning
-    if: ${{ inputs.enable-gitleaks }}
-    uses: netresearch/.github/.github/workflows/gitleaks.yml@main
+    if: ${{ inputs.enable-betterleaks && inputs.enable-gitleaks }}
+    uses: netresearch/.github/.github/workflows/betterleaks.yml@main
     permissions:
       contents: read
       security-events: write

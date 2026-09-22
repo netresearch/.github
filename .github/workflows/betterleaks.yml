@@ -1,18 +1,3 @@
-# DEPRECATED — use betterleaks.yml.
-#
-# This file is the pre-rename copy of betterleaks.yml, kept so that the
-# repositories still calling `.../workflows/gitleaks.yml@main` keep working
-# and keep their check name. It is a full copy on purpose: turning it into a
-# wrapper that calls betterleaks.yml would add a level to every caller's check
-# name, which breaks any branch protection that requires
-# `gitleaks / Secret Scanning` by name.
-#
-# Change the scan in betterleaks.yml, and mirror the change here until this
-# file is deleted. Delete it once no repository references it:
-#   gh search code 'org:netresearch "workflows/gitleaks.yml@"'
-# returned nothing usable at the time of the rename, so check with a sweep of
-# the repositories' .github/workflows instead.
-
 name: Secret Scanning (betterleaks)
 
 on:
@@ -37,15 +22,15 @@ on:
 # startup-fail here unless these scopes are granted explicitly.
 #
 #   jobs:
-#     gitleaks:
-#       uses: netresearch/.github/.github/workflows/gitleaks.yml@main
+#     betterleaks:
+#       uses: netresearch/.github/.github/workflows/betterleaks.yml@main
 #       permissions:
 #         contents: read
 #         security-events: write
 permissions: {}
 
 jobs:
-  gitleaks:
+  betterleaks:
     name: Secret Scanning
     runs-on: ubuntu-latest
     timeout-minutes: 10

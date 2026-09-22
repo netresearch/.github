@@ -119,8 +119,12 @@ on:
         description: "CodeQL language(s) to analyze (forwarded to codeql)."
         type: string
         default: "actions"
+      enable-betterleaks:
+        description: "Run the betterleaks secret-scanning job."
+        type: boolean
+        default: true
       enable-gitleaks:
-        description: "Run the gitleaks secret-scanning job."
+        description: "Deprecated alias of enable-betterleaks, kept so callers that set it keep working. Setting either to false skips the scan."
         type: boolean
         default: true
 
@@ -276,10 +280,10 @@ jobs:
     with:
       languages: ${{ inputs.codeql-languages }}
 
-  gitleaks:
+  betterleaks:
     name: Secret Scanning
-    if: ${{ inputs.enable-gitleaks }}
-    uses: netresearch/.github/.github/workflows/gitleaks.yml@main
+    if: ${{ inputs.enable-betterleaks && inputs.enable-gitleaks }}
+    uses: netresearch/.github/.github/workflows/betterleaks.yml@main
     permissions:
       contents: read
       security-events: write

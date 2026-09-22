@@ -136,8 +136,12 @@ on:
         description: "CodeQL language(s) to analyze."
         type: string
         default: "python"
+      enable-betterleaks:
+        description: "Run the betterleaks secret-scanning job."
+        type: boolean
+        default: true
       enable-gitleaks:
-        description: "Run the secret-scanning job. Named `gitleaks` for backwards compatibility; the scan itself runs betterleaks, which needs no license."
+        description: "Deprecated alias of enable-betterleaks, kept so callers that set it keep working. Setting either to false skips the scan."
         type: boolean
         default: true
       enable-scorecard:
@@ -169,7 +173,7 @@ on:
 # `secrets: inherit`.
 #
 # id-token: write is only consumed when enable-scorecard is true; the other
-# scopes cover codeql/gitleaks/zizmor (security-events), dependency-review
+# scopes cover codeql/betterleaks/zizmor (security-events), dependency-review
 # (pull-requests) and scorecard/codeql (actions). Grant the full union so
 # toggling a scanner on never re-introduces a latent startup-failure.
 #
@@ -238,10 +242,10 @@ jobs:
     with:
       languages: ${{ inputs.codeql-languages }}
 
-  gitleaks:
+  betterleaks:
     name: Secret Scanning
-    if: ${{ inputs.enable-gitleaks }}
-    uses: netresearch/.github/.github/workflows/gitleaks.yml@main
+    if: ${{ inputs.enable-betterleaks && inputs.enable-gitleaks }}
+    uses: netresearch/.github/.github/workflows/betterleaks.yml@main
     permissions:
       contents: read
       security-events: write

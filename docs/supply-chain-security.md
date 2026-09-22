@@ -54,7 +54,7 @@ netresearch/.github (org-wide)
 ├── dependency-review.yml    ← runs on ALL repos automatically (org-wide default)
 ├── auto-merge-deps.yml      ← reusable, called by repos
 ├── codeql.yml               ← reusable
-├── gitleaks.yml             ← reusable (secret scanning, betterleaks)
+├── betterleaks.yml          ← reusable (secret scanning)
 ├── zizmor.yml               ← reusable (GitHub Actions workflow SAST, report-only)
 ├── node-audit.yml           ← reusable (Node.js dependency audit)
 ├── scorecard.yml            ← reusable (OpenSSF Scorecard)
@@ -66,7 +66,7 @@ netresearch/.github (org-wide)
 
 netresearch/typo3-ci-workflows (TYPO3/PHP-specific)
 ├── ci.yml                   ← PHP lint, PHPStan, PHPUnit
-├── security.yml             ← composer audit + delegates gitleaks to .github
+├── security.yml             ← composer audit + delegates betterleaks to .github
 ├── docs.yml                 ← TYPO3 documentation rendering
 ├── e2e.yml                  ← Playwright E2E against TYPO3
 ├── extended-testing.yml     ← Coverage, mutation, fuzz
