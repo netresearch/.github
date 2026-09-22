@@ -1,7 +1,7 @@
 name: Security
 
 # Aggregated security scans for skill repos:
-#   betterleaks      — secret scanning (OSS, needs no license).
+#   betterleaks      — secret scanning (MIT-licensed, no paid licence required).
 #   zizmor           — static analysis of this repo's own workflows.
 #   dependency-review — on pull requests only.
 #   composer-audit   — `composer audit` AND an Opengrep SAST scan; the called
