@@ -79,7 +79,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP"
-          curl -sSfL -o betterleaks.tar.gz \
+          curl -sSfL --proto '=https' --proto-redir '=https' -o betterleaks.tar.gz \
             "https://github.com/betterleaks/betterleaks/releases/download/v${BETTERLEAKS_VERSION}/betterleaks_${BETTERLEAKS_VERSION}_linux_x64.tar.gz"
           echo "${BETTERLEAKS_SHA256}  betterleaks.tar.gz" | sha256sum -c -
           tar -xzf betterleaks.tar.gz betterleaks
