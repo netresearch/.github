@@ -50,7 +50,6 @@ truth; this table is the index.)
 | --- | --- |
 | `codeql.yml` | `contents: read`, `security-events: write`, `actions: read` |
 | `betterleaks.yml` | `contents: read`, `security-events: write` |
-| `gitleaks.yml` (deprecated copy of `betterleaks.yml`) | `contents: read`, `security-events: write` |
 | `scorecard.yml` | `contents: read`, `security-events: write`, `id-token: write`, `actions: read` |
 | `zizmor.yml` | `contents: read`, `security-events: write` |
 | `dependency-review.yml` | `contents: read`, `pull-requests: write` |
