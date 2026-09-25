@@ -521,7 +521,7 @@ jobs:
           bash -euo pipefail -c "$PRE_BUILD_CMD"
 
       - name: Run gosec
-        uses: securego/gosec@681347199262bc33b9b5119ae2b448dec5718240 # master
+        uses: securego/gosec@8c77519419e934a3e158dbf1a3fbbc0871b8c691 # master
         env:
           # gosec runs in its own container with the Go that image ships, not
           # the one "Set up Go" installed. setup-go exports GOTOOLCHAIN=local
