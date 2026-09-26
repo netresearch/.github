@@ -107,7 +107,7 @@ jobs:
 
       - name: Install uv
         if: inputs.package-manager == 'uv'
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
 
       - name: Produce pinned requirements (uv)
         if: inputs.package-manager == 'uv'
@@ -261,7 +261,7 @@ jobs:
 
       - name: Install uv
         if: inputs.package-manager == 'uv'
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
 
       - name: Sync project (uv) — populates site-packages for cyclonedx-py
         if: inputs.package-manager == 'uv'
