@@ -19,7 +19,7 @@ ORG="${1:-netresearch}"
 
 owners=$(gh api "orgs/${ORG}/members?role=admin&per_page=100" --paginate --jq '.[].login' | sort -f)
 repos=$(gh api "orgs/${ORG}/repos?type=public&per_page=100" --paginate \
-  --jq '.[] | select(.archived == false and .fork == false) | .name' | sort -f)
+  --jq '.[] | select(.archived == false) | .name' | sort -f)
 
 if [ -z "$owners" ] || [ -z "$repos" ]; then
   echo "::error::empty owner or repository list for ${ORG}; check the gh token scopes" >&2
