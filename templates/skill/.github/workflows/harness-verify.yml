@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: Netresearch DTT GmbH
 name: Harness Verification
 
 # Verifies agent-harness consistency (AGENTS.md index, docs drift) via the
