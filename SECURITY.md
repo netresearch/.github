@@ -31,7 +31,7 @@ Older versions receive patches only for critical vulnerabilities at our discreti
 
 ## Handling of Dependency and Code Analysis Findings
 
-This section applies to every repository that does not carry its own policy. The shared workflows in this repository enforce the blocking rules on pull requests; a repository that does not call them names its own checks in its `SECURITY.md` or `CONTRIBUTING.md`.
+This section applies to every repository that does not carry its own policy. The shared workflows in this repository and in `typo3-ci-workflows` enforce the blocking rules on pull requests; a repository that does not call them names its own checks in its `SECURITY.md` or `CONTRIBUTING.md`.
 
 ### Dependencies (software composition analysis)
 
