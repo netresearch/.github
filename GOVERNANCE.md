@@ -15,7 +15,7 @@ Netresearch DTT GmbH owns the organisation and the repositories in it. The compa
 | Maintainer | Accounts with the `maintain` or `write` role on a repository | Review and merge pull requests, triage issues, prepare releases |
 | Contributor | Anyone | Open issues and pull requests; see [CONTRIBUTING.md](CONTRIBUTING.md) |
 
-The complete list of accounts per repository and role is in [docs/access-roster.md](docs/access-roster.md). `scripts/generate-access-roster.sh` regenerates it from the GitHub API.
+The list of accounts per active public repository and role is in [docs/access-roster.md](docs/access-roster.md). `scripts/generate-access-roster.sh` regenerates it from the GitHub API.
 
 ## Decision making
 
