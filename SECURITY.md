@@ -60,5 +60,5 @@ An exception is allowed only when the finding is not exploitable in the project 
 
 - **Storage:** Secrets for CI and releases are stored only as GitHub Actions secrets of the organisation or the repository. Secrets never appear in the repository, in issues or in logs. Workflows use short-lived tokens (the job's `GITHUB_TOKEN`, GitHub App installation tokens, OIDC) where the target service supports them.
 - **Access:** Organisation secrets are managed by organisation owners, repository secrets by repository admins; both are listed in [docs/access-roster.md](docs/access-roster.md). Workflows receive a secret only in the job that needs it.
-- **Detection:** Betterleaks scans every pull request and push for committed secrets.
+- **Detection:** In repositories that call the shared security workflows, Betterleaks scans every pull request and push for committed secrets. Every public repository also has GitHub secret scanning; where push protection is enabled, a push that contains a known secret format is blocked. A repository that uses neither names its own detection in its `SECURITY.md` or `CONTRIBUTING.md`.
 - **Rotation:** A secret is rotated at once when it may have been exposed and when a person with access to it leaves the project, and otherwise at least every 12 months.
