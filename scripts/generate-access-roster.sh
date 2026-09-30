@@ -7,7 +7,9 @@
 # organisation.
 #
 # Usage:
-#   scripts/generate-access-roster.sh [org] > docs/access-roster.md
+#   scripts/generate-access-roster.sh [org] > roster.tmp \
+#     && mv roster.tmp docs/access-roster.md
+#   (a direct redirect would empty the roster when an API call fails)
 #
 # Requires: gh, authenticated with the read:org and repo scopes as an account
 # with write access to every repository (the collaborators endpoint needs
