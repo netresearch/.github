@@ -9,7 +9,9 @@
 # Usage:
 #   scripts/generate-access-roster.sh [org] > docs/access-roster.md
 #
-# Requires: gh (authenticated with read:org), jq.
+# Requires: gh, authenticated with the read:org and repo scopes as an account
+# with write access to every repository (the collaborators endpoint needs
+# both), and jq.
 # The roster is a snapshot. Re-run it after access changes; GOVERNANCE.md
 # names the rule that keeps it current.
 
