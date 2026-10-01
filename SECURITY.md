@@ -47,7 +47,7 @@ This section applies to every repository that does not carry its own policy. The
 
 | Finding | Rule | Enforced by |
 | --- | --- | --- |
-| Opengrep finding of severity WARNING or higher | The pull request cannot pass | `typo3-ci-workflows` `security.yml` (`--error --severity WARNING`) |
+| Opengrep finding of severity WARNING or higher | The pull request cannot pass | `typo3-ci-workflows` `security.yml` (default `opengrep-config`: `--config auto --error --severity WARNING --severity ERROR`) |
 | CodeQL alert of severity high or critical | Fixed before the next release, or dismissed with a written reason | Code scanning; maintainers |
 | Workflow finding from zizmor | Fixed before the next release, or dismissed with a written reason | `zizmor.yml` reports to code scanning; maintainers |
 | Secret detected by Betterleaks | The pull request cannot pass; the secret is rotated at once if it may have been exposed | `betterleaks.yml` (detection and blocking); repository admins or organisation owners (rotation) |
