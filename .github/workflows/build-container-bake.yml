@@ -779,7 +779,7 @@ jobs:
       - name: Generate scanned image SBOM (Syft)
         id: syft
         continue-on-error: true
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         env:
           # No file cataloguing. Syft's default emits one component per file
           # owned by an installed package. Measured on the netresearch.de stack
@@ -814,7 +814,7 @@ jobs:
         # Keep env and with identical to the first attempt. Dropping
         # SYFT_FILE_METADATA_SELECTION here would produce the per-file BOM the
         # comment above exists to prevent, and only on the rare retry path.
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         env:
           SYFT_FILE_METADATA_SELECTION: none
         with:
