@@ -1,32 +1,39 @@
 # Agent Guide — netresearch/.github
 
 Organization-level community health files, reusable GitHub Actions workflows,
-and the canonical Go repository templates (`templates/go-app`, `templates/go-lib`)
-that consumer repos are kept in sync with.
+and the repository templates under `templates/` that consumer repos are kept in
+sync with: `go-app`, `go-lib`, `php-module`, `skill` and `typo3-extension`.
 
 ## Template-drift sync
 
-The `go-app` and `go-lib` templates under `templates/` are the source of truth
-for each consumer repo's `.github/` tree. Drift between a consumer and its
+Each template's `templates/<template>/.github/` tree is the source of truth for
+the `.github/` tree of the repositories that consume it. A repository declares
+itself a consumer by carrying `.github/template.yaml` (`template: <name>`);
+`scripts/list-consumers.py` discovers the consumers from the organisation, so
+there is no hand-written consumer list. Drift between a consumer and its
 template is detected and reconciled by dedicated tooling:
 
+- **Enforce:** each consumer runs `check-template-drift.yml` on its pull
+  requests and pushes; it fails when a governed file differs from the template.
+  YAML files are compared as parsed documents (`scripts/drift_compare.py`), so a
+  change that only touches comments is reported as cosmetic, not as drift.
 - **Detect:** `.github/workflows/drift-scan.yml` runs weekly (Mon 06:00 UTC) and
-  on `workflow_dispatch` (with an optional space-separated `repos:` input). It
-  auto-opens `Template drift: <repo> vs <go-app|go-lib>` issues and
-  auto-closes them once drift is gone — so after merging fixes, dispatch the
-  scan to close immediately instead of waiting for the next schedule.
-- **Fix:** `scripts/sync-template.sh <go-app|go-lib> netresearch/<repo>`
+  on `workflow_dispatch` (with an optional `template:` input that limits the
+  scan to one template's consumers). It auto-opens
+  `Template drift: <repo> vs <template>` issues and auto-closes them once drift
+  is gone — so after merging fixes, dispatch the scan to close immediately
+  instead of waiting for the next schedule.
+- **Fix:** `scripts/sync-template.sh <template> netresearch/<repo>`
   SSH-clones the consumer, copies the template `.github/` tree, commits with
   `-S --signoff`, pushes a `sync/...` branch, and opens a PR. Only drifting
   files change. `.github/template.yaml` is created on first sync only and never
   overwritten — it carries each repo's `intentional-drift:` state.
-- **Scope:** templates declare only the ecosystems every consumer is guaranteed
-  to have. `go-lib` baselines `gomod + github-actions`; `go-app` adds `docker`
-  on top (every go-app repo ships a Dockerfile). Further extras — `npm`,
-  `devcontainers`, and `docker` for `go-lib` — are opt-in via a self-managed
-  `dependabot.yml` plus `intentional-drift`, because not every consumer has
-  those manifests and an undeclared ecosystem fails Dependabot with
-  `dependency_file_not_found`.
+  `scripts/sync-all-consumers.sh [--template <name>] [--dry-run]` runs it for
+  every consumer.
+- **Scope:** templates carry only what every consumer of that template needs.
+  Dependency updates come from Renovate; the templates ship no
+  `dependabot.yml`. A consumer that needs a file to differ from its template
+  lists the path under `intentional-drift`.
 
 ## Reusable workflows
 

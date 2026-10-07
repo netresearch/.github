@@ -19,7 +19,7 @@
 
 set -euo pipefail
 
-TEMPLATE="${1:?template required: go-app or go-lib}"
+TEMPLATE="${1:?template required: go-app|go-lib|typo3-extension|skill|php-module}"
 TARGET="${2:?owner/repo required}"
 shift 2 || true
 
