@@ -28,6 +28,12 @@ permissions: {}
 jobs:
   analysis:
     name: Scorecard analysis
+    # Callers trigger on pushes to both `main` and `master` so one template
+    # serves either default branch. scorecard-action refuses any ref other
+    # than the default branch outside pull_request events ("Only the default
+    # branch ... is supported") and fails the run, so a push to a non-default
+    # branch of that name is skipped here, once for every caller.
+    if: github.event_name != 'push' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
