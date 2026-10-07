@@ -306,7 +306,7 @@ on:
         required: false
     outputs:
       bake-metadata:
-        description: "Raw docker/bake-action metadata JSON (per-target build results incl. containerimage.digest)."
+        description: "Raw docker/bake-action metadata JSON (per-target build results incl. containerimage.digest). Carries no buildx.build.provenance record (BUILDX_METADATA_PROVENANCE=disabled); this does not affect an image provenance attestation when one is enabled via provenance/attest."
         value: ${{ jobs.bake.outputs.metadata }}
       sbom-subjects:
         description: "JSON array of {name, digest, hex} per pushed image (sbom-attest: true only). Secret-free — safe to feed to attest-sbom.yml, unlike raw bake metadata, which GitHub masks away wholesale when it matches a secret."
@@ -474,6 +474,18 @@ jobs:
           # Forwarded to the build so HCL/Dockerfile can auth private composer /
           # registry sources. Empty when the caller passes no COMPOSER_AUTH.
           COMPOSER_AUTH: ${{ secrets.COMPOSER_AUTH }}
+          # Keep the build record's provenance out of the metadata output.
+          # Even buildx's default "min" mode keeps invocation.environment,
+          # which embeds the whole GitHub event payload — on a push, every
+          # commit message twice, once per platform. A 31 KB Renovate commit
+          # body made the metadata 161 KB, and the steps below that receive it
+          # as an env var then failed with "Argument list too long" (Linux caps
+          # one env string at 128 KiB). Only the metadata JSON changes: an
+          # image provenance attestation, where the `provenance:`/`attest:`
+          # inputs enable one, is controlled separately and unaffected.
+          # Consumers read only
+          # containerimage.digest and image.name.
+          BUILDX_METADATA_PROVENANCE: disabled
         with:
           source: ${{ inputs.bake-source }}
           files: ${{ steps.files.outputs.files }}
