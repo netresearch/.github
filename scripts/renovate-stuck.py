@@ -2,12 +2,13 @@
 """Open one issue per repository whose Renovate pull requests are stuck red.
 
 Usage:
-    renovate-stuck.py [--days 3] [--issue-repo owner/repo] [--dry-run]
+    renovate-stuck.py [--days 3] [--dry-run]
 
 A Renovate pull request is stuck when it has been open for more than --days
 days and its head commit's combined check state is FAILURE or ERROR. For each
 repository with at least one stuck pull request, an issue titled
-"Renovate stuck: <repo>" is opened in --issue-repo, or updated if one is open.
+"Renovate stuck: <repo>" is opened in netresearch/.github, or updated if one
+is open.
 An open issue whose repository has no stuck pull request any more is closed.
 --dry-run prints the actions instead of performing them.
 
@@ -31,10 +32,13 @@ import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 
-# The organisation this repository serves. Deliberately not a flag, as in
-# list-consumers.py: a caller-supplied owner would travel into the search
-# query built below.
+# The organisation this repository serves and the repository the issues are
+# filed in. Deliberately not flags, as in list-consumers.py: a caller-supplied
+# value would travel into the search query and the gh argument list, which is
+# an argument-injection flow (S8705). A fork that needs another target edits
+# these lines.
 ORG = "netresearch"
+ISSUE_REPO = f"{ORG}/.github"
 TITLE_PREFIX = "Renovate stuck: "
 LABEL = "renovate-stuck"
 RED = {"FAILURE", "ERROR"}
@@ -162,29 +166,64 @@ def issue_body(repo: str, prs: list[dict], days: int, now: datetime) -> str:
     return "\n".join(lines)
 
 
-def open_issues(issue_repo: str) -> dict[str, int]:
-    out = run(
-        [
-            "gh",
-            "issue",
-            "list",
-            "--repo",
-            issue_repo,
-            "--state",
-            "open",
-            "--search",
-            f'"{TITLE_PREFIX.strip()}" in:title',
-            "--limit",
-            "500",
-            "--json",
-            "number,title",
-        ]
+def gh_issue(*args: str) -> str:
+    return run(["gh", "issue", *args, "--repo", ISSUE_REPO])
+
+
+def open_issues() -> dict[str, int]:
+    out = gh_issue(
+        "list",
+        "--state",
+        "open",
+        "--search",
+        f'"{TITLE_PREFIX.strip()}" in:title',
+        "--limit",
+        "500",
+        "--json",
+        "number,title",
     )
     return {
         i["title"][len(TITLE_PREFIX) :]: i["number"]
         for i in json.loads(out)
         if i["title"].startswith(TITLE_PREFIX)
     }
+
+
+def sync_stuck(
+    stuck: dict[str, list[dict]],
+    existing: dict[str, int],
+    days: int,
+    now: datetime,
+    dry_run: bool,
+) -> None:
+    for repo, repo_prs in sorted(stuck.items()):
+        body = issue_body(repo, repo_prs, days, now)
+        title = TITLE_PREFIX + repo
+        if repo in existing:
+            print(f"update #{existing[repo]}: {title} ({len(repo_prs)} PR)")
+            if not dry_run:
+                gh_issue("edit", str(existing[repo]), "--body", body)
+        else:
+            print(f"open: {title} ({len(repo_prs)} PR)")
+            if not dry_run:
+                gh_issue("create", "--title", title, "--body", body, "--label", LABEL)
+
+
+def close_resolved(
+    stuck: dict[str, list[dict]], existing: dict[str, int], now: datetime, dry_run: bool
+) -> None:
+    for repo, number in sorted(existing.items()):
+        if repo in stuck:
+            continue
+        print(f"close #{number}: {TITLE_PREFIX}{repo}")
+        if not dry_run:
+            gh_issue(
+                "close",
+                str(number),
+                "--comment",
+                f"No Renovate pull request in `{repo}` is stuck any more — closed by "
+                f"renovate-stuck on {now.strftime('%Y-%m-%dT%H:%M:%SZ')}.",
+            )
 
 
 def main() -> int:
@@ -198,11 +237,6 @@ def main() -> int:
         help="minimum age of a stuck pull request (default 3)",
     )
     ap.add_argument(
-        "--issue-repo",
-        default=f"{ORG}/.github",
-        help="repository the issues are filed in",
-    )
-    ap.add_argument(
         "--dry-run",
         action="store_true",
         help="print the actions instead of performing them",
@@ -212,73 +246,14 @@ def main() -> int:
     now = datetime.now(UTC)
     prs = open_renovate_prs()
     stuck = stuck_by_repo(prs, args.days, now)
-    existing = open_issues(args.issue_repo)
+    existing = open_issues()
     print(
         f"renovate-stuck: {len(prs)} open Renovate pull request(s), "
         f"{sum(len(v) for v in stuck.values())} stuck in {len(stuck)} repo(s), "
         f"{len(existing)} open issue(s)"
     )
-
-    for repo, repo_prs in sorted(stuck.items()):
-        body = issue_body(repo, repo_prs, args.days, now)
-        title = TITLE_PREFIX + repo
-        if repo in existing:
-            print(f"update #{existing[repo]}: {title} ({len(repo_prs)} PR)")
-            if not args.dry_run:
-                run(
-                    [
-                        "gh",
-                        "issue",
-                        "edit",
-                        str(existing[repo]),
-                        "--repo",
-                        args.issue_repo,
-                        "--body",
-                        body,
-                    ]
-                )
-        else:
-            print(f"open: {title} ({len(repo_prs)} PR)")
-            if not args.dry_run:
-                base = [
-                    "gh",
-                    "issue",
-                    "create",
-                    "--repo",
-                    args.issue_repo,
-                    "--title",
-                    title,
-                    "--body",
-                    body,
-                ]
-                # The label may not exist yet; an issue without it is still an issue.
-                if (
-                    subprocess.run(
-                        base + ["--label", LABEL], capture_output=True, check=False
-                    ).returncode
-                    != 0
-                ):
-                    run(base)
-
-    for repo, number in sorted(existing.items()):
-        if repo not in stuck:
-            print(f"close #{number}: {TITLE_PREFIX}{repo}")
-            if not args.dry_run:
-                run(
-                    [
-                        "gh",
-                        "issue",
-                        "close",
-                        str(number),
-                        "--repo",
-                        args.issue_repo,
-                        "--comment",
-                        (
-                            f"No Renovate pull request in `{repo}` is stuck any more — closed by "
-                            f"renovate-stuck on {now.strftime('%Y-%m-%dT%H:%M:%SZ')}."
-                        ),
-                    ]
-                )
+    sync_stuck(stuck, existing, args.days, now, args.dry_run)
+    close_resolved(stuck, existing, now, args.dry_run)
     return 0
 
 
