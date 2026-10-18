@@ -1,0 +1,55 @@
+# Daily fleet-wide scan for Renovate pull requests that are stuck red. Opens or
+# updates one issue per repository in netresearch/.github and closes it once
+# the repository has no stuck Renovate pull request any more.
+#
+# Renovate merges only green pull requests; a red one stays open and tells no
+# one. netresearch/ofelia#867 (Go 1.27.2) failed gosec for ten days unnoticed
+# while govulncheck blocked every other pull request on the vulnerabilities it
+# would have fixed. The issues land next to the template-drift ones from
+# drift-scan.yml, which are already triaged.
+#
+# GITHUB_TOKEN reads public repositories only, so the one private repository
+# in the organisation is not scanned.
+#
+# This is a monitoring workflow — informational only, it does not block any PR.
+
+name: Renovate Stuck Scan
+
+on:
+  schedule:
+    # Daily 06:30 UTC, after drift-scan's Monday 06:00 slot.
+    - cron: "30 6 * * *"
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Minimum age in days of a red Renovate pull request before it is reported."
+        required: false
+        type: number
+        default: 3
+
+permissions: {}
+
+jobs:
+  scan:
+    name: Scan Renovate pull requests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Open, update or close issues
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DAYS: ${{ inputs.days || 3 }}
+        run: python3 scripts/renovate-stuck.py --days "$DAYS" --issue-repo "$GITHUB_REPOSITORY"
