@@ -8,5 +8,20 @@
     "fileMatch": [
       "^templates/.+/\\.github/workflows/.+\\.ya?ml$"
     ]
-  }
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "go-check.yml builds gosec with go install at a commit on gosec's master branch, because the securego/gosec action runs a release image that cannot load Go 1.27.2 packages (netresearch/.github#504). The github-actions manager tracked the old action pin; this keeps the go install pin on master's newest commit the same way.",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/go-check\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "go install github\\.com/securego/gosec/v2/cmd/gosec@(?<currentDigest>[0-9a-f]{40})\\s+# (?<currentValue>master)"
+      ],
+      "depNameTemplate": "securego/gosec",
+      "packageNameTemplate": "https://github.com/securego/gosec",
+      "datasourceTemplate": "git-refs"
+    }
+  ]
 }

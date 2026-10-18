@@ -535,14 +535,15 @@ jobs:
           # and no message. A gosec built by the caller's own toolchain always
           # reads that toolchain's export data, and needs no GOTOOLCHAIN
           # override to reach it.
-          # Pinned to a commit, like gotestsum and go-licenses above; this one
-          # carries x/tools v0.51.0, which decodes version 5. No release
-          # contains it yet - move to the release commit once one does.
-          # gosec at this commit needs Go 1.26.0. setup-go exports
-          # GOTOOLCHAIN=local, so a caller on an older Go would fail here;
-          # `auto` on the install alone fetches a toolchain new enough to build
-          # gosec, while the scan below still runs with the caller's Go.
-          GOTOOLCHAIN=auto go install github.com/securego/gosec/v2/cmd/gosec@d2b649ec01825c20bd101ec584e559adb287e578  # master after v2.29.0
+          # Pinned to a commit on master, as the action pin was. Renovate moves
+          # it to master's newest commit through the customManagers entry in
+          # renovate.json, so gosec stays current; keep the `# master` comment,
+          # the manager matches on it.
+          # gosec needs Go 1.26.0 or newer. setup-go exports GOTOOLCHAIN=local,
+          # so a caller on an older Go would fail here; `auto` on the install
+          # alone fetches a toolchain new enough to build gosec, while the scan
+          # below still runs with the caller's Go.
+          GOTOOLCHAIN=auto go install github.com/securego/gosec/v2/cmd/gosec@d2b649ec01825c20bd101ec584e559adb287e578  # master
           # Findings fail the job unless gosec-strict is set false. They also
           # reach the Security tab through the SARIF upload below, which runs
           # on failure too (if: always()), so making this blocking costs no
