@@ -38,7 +38,10 @@
 #       with:
 #         pre-command: |
 #           mkdir -p "$HOME/.local/bin"
-#           curl -fsSL "https://github.com/jj-vcs/jj/releases/download/v0.42.0/jj-v0.42.0-x86_64-unknown-linux-musl.tar.gz" | tar -xz -C "$HOME/.local/bin" ./jj
+#           tgz="$RUNNER_TEMP/jj.tar.gz"
+#           curl -fsSL --proto '=https' -o "$tgz" "https://github.com/jj-vcs/jj/releases/download/v0.42.0/jj-v0.42.0-x86_64-unknown-linux-musl.tar.gz"
+#           echo "2d91e81d649e617a81608e7401ad1106029c15ece01ac928c4a351abef42be6a  $tgz" | sha256sum -c -
+#           tar -xzf "$tgz" -C "$HOME/.local/bin" ./jj
 #           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 #         check-cmd: |
 #           bash tests/smoke_test.sh
