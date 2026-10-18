@@ -521,24 +521,38 @@ jobs:
           bash -euo pipefail -c "$PRE_BUILD_CMD"
 
       - name: Run gosec
-        uses: securego/gosec@d2b649ec01825c20bd101ec584e559adb287e578 # master
         env:
-          # gosec runs in its own container with the Go that image ships, not
-          # the one "Set up Go" installed. setup-go exports GOTOOLCHAIN=local
-          # for the rest of the job and the container inherits it. When the
-          # caller's go directive is newer than the image's Go, `go list` then
-          # refuses the module ("go.mod requires go >= X (running go Y;
-          # GOTOOLCHAIN=local)"); gosec swallows that error and exits 1 with an
-          # empty SARIF and no message. `auto` lets the container fetch the
-          # toolchain go.mod asks for, so the scan runs instead of dying mute.
-          GOTOOLCHAIN: auto
-        with:
+          GOSEC_STRICT: ${{ inputs.gosec-strict }}
+        run: |
+          set -euo pipefail
+          # Built here with the Go that "Set up Go" installed, rather than run
+          # from the securego/gosec action's container. That container ships
+          # a gosec built with its own Go: v2.29.0's image was built with Go
+          # 1.27.0 against golang.org/x/tools v0.49.0, which cannot read the
+          # export data Go 1.27.2 writes ("export data version 5 is greater
+          # than maximum supported version 4", securego/gosec#1771). Every
+          # package then fails to type-check and gosec exits 1 with no finding
+          # and no message. A gosec built by the caller's own toolchain always
+          # reads that toolchain's export data, and needs no GOTOOLCHAIN
+          # override to reach it.
+          # Pinned to a commit, like gotestsum and go-licenses above; this one
+          # carries x/tools v0.51.0, which decodes version 5. No release
+          # contains it yet - move to the release commit once one does.
+          # gosec at this commit needs Go 1.26.0. setup-go exports
+          # GOTOOLCHAIN=local, so a caller on an older Go would fail here;
+          # `auto` on the install alone fetches a toolchain new enough to build
+          # gosec, while the scan below still runs with the caller's Go.
+          GOTOOLCHAIN=auto go install github.com/securego/gosec/v2/cmd/gosec@d2b649ec01825c20bd101ec584e559adb287e578  # master after v2.29.0
           # Findings fail the job unless gosec-strict is set false. They also
           # reach the Security tab through the SARIF upload below, which runs
           # on failure too (if: always()), so making this blocking costs no
           # visibility. `-no-fail` used to be passed here unconditionally,
           # which left a required status check that could never report red.
-          args: ${{ inputs.gosec-strict && '-fmt sarif -out gosec-results.sarif ./...' || '-no-fail -fmt sarif -out gosec-results.sarif ./...' }}
+          no_fail=()
+          if [ "$GOSEC_STRICT" != "true" ]; then
+            no_fail=(-no-fail)
+          fi
+          gosec "${no_fail[@]}" -fmt sarif -out gosec-results.sarif ./...
 
       - name: Upload gosec SARIF
         # Skip on merge_group: the gh-readonly-queue/<branch>/pr-NNN-<sha> ref is
