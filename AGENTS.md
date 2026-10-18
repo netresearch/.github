@@ -35,6 +35,19 @@ template is detected and reconciled by dedicated tooling:
   `dependabot.yml`. A consumer that needs a file to differ from its template
   lists the path under `intentional-drift`.
 
+## Stuck Renovate pull requests
+
+Renovate merges only green pull requests; a red one stays open and notifies
+no one. `.github/workflows/renovate-stuck.yml` runs daily (06:30 UTC) and on
+`workflow_dispatch` (with an optional `days:` input, default 3). It runs
+`scripts/renovate-stuck.py`, which opens one `Renovate stuck: <owner/repo>`
+issue per repository whose Renovate pull requests have been open longer than
+`days` with failing checks, lists each pull request with its failing checks,
+updates the issue on later runs and closes it once nothing in the repository
+is stuck. `scripts/renovate-stuck.py --dry-run` prints the planned actions
+without writing. `GITHUB_TOKEN` reads public repositories only, so the one
+private repository is not scanned.
+
 ## Reusable workflows
 
 The reusable workflows under `.github/workflows/*.yml` are consumed across the org. Reference convention:
