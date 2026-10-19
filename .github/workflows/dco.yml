@@ -36,8 +36,13 @@
 # report on a merge group. A repo that wants both a queue and an enforced DCO
 # has to move to this workflow.
 #
-# On a merge_group event the commits come from the group's base..head range
-# rather than from a PR, which covers exactly the commits about to land.
+# On a merge_group event the commits come from the group's base..head range,
+# which covers exactly the commits about to land. A pull_request event uses the
+# same compare API with the PR's base and head SHAs: the PR-commits endpoint
+# returns at most 250 commits, so a longer PR would have been checked only in
+# part. The job also compares the number of commits it received with the
+# range's `total_commits` and fails on a difference or on an empty list, so a
+# failed or truncated API answer can never read as "every commit signed off".
 #
 # WHAT IS CHECKED
 # ===============
@@ -50,8 +55,9 @@
 # sign-off, so a gate without that exemption blocks every dependency PR in
 # the org — including the ones that are supposed to auto-merge.
 #
-# SECURITY: the PR number is the only value taken from the event context and
-# it is a number, never interpolated into a shell command. Commit messages
+# SECURITY: the values taken from the event context are the PR number and
+# commit SHAs; they reach the script as environment variables and are only
+# used inside API paths, never interpolated into a shell command. Commit messages
 # are attacker-controlled content, so they are moved as base64 and only ever
 # decoded into a variable — never eval'd, sourced, or interpolated into a
 # `run:` block.
@@ -109,6 +115,8 @@ jobs:
           REPO: ${{ github.repository }}
           EVENT_NAME: ${{ github.event_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
           MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
           EXEMPT_LOGINS: ${{ inputs.exempt-logins }}
@@ -130,8 +138,8 @@ jobs:
                 echo "::error title=DCO::merge_group event without base_sha/head_sha in the payload."
                 exit 1
               fi
-              COMMITS_API="repos/${REPO}/compare/${MG_BASE_SHA}...${MG_HEAD_SHA}"
-              COMMITS_JQ='.commits[]'
+              BASE_SHA="$MG_BASE_SHA"
+              HEAD_SHA="$MG_HEAD_SHA"
               echo "Checking sign-off on ${REPO} merge group ${MG_BASE_SHA:0:12}..${MG_HEAD_SHA:0:12}"
               ;;
             *)
@@ -139,11 +147,45 @@ jobs:
                 echo "::error title=DCO::This reusable must be called from a pull_request or merge_group event; no PR number in the event payload."
                 exit 1
               fi
-              COMMITS_API="repos/${REPO}/pulls/${PR_NUMBER}/commits"
-              COMMITS_JQ='.[]'
+              if [ -z "${PR_BASE_SHA:-}" ] || [ -z "${PR_HEAD_SHA:-}" ]; then
+                echo "::error title=DCO::pull_request event without base.sha/head.sha in the payload."
+                exit 1
+              fi
+              BASE_SHA="$PR_BASE_SHA"
+              HEAD_SHA="$PR_HEAD_SHA"
               echo "Checking sign-off on the commits of ${REPO}#${PR_NUMBER}"
               ;;
           esac
+          COMPARE_API="repos/${REPO}/compare/${BASE_SHA}...${HEAD_SHA}"
+
+          # The list goes to a file first. Read through a process substitution
+          # (`done < <(gh api ...)`), a failed API call is invisible to
+          # `set -e`: the loop sees no commits and the job reports success.
+          EXPECTED=$(gh api "${COMPARE_API}?per_page=1" --jq '.total_commits') || {
+            echo "::error title=DCO::Cannot read the commit range ${BASE_SHA:0:12}...${HEAD_SHA:0:12} from the GitHub API."
+            exit 1
+          }
+          COMMIT_LIST=$(mktemp)
+          gh api --paginate "${COMPARE_API}?per_page=100" --jq '.commits[]
+            | [ .sha
+                  , (.parents | length | tostring)
+                  , (.author.login // "")
+                  , (.commit.author.email // "")
+                  , (.commit.committer.email // "")
+                  , (.commit.message | @base64)
+                  ] | join("\u001f")' > "$COMMIT_LIST" || {
+            echo "::error title=DCO::Cannot list the commits of ${BASE_SHA:0:12}...${HEAD_SHA:0:12} from the GitHub API."
+            exit 1
+          }
+          RECEIVED=$(wc -l < "$COMMIT_LIST")
+          if [ "$EXPECTED" -eq 0 ]; then
+            echo "::error title=DCO::The range ${BASE_SHA:0:12}...${HEAD_SHA:0:12} contains no commits, so nothing could be checked."
+            exit 1
+          fi
+          if [ "$RECEIVED" -ne "$EXPECTED" ]; then
+            echo "::error title=DCO::Received ${RECEIVED} of ${EXPECTED} commits from the compare API; refusing to report a partial check."
+            exit 1
+          fi
           echo "Exempt logins: ${EXEMPT_LOGINS:-(none)}"
           echo "Require author match: $([ "$ALLOW_UNMATCHED" = "true" ] && echo no || echo yes)"
           echo ""
@@ -214,14 +256,7 @@ jobs:
               echo "  FAIL  ${SHORT}  sign-off (${SIGNOFF_ONE_LINE}) matches neither author (${AUTHOR_LC}) nor committer (${COMMITTER_LC})"
               FAILED=$((FAILED + 1))
             fi
-          done < <(gh api --paginate "$COMMITS_API" --jq "$COMMITS_JQ"'
-            | [ .sha
-                  , (.parents | length | tostring)
-                  , (.author.login // "")
-                  , (.commit.author.email // "")
-                  , (.commit.committer.email // "")
-                  , (.commit.message | @base64)
-                  ] | join("\u001f")')
+          done < "$COMMIT_LIST"
 
           echo ""
           echo "Summary: ${CHECKED} commit(s) checked, ${SKIPPED} skipped, ${FAILED} without a valid sign-off"
