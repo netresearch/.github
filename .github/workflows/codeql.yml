@@ -6,8 +6,9 @@ name: CodeQL
 #   - `auto` — in-repo detection: always includes `actions`; adds `go`
 #     when a `go.mod` or any `.go` file exists; adds
 #     `javascript-typescript` when any
-#     `.js` / `.jsx` / `.mjs` / `.cjs` / `.ts` / `.tsx` / `.mts` / `.cts`
-#     source is present; adds `python` when any `.py` file is present.
+#     `.js` / `.jsx` / `.mjs` / `.cjs` / `.es` / `.es6` / `.vue` /
+#     `.ts` / `.tsx` / `.mts` / `.cts` source is present (HTML is left
+#     out: every TYPO3 Fluid template would select it); adds `python` when any `.py` file is present.
 #     Detection looks at the first 8 levels of the tree (ignoring
 #     `node_modules/`, `vendor/`, `.venv/`, `venv/` and `.git/`). A
 #     `package.json` neither triggers nor is required: repos with a
@@ -144,6 +145,7 @@ jobs:
             if [ -n "$(find . -maxdepth 8 \
                 \( -type d \( -name node_modules -o -name vendor -o -name .git \) -prune \) -o \
                 \( -type f \( -name '*.js' -o -name '*.jsx' -o -name '*.mjs' -o -name '*.cjs' \
+                   -o -name '*.es' -o -name '*.es6' -o -name '*.vue' \
                    -o -name '*.ts' -o -name '*.tsx' -o -name '*.mts' -o -name '*.cts' \) -print \) \
                 2>/dev/null | head -1)" ]; then
               langs="${langs},javascript-typescript"
