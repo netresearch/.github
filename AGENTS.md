@@ -25,7 +25,9 @@ template is detected and reconciled by dedicated tooling:
   instead of waiting for the next schedule.
 - **Fix:** `scripts/sync-template.sh <template> netresearch/<repo>`
   SSH-clones the consumer, copies the template `.github/` tree, commits with
-  `-S --signoff`, pushes a `sync/...` branch, and opens a PR. Only drifting
+  `-S --signoff`, pushes a `sync/...` branch, and opens a draft PR
+  (`--no-draft` for a ready one; `--trailer "Key: Value"`, repeatable, adds
+  commit trailers). Only drifting
   files change. `.github/template.yaml` is created on first sync only and never
   overwritten — it carries each repo's `intentional-drift:` state.
   `scripts/sync-all-consumers.sh [--template <name>] [--dry-run]` runs it for
