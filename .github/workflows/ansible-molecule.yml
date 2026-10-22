@@ -61,9 +61,9 @@ on:
         type: number
         default: 60
       python-version:
-        description: "Python version for actions/setup-python."
+        description: "Python version for actions/setup-python. Pinned below 3.15: ansible-core 2.21 supports Python up to 3.14, and `ansible-config dump` aborts on 3.15."
         type: string
-        default: "3.x"
+        default: "3.14"
       cache:
         description: >-
           Dependency cache for actions/setup-python (pip, pipenv, poetry).
