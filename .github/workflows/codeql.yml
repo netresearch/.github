@@ -3,15 +3,19 @@ name: CodeQL
 # Reusable CodeQL analysis.
 #
 # The `languages` input accepts one of:
-#   - `auto` — in-repo detection: always includes `go`; adds
-#     `javascript-typescript` when a `package.json` exists OR any
-#     `.js` / `.jsx` / `.mjs` / `.cjs` / `.ts` / `.tsx` / `.mts` / `.cts`
-#     source is present in the first 8 levels of the tree (ignoring
-#     `node_modules/`, `vendor/` and `.git/`). A `package.json` is NOT
-#     required —
-#     repos with a hand-written plain-JS frontend still get scanned. This
-#     is the preferred value for Go repos since it picks up JS/TS
-#     automatically.
+#   - `auto` — in-repo detection: always includes `actions`; adds `go`
+#     when a `go.mod` or any `.go` file exists; adds
+#     `javascript-typescript` when any
+#     `.js` / `.jsx` / `.mjs` / `.cjs` / `.es` / `.es6` / `.vue` /
+#     `.ts` / `.tsx` / `.mts` / `.cts` source is present (HTML is left
+#     out: every TYPO3 Fluid template would select it); adds `python` when any `.py` file is present.
+#     Detection looks at the first 8 levels of the tree (ignoring
+#     `node_modules/`, `vendor/`, `.venv/`, `venv/` and `.git/`). A
+#     `package.json` neither triggers nor is required: repos with a
+#     hand-written plain-JS frontend still get scanned, and a
+#     `package.json` without JS sources would fail the analysis. This
+#     is the preferred value whenever the repository's languages may
+#     change, since it picks them up automatically.
 #   - a single CodeQL language, e.g. `go`
 #   - a comma-separated list, e.g. `go,javascript-typescript`
 #
@@ -31,8 +35,9 @@ on:
         description: >-
           CodeQL language(s) to analyze. Accepts `auto` (detects what the
           repository contains: `actions` always, plus `go` when a go.mod or
-          any .go file is present, plus `javascript-typescript` when a
-          package.json or any JS/TS source is present), a single language
+          any .go file is present, plus `javascript-typescript` when any
+          JS/TS source is present, plus `python` when
+          any .py file is present), a single language
           (e.g. `go`), or a comma-separated list (e.g.
           `go,javascript-typescript`).
         type: string
@@ -131,12 +136,28 @@ jobs:
                 \( -type f -name '*.go' -print \) 2>/dev/null | head -1)" ]; then
               langs="${langs},go"
             fi
-            if [ -f package.json ] || [ -n "$(find . -maxdepth 8 \
+            # Sources only, not package.json: CodeQL fails a JavaScript analysis
+            # that finds no code ("could not process any code written in
+            # JavaScript/TypeScript"), and skill repositories ship a
+            # package.json for npm distribution with no JavaScript in them.
+            # Measured 2026-10-22: none of the 29 `auto` callers had a
+            # package.json without JS/TS sources.
+            if [ -n "$(find . -maxdepth 8 \
                 \( -type d \( -name node_modules -o -name vendor -o -name .git \) -prune \) -o \
                 \( -type f \( -name '*.js' -o -name '*.jsx' -o -name '*.mjs' -o -name '*.cjs' \
+                   -o -name '*.es' -o -name '*.es6' -o -name '*.vue' \
                    -o -name '*.ts' -o -name '*.tsx' -o -name '*.mts' -o -name '*.cts' \) -print \) \
                 2>/dev/null | head -1)" ]; then
               langs="${langs},javascript-typescript"
+            fi
+            # Python for the skill repositories, whose helper scripts were
+            # analysed by default setup. Default setup never analyses fork pull
+            # requests, so a ruleset `code_scanning` rule for CodeQL blocked
+            # every outside contribution there; this workflow replaces it.
+            if [ -n "$(find . -maxdepth 8 \
+                \( -type d \( -name node_modules -o -name vendor -o -name .venv -o -name venv -o -name .git \) -prune \) -o \
+                \( -type f -name '*.py' -print \) 2>/dev/null | head -1)" ]; then
+              langs="${langs},python"
             fi
             LANGUAGES="$langs"
             echo "::notice::codeql auto-detection selected: ${LANGUAGES}"
