@@ -9,8 +9,8 @@
 # This is the multi-target sibling of `build-container.yml`. Where
 # build-container.yml wraps a single docker/build-push-action call (one
 # Dockerfile, one image, one digest), this workflow wraps docker/bake-action
-# and builds every target the bake file defines in one pass, with a shared
-# GHA cache and the tag fan-out computed *inside* the HCL (`variable` blocks
+# and builds every target the bake file defines in one pass, with a GHA
+# cache per target and the tag fan-out computed *inside* the HCL (`variable` blocks
 # + per-target `tags`). Scan and sign then enumerate the images bake
 # produced by parsing `docker buildx bake --print`.
 #
@@ -245,7 +245,8 @@ on:
           previous layer chain and rebuild nothing, silently turning a security
           refresh into a no-op. Typical use: pass an expression comparing
           `github.event_name` against `schedule` (see the caller example in
-          the header). With false the run still writes its layers to the
+          the header). False also clears a `cache-from` the bake file
+          declares itself. With false the run still writes its layers to the
           cache (`cache-to`), so that the next cached build starts from the
           refreshed layers instead of the ones from before the rebuild.
         required: false
@@ -431,15 +432,18 @@ jobs:
             if [[ -n "$CACHE_SCOPE" ]]; then
               scope="${CACHE_SCOPE}-${t}"
             fi
-            # cache=false omits cache-from so the build cannot be satisfied
+            # cache=false clears cache-from so the build cannot be satisfied
             # from a previous run's layers. Required for scheduled rebuilds
             # whose whole purpose is to pick up fresh upstream base images
             # and OS patches - with cache-from those runs restore the old
-            # layer chain and rebuild nothing. cache-to stays: without it
-            # the cache keeps the layers from before the rebuild, and the
-            # next cached build publishes the old packages again.
+            # layer chain and rebuild nothing. The empty value also removes
+            # a cache-from the bake file declares itself. cache-to stays:
+            # without it the cache keeps the layers from before the rebuild,
+            # and the next cached build publishes the old packages again.
             if [[ "$CACHE" == "true" ]]; then
               CACHE_LINES+="${t}.cache-from=type=gha,scope=${scope}"$'\n'
+            else
+              CACHE_LINES+="${t}.cache-from="$'\n'
             fi
             CACHE_LINES+="${t}.cache-to=type=gha,mode=max,scope=${scope}"$'\n'
           done <<< "$RESOLVED"
