@@ -250,7 +250,7 @@ on:
         type: boolean
         default: true
       cache-scope:
-        description: "Optional GHA cache scope suffix. Set when parallel matrix calls share targets but must keep separate caches. Empty = one shared cache. Ignored when `cache` is false."
+        description: "Optional GHA cache scope prefix. Every target already gets its own scope named after the target; set this when parallel matrix calls build the same targets and must keep separate caches (scope = `<cache-scope>-<target>`). Ignored when `cache` is false."
         required: false
         type: string
         default: ""
@@ -400,22 +400,42 @@ jobs:
           CACHE_SCOPE: ${{ inputs.cache-scope }}
           CACHE: ${{ inputs.cache }}
           EXTRA_SET: ${{ inputs.bake-set }}
+          BAKE_FILE: ${{ steps.files.outputs.files }}
+          TARGETS: ${{ inputs.targets }}
         run: |
           set -euo pipefail
-          SCOPE_SUFFIX=""
-          if [[ -n "$CACHE_SCOPE" ]]; then
-            SCOPE_SUFFIX=",scope=${CACHE_SCOPE}"
+          CACHE_LINES=""
+          # cache=false omits cache-from entirely so the build cannot be
+          # satisfied from a previous run's layers. Required for scheduled
+          # rebuilds whose whole purpose is to pick up fresh upstream base
+          # images and OS patches - with cache-from those runs restore the
+          # old layer chain and rebuild nothing.
+          if [[ "$CACHE" == "true" ]]; then
+            # One GHA cache scope per target. All targets of one bake run
+            # writing into the same scope overwrite each other, leaving only
+            # the cache of the target exported last
+            # (https://docs.docker.com/build/cache/backends/gha/#scope).
+            FILE_ARGS=()
+            while IFS= read -r f; do
+              [[ -n "$f" ]] && FILE_ARGS+=(-f "$f")
+            done <<< "$BAKE_FILE"
+            # shellcheck disable=SC2206
+            TARGET_ARGS=(${TARGETS//,/ })
+            RESOLVED=$(docker buildx bake "${FILE_ARGS[@]}" "${TARGET_ARGS[@]}" --print | jq -r '.target | keys[]')
+            while IFS= read -r t; do
+              [[ -z "$t" ]] && continue
+              scope="$t"
+              if [[ -n "$CACHE_SCOPE" ]]; then
+                scope="${CACHE_SCOPE}-${t}"
+              fi
+              CACHE_LINES+="${t}.cache-from=type=gha,scope=${scope}"$'\n'
+              CACHE_LINES+="${t}.cache-to=type=gha,mode=max,scope=${scope}"$'\n'
+            done <<< "$RESOLVED"
           fi
           {
             echo 'set<<EOM'
-            # cache=false omits cache-from entirely so the build cannot be
-            # satisfied from a previous run's layers. Required for scheduled
-            # rebuilds whose whole purpose is to pick up fresh upstream base
-            # images and OS patches - with cache-from those runs restore the
-            # old layer chain and rebuild nothing.
-            if [[ "$CACHE" == "true" ]]; then
-              echo "*.cache-from=type=gha${SCOPE_SUFFIX}"
-              echo "*.cache-to=type=gha,mode=max${SCOPE_SUFFIX}"
+            if [[ -n "$CACHE_LINES" ]]; then
+              printf '%s' "$CACHE_LINES"
             fi
             if [[ -n "$PLATFORMS" ]]; then
               echo "*.platform=${PLATFORMS}"
