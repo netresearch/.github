@@ -245,12 +245,14 @@ on:
           previous layer chain and rebuild nothing, silently turning a security
           refresh into a no-op. Typical use: pass an expression comparing
           `github.event_name` against `schedule` (see the caller example in
-          the header).
+          the header). With false the run still writes its layers to the
+          cache (`cache-to`), so that the next cached build starts from the
+          refreshed layers instead of the ones from before the rebuild.
         required: false
         type: boolean
         default: true
       cache-scope:
-        description: "Optional GHA cache scope prefix. Every target already gets its own scope named after the target; set this when parallel matrix calls build the same targets and must keep separate caches (scope = `<cache-scope>-<target>`). Ignored when `cache` is false."
+        description: "Optional GHA cache scope prefix. Every target already gets its own scope named after the target; set this when parallel matrix calls build the same targets and must keep separate caches (scope = `<cache-scope>-<target>`)."
         required: false
         type: string
         default: ""
@@ -405,33 +407,35 @@ jobs:
         run: |
           set -euo pipefail
           CACHE_LINES=""
-          # cache=false omits cache-from entirely so the build cannot be
-          # satisfied from a previous run's layers. Required for scheduled
-          # rebuilds whose whole purpose is to pick up fresh upstream base
-          # images and OS patches - with cache-from those runs restore the
-          # old layer chain and rebuild nothing.
-          if [[ "$CACHE" == "true" ]]; then
-            # One GHA cache scope per target. All targets of one bake run
-            # writing into the same scope overwrite each other, leaving only
-            # the cache of the target exported last
-            # (https://docs.docker.com/build/cache/backends/gha/#scope).
-            FILE_ARGS=()
-            while IFS= read -r f; do
-              [[ -n "$f" ]] && FILE_ARGS+=(-f "$f")
-            done <<< "$BAKE_FILE"
-            # shellcheck disable=SC2206
-            TARGET_ARGS=(${TARGETS//,/ })
-            RESOLVED=$(docker buildx bake "${FILE_ARGS[@]}" "${TARGET_ARGS[@]}" --print | jq -r '.target | keys[]')
-            while IFS= read -r t; do
-              [[ -z "$t" ]] && continue
-              scope="$t"
-              if [[ -n "$CACHE_SCOPE" ]]; then
-                scope="${CACHE_SCOPE}-${t}"
-              fi
+          # One GHA cache scope per target. All targets of one bake run
+          # writing into the same scope overwrite each other, leaving only
+          # the cache of the target exported last
+          # (https://docs.docker.com/build/cache/backends/gha/#scope).
+          FILE_ARGS=()
+          while IFS= read -r f; do
+            [[ -n "$f" ]] && FILE_ARGS+=(-f "$f")
+          done <<< "$BAKE_FILE"
+          # shellcheck disable=SC2206
+          TARGET_ARGS=(${TARGETS//,/ })
+          RESOLVED=$(docker buildx bake "${FILE_ARGS[@]}" "${TARGET_ARGS[@]}" --print | jq -r '.target | keys[]')
+          while IFS= read -r t; do
+            [[ -z "$t" ]] && continue
+            scope="$t"
+            if [[ -n "$CACHE_SCOPE" ]]; then
+              scope="${CACHE_SCOPE}-${t}"
+            fi
+            # cache=false omits cache-from so the build cannot be satisfied
+            # from a previous run's layers. Required for scheduled rebuilds
+            # whose whole purpose is to pick up fresh upstream base images
+            # and OS patches - with cache-from those runs restore the old
+            # layer chain and rebuild nothing. cache-to stays: without it
+            # the cache keeps the layers from before the rebuild, and the
+            # next cached build publishes the old packages again.
+            if [[ "$CACHE" == "true" ]]; then
               CACHE_LINES+="${t}.cache-from=type=gha,scope=${scope}"$'\n'
-              CACHE_LINES+="${t}.cache-to=type=gha,mode=max,scope=${scope}"$'\n'
-            done <<< "$RESOLVED"
-          fi
+            fi
+            CACHE_LINES+="${t}.cache-to=type=gha,mode=max,scope=${scope}"$'\n'
+          done <<< "$RESOLVED"
           {
             echo 'set<<EOM'
             if [[ -n "$CACHE_LINES" ]]; then
