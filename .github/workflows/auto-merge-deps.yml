@@ -85,8 +85,10 @@ jobs:
     #
     # The bot must be both the author of the pull request and the actor of
     # the event. The author alone lets a human push to a bot branch, or a
-    # human reopen, approve and merge commits nobody reviewed.
-    if: >-
+    # human reopen, approve and merge commits nobody reviewed. zizmor's
+    # bot-conditions audit flags any github.actor comparison because the
+    # actor alone is spoofable; here it only narrows the author check.
+    if: >- # zizmor: ignore[bot-conditions] -- in addition to the author check
       (github.event.pull_request.user.login == 'dependabot[bot]' ||
        github.event.pull_request.user.login == 'renovate[bot]') &&
       (github.actor == 'dependabot[bot]' ||
