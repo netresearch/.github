@@ -404,8 +404,15 @@ jobs:
           EXTRA_SET: ${{ inputs.bake-set }}
           BAKE_FILE: ${{ steps.files.outputs.files }}
           TARGETS: ${{ inputs.targets }}
+          BAKE_SOURCE: ${{ inputs.bake-source }}
         run: |
           set -euo pipefail
+          # docker/bake-action runs bake inside a local `source` directory,
+          # so relative bake files resolve there; resolve the targets the same
+          # way. A remote source (git context) is read from the checkout.
+          if [[ -n "$BAKE_SOURCE" && -d "$BAKE_SOURCE" ]]; then
+            cd "$BAKE_SOURCE"
+          fi
           CACHE_LINES=""
           # One GHA cache scope per target. All targets of one bake run
           # writing into the same scope overwrite each other, leaving only
@@ -558,8 +565,14 @@ jobs:
           BAKE_FILE: ${{ steps.files.outputs.files }}
           TARGETS: ${{ inputs.targets }}
           SET_LINES: ${{ steps.bakeset.outputs.set }}
+          BAKE_SOURCE: ${{ inputs.bake-source }}
         run: |
           set -euo pipefail
+          # Same directory the build ran bake in (see "Compose bake --set
+          # overrides").
+          if [[ -n "$BAKE_SOURCE" && -d "$BAKE_SOURCE" ]]; then
+            cd "$BAKE_SOURCE"
+          fi
           # Rebuild the --set flag list (tags can be overridden via bake-set,
           # so the print must use the same overrides the build used).
           SET_ARGS=()
