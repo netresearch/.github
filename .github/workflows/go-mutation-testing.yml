@@ -158,16 +158,26 @@ jobs:
           CONFIG_PATH: ${{ inputs.config-path }}
         run: |
           echo "Running full mutation testing..."
-          # config-path is optional: without the file gremlins runs with its
-          # defaults. Passing --config for a missing file stops gremlins with
-          # "initialization error" before it mutates anything.
+          # The default .gremlins.yaml is optional: without it gremlins runs
+          # with its defaults. Passing --config for a missing file stops
+          # gremlins with "initialization error" before it mutates anything.
+          # A config-path the caller named must exist; the line goes to the
+          # output file, so the score check below fails the job.
           CONFIG_ARGS=()
           if [ -f "$CONFIG_PATH" ]; then
             CONFIG_ARGS=(--config="$CONFIG_PATH")
+          elif [ "$CONFIG_PATH" = ".gremlins.yaml" ]; then
+            echo "::notice::.gremlins.yaml not found, gremlins runs with its default settings."
           else
-            echo "::notice::$CONFIG_PATH not found, gremlins runs with its default settings."
+            echo "config-path $CONFIG_PATH does not exist" | tee mutation-output.txt
+            exit 1
           fi
+          # PIPESTATUS holds gremlins' status only directly after the pipe,
+          # so -e is off for it instead of an `|| true` that would replace it.
+          set +e
           gremlins unleash "${CONFIG_ARGS[@]}" 2>&1 | tee mutation-output.txt
+          echo "${PIPESTATUS[0]}" > gremlins-exit-code.txt
+          set -e
           # Gremlins prints "Test efficacy: X.XX%" — extract the score.
           SCORE=$(grep -oP 'Test efficacy: \K[\d.]+' mutation-output.txt || echo "0")
           echo "MUTATION_SCORE=${SCORE}" >> "$GITHUB_ENV"
@@ -211,16 +221,26 @@ jobs:
             exit 0
           fi
           echo "Testing mutations in changed files..."
-          # config-path is optional: without the file gremlins runs with its
-          # defaults. Passing --config for a missing file stops gremlins with
-          # "initialization error" before it mutates anything.
+          # The default .gremlins.yaml is optional: without it gremlins runs
+          # with its defaults. Passing --config for a missing file stops
+          # gremlins with "initialization error" before it mutates anything.
+          # A config-path the caller named must exist; the line goes to the
+          # output file, so the score check below fails the job.
           CONFIG_ARGS=()
           if [ -f "$CONFIG_PATH" ]; then
             CONFIG_ARGS=(--config="$CONFIG_PATH")
+          elif [ "$CONFIG_PATH" = ".gremlins.yaml" ]; then
+            echo "::notice::.gremlins.yaml not found, gremlins runs with its default settings."
           else
-            echo "::notice::$CONFIG_PATH not found, gremlins runs with its default settings."
+            echo "config-path $CONFIG_PATH does not exist" | tee mutation-output.txt
+            exit 1
           fi
+          # PIPESTATUS holds gremlins' status only directly after the pipe,
+          # so -e is off for it instead of an `|| true` that would replace it.
+          set +e
           gremlins unleash "${CONFIG_ARGS[@]}" --diff "$BASE_REF" 2>&1 | tee mutation-output.txt
+          echo "${PIPESTATUS[0]}" > gremlins-exit-code.txt
+          set -e
           SCORE=$(grep -oP 'Test efficacy: \K[\d.]+' mutation-output.txt || echo "0")
           echo "MUTATION_SCORE=${SCORE}" >> "$GITHUB_ENV"
           {
@@ -255,13 +275,18 @@ jobs:
             echo "If the Go code depends on generated sources, pass pre-build-cmd."
             exit 1
           fi
-          # A run that ends normally prints "Test efficacy", or "No results to
-          # report." when it found no mutants. Anything else means gremlins
-          # stopped before mutating: in go-cron the config file named by
-          # config-path did not exist, gremlins printed "initialization error"
-          # and exited, and every pull request showed a green check with 0%.
-          grep -qE 'Test efficacy:|No results to report' mutation-output.txt && exit 0
-          echo "::error::gremlins stopped before it reported a score:"
+          # gremlins v0.6.0 exits 0 on a finished run, 10 or 11 when the score
+          # is below a threshold set in its config, and 1 on any error. An
+          # error ends the run before it reports: in go-cron the config file
+          # did not exist, gremlins printed "initialization error", and every
+          # pull request showed a green check with 0%. The exit code decides,
+          # because the output also carries test output, which can contain
+          # any text.
+          GREMLINS_EXIT=$(cat gremlins-exit-code.txt 2>/dev/null || echo 1)
+          case "$GREMLINS_EXIT" in
+            0|10|11) exit 0 ;;
+          esac
+          echo "::error::gremlins exited with $GREMLINS_EXIT before it reported a score:"
           tail -n 20 mutation-output.txt
           exit 1
 
