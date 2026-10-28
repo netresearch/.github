@@ -13,13 +13,10 @@ import urllib.request
 import zipfile
 
 from policy import BOTS, Blocked, check_intent, decide, initial_intent
+from api_target import ApiError, positive_id, target_url
 
 MAX_BYTES = 4 * 1024 * 1024
 HISTORY_TYPES = "ADDED_TO_MERGE_QUEUE_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT,AUTO_MERGE_ENABLED_EVENT,AUTO_MERGE_DISABLED_EVENT"
-
-
-class ApiError(Exception):
-    """An API response is unavailable, incomplete or untrusted."""
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -71,6 +68,9 @@ def evaluate_and_enqueue(api, context, policy, intent):
 
 class GitHub:
     def __init__(self, repository, token, write_token=None, policy=None):
+        if (not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)
+                or any(part in {".", ".."} for part in repository.split("/"))):
+            raise ApiError("Invalid GitHub repository identity")
         self.repository = repository
         self.owner, self.repo = repository.split("/")
         self.base = os.environ.get("GITHUB_API_URL", "https://api.github.com")
@@ -79,8 +79,11 @@ class GitHub:
         self.runs = {}
         self.policy = policy or {}
 
+    def api_url(self, path, method="GET"):
+        return target_url(self.base, self.repository, path, method)
+
     def request(self, path, method="GET", data=None, write=False, binary=False):
-        url = self.base + path
+        url = self.api_url(path, method)
         encoded = json.dumps(data).encode() if data is not None else None
         headers = {"Authorization": "Bearer " + (self.write_token if write else self.token),
                    "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
@@ -155,6 +158,7 @@ class GitHub:
         raise ApiError("GraphQL pagination was truncated at its explicit safety cap")
 
     def run(self, run_id):
+        run_id = positive_id(run_id)
         if run_id not in self.runs:
             self.runs[run_id] = self.rest(f"/repos/{self.repository}/actions/runs/{run_id}")[0]
         return self.runs[run_id]
@@ -179,30 +183,7 @@ class GitHub:
         reviews = self.connection(number, "latestReviews", "", "author{login}state commit{oid}")
         threads = self.connection(number, "reviewThreads", "", "isResolved")
         rules = self.collection(f"/repos/{self.repository}/rules/branches/{urllib.parse.quote(pr['base_ref'], safe='')}")
-        checks, statuses, workflows = [], [], []
-        # Both SHA locations are explicit and bound to this freshly read PR.
-        for sha in sorted({pr["head"], pr["test_merge"]} - {None}):
-            for filename in sorted({item["workflow"] for item in self.policy["required_checks"]}):
-                for run in self.collection(f"/repos/{self.repository}/actions/workflows/{filename}/runs?head_sha={sha}", "workflow_runs"):
-                    workflows.append({"workflow": filename, "sha": run["head_sha"],
-                        "repository": run["repository"]["full_name"], "event": run["event"],
-                        "run_id": run["id"], "status": run["status"], "conclusion": run["conclusion"]})
-            statuses.extend(self.collection(f"/repos/{self.repository}/commits/{sha}/statuses"))
-            for check in self.collection(f"/repos/{self.repository}/commits/{sha}/check-runs?filter=all", "check_runs"):
-                normalized = {"id": check["id"], "name": check["name"], "sha": check["head_sha"],
-                    "status": check["status"], "conclusion": check["conclusion"],
-                    "app_id": check["app"]["id"], "app_slug": check["app"]["slug"],
-                    "run_id": 0, "attempt": 0, "repository": None, "workflow": None, "event": None}
-                match = re.fullmatch(r"https://github\.com/" + re.escape(self.repository)
-                                     + r"/actions/runs/(\d+)(?:/job/\d+)?", check.get("details_url") or "")
-                if match:
-                    run = self.run(int(match[1]))
-                    if run["head_sha"] not in {pr["head"], pr["test_merge"]}:
-                        raise ApiError("Check producer run is bound to a different commit")
-                    normalized.update(run_id=run["id"], attempt=run["run_attempt"],
-                        repository=run["repository"]["full_name"], workflow=run["path"].split("/")[-1],
-                        event=run["event"])
-                checks.append(normalized)
+        checks, statuses, workflows = self.verification_records(pr)
         return {"pr": pr, "checks": checks, "statuses": statuses, "rules": rules, "workflows": workflows,
             "history": [{"type": item["__typename"], "created_at": item["createdAt"],
                          "actor": (item["actor"] or {}).get("login"),
@@ -212,6 +193,41 @@ class GitHub:
             "threads": [{"resolved": item["isResolved"]} for item in threads],
             "complete": {"history": True, "reviews": True, "threads": True, "rules": True,
                          "checks": True, "statuses": True, "labels": not raw["labels"]["pageInfo"]["hasNextPage"]}}
+
+    def workflow_records(self, sha):
+        workflows = []
+        for filename in sorted({item["workflow"] for item in self.policy["required_checks"]}):
+            for run in self.collection(f"/repos/{self.repository}/actions/workflows/{filename}/runs?head_sha={sha}", "workflow_runs"):
+                workflows.append({"workflow": filename, "sha": run["head_sha"],
+                    "repository": run["repository"]["full_name"], "event": run["event"],
+                    "run_id": run["id"], "status": run["status"], "conclusion": run["conclusion"]})
+        return workflows
+
+    def normalize_check(self, check, pr):
+        normalized = {"id": check["id"], "name": check["name"], "sha": check["head_sha"],
+            "status": check["status"], "conclusion": check["conclusion"],
+            "app_id": check["app"]["id"], "app_slug": check["app"]["slug"],
+            "run_id": 0, "attempt": 0, "repository": None, "workflow": None, "event": None}
+        match = re.fullmatch(r"https://github\.com/" + re.escape(self.repository)
+                             + r"/actions/runs/(\d+)(?:/job/\d+)?", check.get("details_url") or "")
+        if match:
+            run = self.run(int(match[1]))
+            if run["head_sha"] not in {pr["head"], pr["test_merge"]}:
+                raise ApiError("Check producer run is bound to a different commit")
+            normalized.update(run_id=run["id"], attempt=run["run_attempt"],
+                repository=run["repository"]["full_name"], workflow=run["path"].split("/")[-1],
+                event=run["event"])
+        return normalized
+
+    def verification_records(self, pr):
+        checks, statuses, workflows = [], [], []
+        # Both SHA locations are explicit and bound to this freshly read PR.
+        for sha in sorted({pr["head"], pr["test_merge"]} - {None}):
+            workflows.extend(self.workflow_records(sha))
+            statuses.extend(self.collection(f"/repos/{self.repository}/commits/{sha}/statuses"))
+            records = self.collection(f"/repos/{self.repository}/commits/{sha}/check-runs?filter=all", "check_runs")
+            checks.extend(self.normalize_check(check, pr) for check in records)
+        return checks, statuses, workflows
 
     def intent(self, context):
         name = f"merge-intent-pr-{context['number']}-{context['event_head']}"

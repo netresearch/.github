@@ -7,7 +7,8 @@ required=$(yq -o=json '.jobs.controller.permissions' "$root/.github/workflows/de
 provided='{"contents":"write","pull-requests":"write","actions":"read","checks":"read","statuses":"read"}'
 
 allows() {
-  jq -en --argjson need "$1" --argjson have "$2" '
+  local needed="$1" provided="$2"
+  jq -en --argjson need "$needed" --argjson have "$provided" '
     all($need | to_entries[];
       . as $scope | ($have[$scope.key] == $scope.value) or
       ($scope.value == "read" and $have[$scope.key] == "write"))' >/dev/null

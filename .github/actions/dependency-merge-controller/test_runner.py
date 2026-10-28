@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+import urllib.error
 from unittest import mock
 
 from policy import initial_intent
@@ -143,6 +144,65 @@ class RunnerTest(unittest.TestCase):
         client.rest = page
         self.assertEqual(client.collection("/records"), [1, 2])
         self.assertEqual(len(seen), 2)
+
+    def test_malformed_run_ids_never_reach_authenticated_request(self):
+        api = GitHub(REPO, "stub")
+        for run_id in ("../artifacts", "%2e%2e/artifacts", "123?per_page=1",
+                       "123#ignored", True, 0, -1, "12/34", "1\n"):
+            with self.subTest(run_id=run_id), mock.patch.object(api, "rest") as request:
+                with self.assertRaises(ApiError):
+                    api.run(run_id)
+                request.assert_not_called()
+
+    def test_central_authenticated_url_is_repo_and_endpoint_bound(self):
+        api = GitHub(REPO, "stub")
+        root = f"/repos/{REPO}"
+        unsafe = ("https://attacker.invalid/", "//attacker.invalid/", "/repos/attacker/fork/actions/runs/1",
+                  root + "/actions/runs/../artifacts", root + "/actions/runs/%2e%2e/artifacts",
+                  root + "/actions/runs/%252e%252e/artifacts", root + "/actions/runs/1?bad=1",
+                  root + "/actions/runs/1#ignored", root + "/actions/runs/1\r\nX: bad",
+                  root + "/actions/runs/1#", root + "/pulls?unpaired",
+                  root + "/actions/artifacts?name=ok&name=other", root + "/pulls?state=open&head=attacker%3Abr",
+                  root + "/rules/branches/%2e%2e", root + "/rules/branches/main%2F..%2Fother")
+        for path in unsafe:
+            with self.subTest(path=path), self.assertRaises(ApiError):
+                api.api_url(path)
+
+    def test_legitimate_endpoints_and_encoded_git_refs_remain_usable(self):
+        api = GitHub(REPO, "stub")
+        root = f"/repos/{REPO}"
+        paths = [root + "/actions/runs/123", root + f"/commits/{SHA}/check-runs?filter=all&per_page=100&page=2",
+                 root + "/actions/workflows/ci.yml/runs?head_sha=" + SHA,
+                 root + f"/actions/artifacts?name=merge-intent-pr-42-{SHA}",
+                 root + "/pulls?state=open&head=netresearch%3Arenovate%2Fa%26b%3Dc"]
+        for branch in ("release%2F2026.10", "release%252F2026", "feature%23part", "feature%252e%252e%2Fname"):
+            paths.append(root + "/rules/branches/" + branch)
+        for path in paths:
+            with self.subTest(path=path):
+                self.assertTrue(api.api_url(path).startswith("https://api.github.com/repos/" + REPO + "/"))
+        self.assertEqual(api.api_url("/graphql", "POST"), "https://api.github.com/graphql")
+
+    def test_authenticated_request_rejects_endpoint_escape_before_sink(self):
+        api = GitHub(REPO, "stub")
+        with mock.patch("runner.urllib.request.Request") as sink:
+            with self.assertRaises(ApiError):
+                api.request(f"/repos/{REPO}/actions/runs/../artifacts")
+            sink.assert_not_called()
+
+    def test_artifact_redirect_does_not_forward_api_credentials(self):
+        api = GitHub(REPO, "stub")
+        redirect = urllib.error.HTTPError("url", 302, "redirect", {"Location": "https://blob.test/artifact"}, None)
+        opener = mock.Mock()
+        opener.open.side_effect = redirect
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b"zip"
+        response.__enter__.return_value.headers = {}
+        with mock.patch("runner.urllib.request.build_opener", return_value=opener), \
+                mock.patch("runner.urllib.request.urlopen", return_value=response) as download:
+            self.assertEqual(api.request(f"/repos/{REPO}/actions/artifacts/12/zip", binary=True)[0], b"zip")
+            request = download.call_args.args[0]
+            self.assertNotIn("Authorization", request.headers)
+            self.assertEqual(request.full_url, "https://blob.test/artifact")
 
 
 if __name__ == "__main__":

@@ -13,6 +13,10 @@ class Blocked(Exception):
     """A prerequisite could not be established safely."""
 
 
+class Waiting(Exception):
+    """A valid prerequisite has not completed yet."""
+
+
 def digest(policy):
     return hashlib.sha256(json.dumps(policy, sort_keys=True).encode()).hexdigest()
 
@@ -110,31 +114,38 @@ def check_intent(context, snapshot, policy, intent):
         raise Blocked("No valid current-head intent from a trusted initial run")
 
 
-def evaluate_checks(context, snapshot, policy):
+def require_workflows(context, snapshot, requirements):
     pr = snapshot["pr"]
-    expected = {check["name"]: check for check in policy["required_checks"]}
-    for requirement in expected.values():
+    for requirement in requirements:
         runs = [run for run in snapshot["workflows"]
                 if run["workflow"] == requirement["workflow"]
                 and run["event"] in requirement["events"]
                 and run["repository"] == context["repository"]
                 and run["sha"] in {pr["head"], pr.get("test_merge")}]
         if not runs:
-            return "waiting", f"Missing expected workflow: {requirement['workflow']}"
+            raise Waiting(f"Missing expected workflow: {requirement['workflow']}")
         newest = max(runs, key=lambda run: run["run_id"])
         if newest["status"] != "completed":
-            return "waiting", f"Newest workflow is pending: {requirement['workflow']}"
+            raise Waiting(f"Newest workflow is pending: {requirement['workflow']}")
         if newest["conclusion"] != "success":
             raise Blocked(f"Newest workflow did not succeed: {requirement['workflow']}")
+
+
+def latest_checks(checks):
     latest = {}
-    for check in snapshot["checks"]:
+    for check in checks:
         key = (check["id"], check.get("run_id", 0), check.get("attempt", 0))
         if check["name"] not in latest or key > latest[check["name"]][0]:
             latest[check["name"]] = (key, check)
+    return {name: item[1] for name, item in latest.items()}
+
+
+def require_check_producers(context, snapshot, expected, latest):
+    pr = snapshot["pr"]
     for name, requirement in expected.items():
         if name not in latest:
-            return "waiting", f"Missing expected check: {name}"
-        check = latest[name][1]
+            raise Waiting(f"Missing expected check: {name}")
+        check = latest[name]
         if (check.get("app_id") != requirement["app_id"]
                 or check.get("app_slug") != "github-actions"
                 or check.get("workflow") != requirement["workflow"]
@@ -143,11 +154,13 @@ def evaluate_checks(context, snapshot, policy):
                 or check.get("sha") not in {pr["head"], pr.get("test_merge")}):
             raise Blocked(f"Unexpected producer or commit for required check: {name}")
         if check["status"] != "completed":
-            return "waiting", f"Required check is pending: {name}"
+            raise Waiting(f"Required check is pending: {name}")
         if check.get("conclusion") != "success":
             raise Blocked(f"Required check did not succeed: {name}")
-    advisory = set(policy.get("advisory_checks", []))
-    for name, (_, check) in latest.items():
+
+
+def require_additional_checks(context, latest, advisory):
+    for name, check in latest.items():
         own = (check.get("run_id") == context["run_id"]
                and check.get("workflow") == context["caller_path"].split("/")[-1]
                and check.get("app_id") == 15368
@@ -157,9 +170,12 @@ def evaluate_checks(context, snapshot, policy):
         if check.get("conclusion") in {"failure", "cancelled", "timed_out", "action_required", "startup_failure"}:
             raise Blocked(f"An additional check failed: {name}")
         if check["status"] != "completed":
-            return "waiting", f"An additional check is pending: {name}"
+            raise Waiting(f"An additional check is pending: {name}")
+
+
+def require_statuses(statuses, advisory):
     latest_statuses = {}
-    for status in snapshot["statuses"]:
+    for status in statuses:
         if (status["context"] not in latest_statuses
                 or status["id"] > latest_statuses[status["context"]]["id"]):
             latest_statuses[status["context"]] = status
@@ -169,8 +185,48 @@ def evaluate_checks(context, snapshot, policy):
         if status["state"] in {"failure", "error"}:
             raise Blocked(f"A commit status failed: {name}")
         if status["state"] != "success":
-            return "waiting", f"A commit status is pending: {name}"
+            raise Waiting(f"A commit status is pending: {name}")
+
+
+def evaluate_checks(context, snapshot, policy):
+    expected = {check["name"]: check for check in policy["required_checks"]}
+    require_workflows(context, snapshot, expected.values())
+    latest = latest_checks(snapshot["checks"])
+    require_check_producers(context, snapshot, expected, latest)
+    advisory = set(policy.get("advisory_checks", []))
+    require_additional_checks(context, latest, advisory)
+    require_statuses(snapshot["statuses"], advisory)
     return "ready", "All expected current checks are successful"
+
+
+def require_rule_inventory(rule, expected):
+    for check in rule["parameters"]["required_status_checks"]:
+        requirement = expected.get(check["context"])
+        if not requirement or check.get("integration_id") not in {None, requirement["app_id"]}:
+            raise Blocked("Active branch rules are not covered by the canonical inventory")
+
+
+def branch_review_minimum(snapshot, policy):
+    if not any(rule["type"] == "merge_queue" for rule in snapshot["rules"]):
+        raise Blocked("No server-enforced merge queue is configured")
+    expected = {item["name"]: item for item in policy["required_checks"]}
+    minimum = policy.get("minimum_approvals", 2)
+    for rule in snapshot["rules"]:
+        if rule["type"] == "required_status_checks":
+            require_rule_inventory(rule, expected)
+        if rule["type"] == "pull_request":
+            minimum = max(minimum, rule["parameters"].get("required_approving_review_count", 0))
+    return minimum
+
+
+def require_current_reviews(snapshot, minimum):
+    pr = snapshot["pr"]
+    approvals = {review["author"] for review in snapshot["reviews"]
+                 if review["state"] == "APPROVED" and review["commit"] == pr["head"]}
+    if pr["review_decision"] != "APPROVED" or len(approvals) < minimum:
+        raise Waiting("Current-head reviews are not yet sufficient")
+    if any(not thread["resolved"] for thread in snapshot["threads"]):
+        raise Waiting("Review threads remain unresolved")
 
 
 def decide(context, snapshot, policy, intent):
@@ -180,26 +236,12 @@ def decide(context, snapshot, policy, intent):
         if pr["queued"]:
             return "queued", "Existing queue entry remains untouched"
         check_intent(context, snapshot, policy, intent)
-        if not any(rule["type"] == "merge_queue" for rule in snapshot["rules"]):
-            raise Blocked("No server-enforced merge queue is configured")
-        expected = {item["name"]: item for item in policy["required_checks"]}
-        minimum = policy.get("minimum_approvals", 2)
-        for rule in snapshot["rules"]:
-            if rule["type"] == "required_status_checks":
-                for check in rule["parameters"]["required_status_checks"]:
-                    requirement = expected.get(check["context"])
-                    if (not requirement or check.get("integration_id") not in {None, requirement["app_id"]}):
-                        raise Blocked("Active branch rules are not covered by the canonical inventory")
-            if rule["type"] == "pull_request":
-                minimum = max(minimum, rule["parameters"].get("required_approving_review_count", 0))
+        minimum = branch_review_minimum(snapshot, policy)
         if pr["mergeable"] != "MERGEABLE":
             return "waiting", "Mergeability is conflicting or not yet known"
-        approvals = {review["author"] for review in snapshot["reviews"]
-                     if review["state"] == "APPROVED" and review["commit"] == pr["head"]}
-        if pr["review_decision"] != "APPROVED" or len(approvals) < minimum:
-            return "waiting", "Current-head reviews are not yet sufficient"
-        if any(not thread["resolved"] for thread in snapshot["threads"]):
-            return "waiting", "Review threads remain unresolved"
+        require_current_reviews(snapshot, minimum)
         return evaluate_checks(context, snapshot, policy)
+    except Waiting as error:
+        return "waiting", str(error)
     except (Blocked, KeyError, TypeError, ValueError) as error:
         return "blocked", str(error)
