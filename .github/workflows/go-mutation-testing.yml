@@ -44,7 +44,7 @@ on:
         type: string
         default: "go.mod"
       config-path:
-        description: "Path to the gremlins config file."
+        description: "Path to the gremlins config file. When the file does not exist, gremlins runs with its default settings."
         type: string
         default: ".gremlins.yaml"
       timeout-minutes:
@@ -67,6 +67,14 @@ on:
         description: "Mutation-score threshold (percent). Used for the PR comment emoji / warning — does not fail the job."
         type: number
         default: 60
+      setup-bun:
+        description: "Install Bun before running pre-build-cmd."
+        type: boolean
+        default: false
+      bun-version:
+        description: "Bun version to install (passed to oven-sh/setup-bun)."
+        type: string
+        default: "latest"
       pre-build-cmd:
         description: "Shell command to run before gremlins, for projects whose Go code depends on generated sources (e.g. 'templ generate')."
         type: string
@@ -129,6 +137,12 @@ jobs:
         run: |
           go install "github.com/go-gremlins/gremlins/cmd/gremlins@${GREMLINS_VERSION}"
 
+      - name: Set up Bun
+        if: ${{ inputs.setup-bun }}
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ inputs.bun-version }}
+
       - name: Pre-build command
         if: ${{ inputs.pre-build-cmd != '' }}
         env:
@@ -144,7 +158,16 @@ jobs:
           CONFIG_PATH: ${{ inputs.config-path }}
         run: |
           echo "Running full mutation testing..."
-          gremlins unleash --config="$CONFIG_PATH" 2>&1 | tee mutation-output.txt
+          # config-path is optional: without the file gremlins runs with its
+          # defaults. Passing --config for a missing file stops gremlins with
+          # "initialization error" before it mutates anything.
+          CONFIG_ARGS=()
+          if [ -f "$CONFIG_PATH" ]; then
+            CONFIG_ARGS=(--config="$CONFIG_PATH")
+          else
+            echo "::notice::$CONFIG_PATH not found, gremlins runs with its default settings."
+          fi
+          gremlins unleash "${CONFIG_ARGS[@]}" 2>&1 | tee mutation-output.txt
           # Gremlins prints "Test efficacy: X.XX%" — extract the score.
           SCORE=$(grep -oP 'Test efficacy: \K[\d.]+' mutation-output.txt || echo "0")
           echo "MUTATION_SCORE=${SCORE}" >> "$GITHUB_ENV"
@@ -188,7 +211,16 @@ jobs:
             exit 0
           fi
           echo "Testing mutations in changed files..."
-          gremlins unleash --config="$CONFIG_PATH" --diff "$BASE_REF" 2>&1 | tee mutation-output.txt
+          # config-path is optional: without the file gremlins runs with its
+          # defaults. Passing --config for a missing file stops gremlins with
+          # "initialization error" before it mutates anything.
+          CONFIG_ARGS=()
+          if [ -f "$CONFIG_PATH" ]; then
+            CONFIG_ARGS=(--config="$CONFIG_PATH")
+          else
+            echo "::notice::$CONFIG_PATH not found, gremlins runs with its default settings."
+          fi
+          gremlins unleash "${CONFIG_ARGS[@]}" --diff "$BASE_REF" 2>&1 | tee mutation-output.txt
           SCORE=$(grep -oP 'Test efficacy: \K[\d.]+' mutation-output.txt || echo "0")
           echo "MUTATION_SCORE=${SCORE}" >> "$GITHUB_ENV"
           {
