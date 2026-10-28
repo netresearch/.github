@@ -79,6 +79,13 @@ and the server's expected-head check prevent old evaluations mutating a new
 head. Producers have separate repository/PR/head groups, so completion events
 cannot replace a pending writer.
 
+A required producer discovered by a check's strict single-run fallback also
+participates in workflow readiness, even if it appeared after the workflow-list
+read. A known newer pending/failed run blocks despite green named checks. The
+initial complete workflow inventory and its pending/failed observations remain
+intact; a later cache observation cannot turn that snapshot's negative evidence
+green. This uses already fetched metadata and adds no API requests.
+
 Each complete snapshot lists repository workflow runs once per explicit
 head/test-merge SHA and shares that snapshot's validated producer metadata.
 Missing producer IDs use the single-run API. Check timestamps or attempt

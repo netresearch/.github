@@ -402,9 +402,20 @@ class GitHub:
             statuses.extend(self.collection(f"/repos/{self.repository}/commits/{sha}/statuses"))
             records = self.collection(f"/repos/{self.repository}/commits/{sha}/check-runs?filter=all", "check_runs")
             checks.extend(self.normalize_check(check, pr) for check in records)
-        # A check can reveal a retry newer than the list read. Its coherent
-        # single-run refresh must also update the workflow readiness evidence.
-        workflows = [self.workflow_record(self.runs[item["run_id"]]) for item in workflows]
+        # Keep every initially observed negative. A coherent newer negative
+        # refresh of a green record must also affect workflow readiness.
+        workflows = [item if (item["status"], item["conclusion"]) != ("completed", "success")
+                     else self.workflow_record(self.runs[item["run_id"]]) for item in workflows]
+        initial_ids = {item["run_id"] for item in workflows}
+        required = {(".github/workflows/" + item["workflow"], event)
+                    for item in self.policy["required_checks"] for event in item["events"]}
+        # A run can appear after the complete list read but before its checks.
+        # Strict single-run fallback metadata is already known in this snapshot;
+        # do not lose a newly discovered pending/failed required producer.
+        workflows.extend(self.workflow_record(run) for run_id, run in self.runs.items()
+                         if run_id not in initial_ids and (run["path"], run["event"]) in required
+                         and run["repository"]["full_name"] == self.repository
+                         and run["head_sha"] in {pr["head"], pr["test_merge"]})
         return checks, statuses, workflows
 
     def intent(self, context):

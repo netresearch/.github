@@ -157,6 +157,84 @@ class EconomyTest(unittest.TestCase):
         self.assertEqual(next(c for c in snapshot["checks"] if c["id"] == 91)["workflow"], "labeler.yml")
         self.assertEqual(api.api_calls, 9)
 
+    def test_new_required_fallback_run_participates_in_workflow_readiness(self):
+        for status, conclusion, outcome in (("in_progress", None, "waiting"),
+                                            ("completed", "failure", "blocked"),
+                                            ("completed", "success", "ready")):
+            server = Server()
+            # The complete list read predates this new producer. Its named
+            # check is visible and green before the workflow itself is ready.
+            server.runs[200] = run_record(200, "ci.yml", status=status, conclusion=conclusion)
+            server.checks[0]["details_url"] = f"https://github.com/{REPO}/actions/runs/200/job/200"
+            api = server.client()
+            context, initial = fixtures()
+            intent = initial_intent(context, initial, server.policy)
+            with self.subTest(status=status, conclusion=conclusion), server.transport():
+                snapshot = api.snapshot(42)
+            self.assertEqual(decide(context, snapshot, server.policy, intent)[0], outcome)
+            self.assertEqual({r["run_id"] for r in snapshot["workflows"]}, set(range(20, 28)) | {200})
+            self.assertEqual(api.api_calls, 9)
+
+    def test_initial_negative_cannot_be_replaced_by_a_green_cache_refresh(self):
+        for status, conclusion, outcome in (("in_progress", None, "waiting"),
+                                            ("completed", "failure", "blocked")):
+            server = Server()
+            server.runs[20].update(status=status, conclusion=conclusion)
+            server.checks[0]["completed_at"] = LATER
+            server.run_responses[20] = server.runs[20] | {
+                "status": "completed", "conclusion": "success", "updated_at": LATER}
+            api = server.client()
+            context, initial = fixtures()
+            intent = initial_intent(context, initial, server.policy)
+            with self.subTest(status=status), server.transport():
+                snapshot = api.snapshot(42)
+            self.assertEqual(decide(context, snapshot, server.policy, intent)[0], outcome)
+            self.assertEqual(api.api_calls, 9)
+
+    def test_older_green_fallback_cannot_mask_newer_initial_negative(self):
+        server = Server()
+        server.runs[20].update(status="in_progress", conclusion=None)
+        server.runs[10] = run_record(10, "ci.yml")
+        server.checks[0]["details_url"] = f"https://github.com/{REPO}/actions/runs/10/job/10"
+        context, initial = fixtures()
+        intent = initial_intent(context, initial, server.policy)
+        with server.transport():
+            snapshot = server.client().snapshot(42)
+        self.assertEqual(decide(context, snapshot, server.policy, intent)[0], "waiting")
+
+    def test_unrequired_fallback_does_not_expand_required_workflow_policy(self):
+        server = Server()
+        server.runs[200] = run_record(200, "unrequired.yml", status="in_progress", conclusion=None)
+        server.checks[-1]["details_url"] = f"https://github.com/{REPO}/actions/runs/200/job/200"
+        context, initial = fixtures()
+        intent = initial_intent(context, initial, server.policy)
+        with server.transport():
+            snapshot = server.client().snapshot(42)
+        self.assertEqual(decide(context, snapshot, server.policy, intent)[0], "ready")
+        self.assertNotIn(200, {r["run_id"] for r in snapshot["workflows"]})
+
+    def test_new_required_fallback_on_final_snapshot_prevents_enqueue(self):
+        server = Server()
+        api = server.client()
+        context, initial = fixtures()
+        intent = initial_intent(context, initial, server.policy)
+        original, reads = api.snapshot, []
+
+        def snapshot(number):
+            if reads:
+                server.runs[200] = run_record(200, "ci.yml", status="in_progress", conclusion=None)
+                server.checks[0]["details_url"] = f"https://github.com/{REPO}/actions/runs/200/job/200"
+            reads.append(number)
+            return original(number)
+
+        api.snapshot = snapshot
+        with server.transport():
+            result = evaluate_and_enqueue(api, context, server.policy, intent)
+        self.assertEqual(result[0], "waiting")
+        self.assertEqual(reads, [42, 42])
+        self.assertEqual(api.api_calls, 17)
+        self.assertEqual(api.mutation_attempts, 0)
+
     def test_conflicting_duplicate_run_metadata_blocks(self):
         server = Server()
         server.listed.append(server.listed[0] | {"run_attempt": 2})
