@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 
-from policy import BOTS, Blocked, check_intent, decide, initial_intent
+from policy import BOTS, Blocked, check_intent, decide, digest, initial_intent
 from api_target import ApiError, positive_id, target_url
 
 MAX_BYTES = 4 * 1024 * 1024
@@ -39,37 +39,52 @@ def timestamp(value):
     return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def parse_execution(phase, raw_observe):
+    if phase not in {"prepare", "evaluate"}:
+        raise ApiError("phase must be exactly prepare or evaluate")
+    if raw_observe not in {"true", "false"}:
+        raise ApiError("observe-only must be exactly true or false")
+    return raw_observe == "true"
+
+
 def verify_intent_record(document, artifact, run, context):
     expected = f"merge-intent-pr-{document['number']}-{document['head']}"
-    same_run = run["id"] == context["run_id"]
     if (artifact["name"] != expected or artifact["expired"]
             or artifact["workflow_run"]["id"] != document["run_id"]
             or run["id"] != document["run_id"] or run["event"] != "pull_request_target"
-            or run["path"] != context["caller_path"]
-            or document["caller_path"] != context["caller_path"]
+            or run["head_sha"] != document["head"] or run["head_branch"] != document["head_ref"]
+            or run["id"] == context["run_id"]
+            or run["path"] != context["intent_path"]
+            or document["caller_path"] != context["intent_path"]
+            or document.get("observe_only") != context["observe_only"]
             or run["repository"]["full_name"] != context["repository"]
             or run["head_repository"]["full_name"] != context["repository"]
             or run["actor"]["login"] not in BOTS
             or run["actor"]["login"] != document["actor"]
-            or (not same_run and (run["status"] != "completed" or run["conclusion"] != "success"))
+            or run["status"] != "completed" or run["conclusion"] != "success"
             or timestamp(artifact["expires_at"]) <= timestamp(context["now"])
             or timestamp(artifact["created_at"]) < timestamp(run["created_at"])):
         raise ApiError("Intent artifact provenance or lifetime did not verify")
     # Serialized 'verified' fields are data, never evidence of verification.
-    return document | {"verified": True, "expired": False}
+    return document | {"verified": True, "expired": False, "artifact_id": artifact["id"],
+                       "artifact_name": artifact["name"], "artifact_expires_at": artifact["expires_at"]}
 
 
 def evaluate_and_enqueue(api, context, policy, intent):
     snapshot = api.snapshot(context["number"])
+    api.last_snapshot = snapshot
     result = decide(context, snapshot, policy, intent)
     if result[0] != "ready":
-        return result
+        return observer_result(api, result)
     fresh = api.snapshot(context["number"])
+    api.last_snapshot = fresh
     if (fresh["pr"]["head"], fresh["pr"]["base"]) != (snapshot["pr"]["head"], snapshot["pr"]["base"]):
         return "blocked", "Head or base changed before enqueue; a new event must re-evaluate"
     result = decide(context, fresh, policy, intent)
     if result[0] != "ready":
-        return result
+        return observer_result(api, result)
+    if getattr(api, "observe_only", False):
+        return "observed-ready", "Two fresh policy snapshots are ready; no mutation attempted"
     api.enqueue(fresh["pr"]["id"], fresh["pr"]["head"])
     confirmed = api.snapshot(context["number"])
     if confirmed["pr"]["head"] == fresh["pr"]["head"] and confirmed["pr"]["queued"]:
@@ -77,8 +92,14 @@ def evaluate_and_enqueue(api, context, policy, intent):
     return "blocked", "Queue insertion was not confirmed; no automatic retry"
 
 
+def observer_result(api, result):
+    if result[0] == "queued" and getattr(api, "observe_only", False):
+        return "observed-existing", "Existing queue entry observed; no mutation attempted"
+    return result
+
+
 class GitHub:
-    def __init__(self, repository, token, write_token=None, policy=None):
+    def __init__(self, repository, token, write_token=None, policy=None, *, observe_only=False, phase="evaluate"):
         if (not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)
                 or any(part in {".", ".."} for part in repository.split("/"))):
             raise ApiError("Invalid GitHub repository identity")
@@ -89,12 +110,21 @@ class GitHub:
         self.write_token = write_token or token
         self.runs = {}
         self.policy = policy or {}
+        if not isinstance(observe_only, bool):
+            raise ApiError("observe_only must be a boolean")
+        parse_execution(phase, "true" if observe_only else "false")
+        self.observe_only = observe_only
+        self.phase = phase
+        self.api_calls = 0
+        self.mutation_attempts = 0
 
     def api_url(self, path, method="GET"):
         return target_url(self.base, self.repository, path, method)
 
     def request(self, path, method="GET", data=None, write=False, binary=False):
+        self.guard_operation(path, method, data, write)
         url = self.api_url(path, method)
+        self.api_calls += 1
         encoded = json.dumps(data).encode() if data is not None else None
         headers = {"Authorization": "Bearer " + (self.write_token if write else self.token),
                    "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
@@ -122,6 +152,25 @@ class GitHub:
         if len(body) > MAX_BYTES:
             raise ApiError("GitHub response exceeds the bounded response size")
         return (body if binary else json.loads(body)), response_headers
+
+    def guard_operation(self, path, method, data, write):
+        read_query = (path == "/graphql" and method == "POST" and isinstance(data, dict)
+                      and set(data) <= {"query", "variables"}
+                      and isinstance(data.get("query"), str)
+                      and re.match(r"\s*query\s*(?:\(|\{)", data["query"])
+                      and not re.search(r"\bmutation\b", data["query"]))
+        mutating = write or (method != "GET" and not read_query)
+        if not mutating:
+            return
+        self.mutation_attempts += 1
+        if self.observe_only:
+            raise ApiError("Observation forbids every PR/queue mutation")
+        approval = (method == "POST" and not write
+                    and re.fullmatch(r"/repos/" + re.escape(self.repository) + r"/pulls/[1-9][0-9]*/reviews", path)
+                    and isinstance(data, dict) and set(data) == {"event", "commit_id"}
+                    and data["event"] == "APPROVE" and re.fullmatch(r"[0-9a-f]{40}", data["commit_id"]))
+        if self.phase == "prepare" and not approval:
+            raise ApiError("Prepare may only create its head-bound eligibility approval")
 
     def rest(self, path):
         return self.request(path)
@@ -253,7 +302,7 @@ class GitHub:
             if artifact["expired"] or timestamp(artifact["expires_at"]) <= timestamp(context["now"]):
                 continue  # No automatic intent remains; explicit human recovery is separate.
             run = self.run(artifact["workflow_run"]["id"])
-            if run["event"] == "pull_request_target" and run["path"] == context["caller_path"]:
+            if run["event"] == "pull_request_target" and run["path"] == context["intent_path"]:
                 candidates.append((artifact, run))
         if not candidates:
             return None
@@ -274,12 +323,29 @@ class GitHub:
             {"id": pr_id, "head": head}, write=True)
 
 
+def allowed_completion(run, context, policy):
+    if run["path"] == context["intent_path"]:
+        return (run["event"] == "pull_request_target" and run["actor"]["login"] in BOTS
+                and run["conclusion"] == "success")
+    return any(run["path"] == ".github/workflows/" + check["workflow"]
+               and run["event"] in check["events"] for check in policy["required_checks"])
+
+
+def configured_workflow_paths():
+    paths = {"caller_path": os.environ["CALLER_WORKFLOW"], "intent_path": os.environ["INTENT_WORKFLOW"]}
+    for value in paths.values():
+        if workflow_path(value) != value:
+            raise Blocked("Configured workflow identities must be bare repository-relative paths")
+    return paths
+
+
 def context_from_event(api, event, policy):
     event_name = os.environ["GITHUB_EVENT_NAME"]
     context = {"repository": api.repository, "event": event_name,
                "action": event.get("action"), "actor": os.environ["GITHUB_ACTOR"],
                "run_id": int(os.environ["GITHUB_RUN_ID"]),
-               "caller_path": os.environ["CALLER_WORKFLOW"],
+               **configured_workflow_paths(),
+               "observe_only": api.observe_only,
                "now": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                "update_type": os.environ.get("UPDATE_TYPE", ""),
                "ecosystem": os.environ.get("ECOSYSTEM", "")}
@@ -289,13 +355,11 @@ def context_from_event(api, event, policy):
         context.update(number=event["pull_request"]["number"], event_head=event["pull_request"]["head"]["sha"])
     elif event_name == "workflow_run":
         run = api.run(event["workflow_run"]["id"])
-        workflow = run["path"].split("/")[-1]
         if (event.get("action") != "completed" or run["status"] != "completed"
-                or run["event"] not in {"pull_request", "pull_request_target"}
                 or run["repository"]["full_name"] != api.repository
                 or run["head_repository"]["full_name"] != api.repository
                 or not run["head_branch"].startswith(("renovate/", "dependabot/"))
-                or workflow not in {check["workflow"] for check in policy["required_checks"]}):
+                or not allowed_completion(run, context, policy)):
             raise Blocked("Completion is outside the trusted dependency workflow scope")
         candidates = api.collection(f"/repos/{api.repository}/pulls?state=open&head="
                                     + urllib.parse.quote(api.owner + ":" + run["head_branch"], safe=""))
@@ -315,37 +379,73 @@ def output(**values):
             stream.write(f"{key}={value}\n")
 
 
-def main(mode):
+def phase_context(context, phase):
+    producer = context["caller_path"] == context["intent_path"]
+    if phase == "prepare" and (context["event"] != "pull_request_target" or not producer):
+        raise Blocked("Prepare requires the separate trusted PR-target intent caller")
+    if phase == "evaluate" and (context["event"] == "pull_request_target" or producer):
+        raise Blocked("Evaluate requires a different completion/review caller run")
+
+
+def prepare_intent(api, context, policy):
+    snapshot = api.snapshot(context["number"])
+    api.last_snapshot = snapshot
+    intent = initial_intent(context, snapshot, policy)
+    existing = api.intent(context)
+    if existing is not None:
+        check_intent(context, snapshot, policy, existing)
+        return existing
+    directory = Path(os.environ["RUNNER_TEMP"]) / f"dependency-intent-{context['run_id']}"
+    directory.mkdir(exist_ok=True)
+    path = directory / "intent.json"
+    path.write_text(json.dumps(intent, sort_keys=True) + "\n")
+    if not api.observe_only:
+        api.request(f"/repos/{api.repository}/pulls/{context['number']}/reviews", "POST",
+                    {"event": "APPROVE", "commit_id": intent["head"]})
+    output(intent_name=f"merge-intent-pr-{context['number']}-{intent['head']}", intent_path=path)
+    return intent
+
+
+def write_receipt(api, context, policy, phase, intent, state, reason):
+    snapshot = getattr(api, "last_snapshot", {})
+    pr = snapshot.get("pr", {})
+    receipt = {"phase": phase, "observe_only": api.observe_only, "event": context.get("event"),
+               "run_id": context.get("run_id"), "pr": context.get("number"),
+               "head": pr.get("head", context.get("event_head")), "base": pr.get("base"),
+               "caller_workflow": context.get("caller_path"), "intent_workflow": context.get("intent_path"),
+               "origin_run_id": (intent or {}).get("run_id"), "artifact_id": (intent or {}).get("artifact_id"),
+               "artifact_name": (intent or {}).get("artifact_name"), "policy_digest": digest(policy),
+               "decision": state, "reason": reason, "required_checks": policy.get("required_checks"),
+               "mutation_attempts": getattr(api, "mutation_attempts", 0),
+               "api_calls": getattr(api, "api_calls", 0)}
+    text = json.dumps(receipt, sort_keys=True, indent=2) + "\n"
+    path = Path(os.environ["RUNNER_TEMP"]) / f"dependency-receipt-{context.get('run_id', 'blocked')}-{phase}.json"
+    path.write_text(text)
+    output(state=state, receipt_path=path)
+    with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+        summary.write(f"Dependency queue controller: **{state}**. {reason}\n\n```json\n{text}```\n")
+    print(f"Dependency queue controller: {state}: {reason}")
+
+
+def main(phase):
+    observe_only = parse_execution(phase, os.environ.get("OBSERVE_ONLY", ""))
     policy = json.loads(os.environ["CONTROLLER_POLICY"])
-    api = GitHub(os.environ["GITHUB_REPOSITORY"], os.environ["READ_TOKEN"], os.environ.get("WRITE_TOKEN"), policy)
+    api = GitHub(os.environ["GITHUB_REPOSITORY"], os.environ["READ_TOKEN"], os.environ.get("WRITE_TOKEN"),
+                 policy, observe_only=observe_only, phase=phase)
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+    context, intent = {}, None
     try:
         context = context_from_event(api, event, policy)
-        if mode == "prepare":
-            if context["event"] != "pull_request_target":
-                return
-            snapshot = api.snapshot(context["number"])
-            intent = initial_intent(context, snapshot, policy)
-            existing = api.intent(context)
-            if existing is not None:
-                check_intent(context, snapshot, policy, existing)
-                return  # Reuse the exact trusted head-bound intent; do not create ambiguity.
-            directory = Path(os.environ["RUNNER_TEMP"]) / f"dependency-intent-{context['run_id']}"
-            directory.mkdir(exist_ok=True)
-            path = directory / "intent.json"
-            path.write_text(json.dumps(intent, sort_keys=True) + "\n")
-            # The existing eligibility approval is retained only on this entry.
-            api.request(f"/repos/{api.repository}/pulls/{context['number']}/reviews", "POST", {"event": "APPROVE"})
-            output(intent_name=f"merge-intent-pr-{context['number']}-{intent['head']}", intent_path=path)
-            return
-        intent = api.intent(context)
-        state, reason = evaluate_and_enqueue(api, context, policy, intent)
+        phase_context(context, phase)
+        if phase == "prepare":
+            intent = prepare_intent(api, context, policy)
+            state, reason = "prepared", "Initial intent is ready for upload; this producer never enqueues"
+        else:
+            intent = api.intent(context)
+            state, reason = evaluate_and_enqueue(api, context, policy, intent)
     except (Blocked, ApiError, KeyError, ValueError, TypeError, OSError, zipfile.BadZipFile) as error:
         state, reason = "blocked", str(error)
-    output(state=state)
-    with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
-        summary.write(f"Dependency queue controller: **{state}**. {reason}\n")
-    print(f"Dependency queue controller: {state}: {reason}")
+    write_receipt(api, context, policy, phase, intent, state, reason)
 
 
 if __name__ == "__main__":

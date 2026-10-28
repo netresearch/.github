@@ -19,6 +19,7 @@ class FakeAPI:
         self.repository = REPO
         self.snapshots = list(snapshots)
         self.mutations = []
+        self.observe_only = False
 
     def snapshot(self, number):
         return copy.deepcopy(self.snapshots.pop(0))
@@ -76,7 +77,8 @@ class RunnerTest(unittest.TestCase):
             event = Path(directory) / "event.json"
             event.write_text("{}")
             environ = {"CONTROLLER_POLICY": json.dumps(POLICY), "GITHUB_REPOSITORY": REPO,
-                       "READ_TOKEN": "stub", "GITHUB_EVENT_PATH": str(event), "RUNNER_TEMP": directory}
+                       "READ_TOKEN": "stub", "GITHUB_EVENT_PATH": str(event), "RUNNER_TEMP": directory,
+                       "OBSERVE_ONLY": "false", "GITHUB_STEP_SUMMARY": str(Path(directory) / "summary.md")}
             with mock.patch.dict(os.environ, environ), mock.patch("runner.GitHub", return_value=api), \
                     mock.patch("runner.context_from_event", return_value=self.context), \
                     mock.patch("runner.output", side_effect=lambda **values: emitted.append(values)):
@@ -93,30 +95,38 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(api.mutations, [])
 
     def provenance(self):
-        artifact = {"name": f"merge-intent-pr-42-{SHA}", "expired": False,
+        artifact = {"id": 12, "name": f"merge-intent-pr-42-{SHA}", "expired": False,
                     "workflow_run": {"id": 9}, "created_at": TIME,
                     "expires_at": "2026-11-04T10:00:00Z"}
         run = {"id": 9, "event": "pull_request_target", "actor": {"login": "renovate[bot]"},
-               "path": ".github/workflows/auto-merge-deps.yml", "status": "completed",
+               "head_sha": SHA, "head_branch": "renovate/phpunit",
+               "path": self.context["intent_path"], "status": "completed",
                "conclusion": "success", "repository": {"full_name": REPO},
                "head_repository": {"full_name": REPO}, "created_at": TIME}
         return artifact, run
 
     def test_exact_server_metadata_verifies_intent(self):
         artifact, run = self.provenance()
-        self.assertTrue(verify_intent_record(self.intent, artifact, run, self.context)["verified"])
+        context = self.context | {"run_id": 10, "caller_path": ".github/workflows/auto-merge-deps.yml"}
+        self.assertTrue(verify_intent_record(self.intent, artifact, run, context)["verified"])
+
+    def test_same_run_cannot_supply_its_own_intent_even_if_marked_completed(self):
+        artifact, run = self.provenance()
+        with self.assertRaises(ApiError):
+            verify_intent_record(self.intent, artifact, run, self.context)
 
     def test_spoofed_origin_or_expired_artifact_blocks(self):
         variants = [("artifact", "expired", True), ("artifact", "workflow_run", {"id": 10}),
                     ("artifact", "name", "fake"), ("run", "path", ".github/workflows/fake.yml"),
                     ("run", "event", "pull_request"), ("run", "actor", {"login": "attacker"}),
+                    ("run", "head_sha", "c" * 40), ("run", "head_branch", "main"),
                     ("run", "repository", {"full_name": "attacker/fork"}),
                     ("run", "head_repository", {"full_name": "attacker/fork"})]
         for where, key, value in variants:
             artifact, run = self.provenance()
             with self.subTest(where=where, key=key), self.assertRaises(ApiError):
                 (artifact if where == "artifact" else run)[key] = value
-                verify_intent_record(self.intent, artifact, run, self.context)
+                verify_intent_record(self.intent, artifact, run, self.context | {"run_id": 10})
 
     def test_expired_intent_is_absent_and_requires_explicit_human_recovery(self):
         client = GitHub.__new__(GitHub)
@@ -149,12 +159,14 @@ class RunnerTest(unittest.TestCase):
         client = GitHub(REPO, "stub")
         for path in (".github/workflows/auto-merge-deps.yml",
                      ".github/workflows/auto-merge-deps.yml@main",
-                     ".github/workflows/auto-merge-deps.yml@refs/heads/renovate/test"):
+                     ".github/workflows/auto-merge-deps.yml@refs/heads/renovate/test",
+                     ".github/workflows/auto-merge-deps.yml@refs/heads/renovate/pkg@1",
+                     ".github/workflows/auto-merge-deps.yml@refs/heads/feature#part"):
             client.runs = {}
             client.rest = lambda endpoint: ({"path": path}, {})
             self.assertEqual(client.run(9)["path"], ".github/workflows/auto-merge-deps.yml")
         for path in (None, "../auto-merge-deps.yml", ".github/workflows/fake.yml@",
-                     ".github/workflows/fake.yml@main\ninvalid"):
+                     ".github/workflows/fake.yml@main\ninvalid", ".github/workflows/fake.yml@main\n@other"):
             client.runs = {}
             client.rest = lambda endpoint: ({"path": path}, {})
             with self.subTest(path=path), self.assertRaises(ApiError):
@@ -218,6 +230,7 @@ class RunnerTest(unittest.TestCase):
             request = download.call_args.args[0]
             self.assertNotIn("Authorization", request.headers)
             self.assertEqual(request.full_url, "https://blob.test/artifact")
+        redirect.close()
 
 
 if __name__ == "__main__":

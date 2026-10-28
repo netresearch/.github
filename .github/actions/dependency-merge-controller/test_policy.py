@@ -25,7 +25,8 @@ POLICY = {
 def fixtures():
     context = {"repository": REPO, "event": "pull_request_target",
                "action": "opened", "actor": "renovate[bot]", "run_id": 9,
-               "caller_path": ".github/workflows/auto-merge-deps.yml",
+               "caller_path": ".github/workflows/dependency-merge-intent.yml",
+               "intent_path": ".github/workflows/dependency-merge-intent.yml", "observe_only": False,
                "event_head": SHA, "number": 42, "now": TIME}
     snapshot = {
         "pr": {"number": 42, "id": "PR_42", "repository": REPO,
@@ -63,7 +64,8 @@ class PolicyTest(unittest.TestCase):
         self.intent = initial_intent(self.context, self.snapshot, POLICY)
 
     def result(self, **changes):
-        context = self.context | {"event": "workflow_run", "actor": "human"} | changes
+        context = self.context | {"event": "workflow_run", "actor": "human", "run_id": 10,
+                                  "caller_path": ".github/workflows/auto-merge-deps.yml"} | changes
         return decide(context, self.snapshot, POLICY, self.intent)[0]
 
     def test_fresh_pending_then_completion_enqueues(self):

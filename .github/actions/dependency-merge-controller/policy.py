@@ -83,9 +83,11 @@ def initial_intent(context, snapshot, policy):
         raise Blocked("Dependency metadata does not establish a permitted safe update")
     return {"version": 1, "repository": context["repository"],
             "number": snapshot["pr"]["number"], "head": snapshot["pr"]["head"],
+            "head_ref": snapshot["pr"]["head_ref"],
             "origin_event": context["event"], "origin_action": context["action"],
             "actor": context["actor"], "run_id": context["run_id"],
             "caller_path": context["caller_path"], "created_at": context["now"],
+            "observe_only": context.get("observe_only", False),
             "policy_digest": digest(policy), "safe_update": safe,
             "verified": True, "expired": False}
 
@@ -108,8 +110,11 @@ def check_intent(context, snapshot, policy, intent):
     if (not intent or intent.get("version") != 1 or not intent.get("verified")
             or intent.get("expired") or intent.get("repository") != context["repository"]
             or intent.get("number") != pr["number"] or intent.get("head") != pr["head"]
+            or intent.get("head_ref") != pr["head_ref"]
             or intent.get("origin_event") != "pull_request_target"
             or intent.get("actor") not in BOTS or not intent.get("safe_update")
+            or intent.get("caller_path") != context.get("intent_path", context["caller_path"])
+            or intent.get("observe_only") != context.get("observe_only", False)
             or intent.get("policy_digest") != digest(policy)):
         raise Blocked("No valid current-head intent from a trusted initial run")
 
