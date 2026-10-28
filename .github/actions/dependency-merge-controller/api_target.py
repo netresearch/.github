@@ -9,7 +9,7 @@ class ApiError(Exception):
 
 
 def positive_id(value):
-    if isinstance(value, bool) or not re.fullmatch(r"[1-9][0-9]*", str(value)):
+    if isinstance(value, bool) or not re.fullmatch(r"[1-9]\d*", str(value), flags=re.ASCII):
         raise ApiError("Expected a positive numeric GitHub identifier")
     return int(value)
 
@@ -55,7 +55,7 @@ def query_pairs(kind, query, owner):
     for key, value in pairs:
         if key not in permitted or not re.fullmatch(permitted[key], value):
             raise ApiError("Unexpected API query field or value")
-    if not QUERY_FIELDS[kind].keys() <= fields.keys():
+    if QUERY_FIELDS[kind].keys() - fields.keys():
         raise ApiError("Required API query fields are missing")
     if kind == "pulls":
         head_owner, separator, branch = fields["head"].partition(":")

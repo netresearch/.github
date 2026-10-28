@@ -19,6 +19,17 @@ MAX_BYTES = 4 * 1024 * 1024
 HISTORY_TYPES = "ADDED_TO_MERGE_QUEUE_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT,AUTO_MERGE_ENABLED_EVENT,AUTO_MERGE_DISABLED_EVENT"
 
 
+def workflow_path(value):
+    """Canonical file identity; the REST API may append an @ref suffix."""
+    if not isinstance(value, str):
+        raise ApiError("Missing workflow path")
+    path, separator, ref = value.partition("@")
+    if (not re.fullmatch(r"[.]github/workflows/[A-Za-z0-9_-]+[.]ya?ml", path)
+            or (separator and (not ref or re.search(r"[\x00-\x20]", ref)))):
+        raise ApiError("Invalid workflow path")
+    return path
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -160,7 +171,9 @@ class GitHub:
     def run(self, run_id):
         run_id = positive_id(run_id)
         if run_id not in self.runs:
-            self.runs[run_id] = self.rest(f"/repos/{self.repository}/actions/runs/{run_id}")[0]
+            run = self.rest(f"/repos/{self.repository}/actions/runs/{run_id}")[0]
+            run["path"] = workflow_path(run.get("path"))
+            self.runs[run_id] = run
         return self.runs[run_id]
 
     def snapshot(self, number):

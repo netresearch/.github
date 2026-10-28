@@ -145,9 +145,24 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(client.collection("/records"), [1, 2])
         self.assertEqual(len(seen), 2)
 
+    def test_workflow_paths_normalize_only_the_documented_ref_suffix(self):
+        client = GitHub(REPO, "stub")
+        for path in (".github/workflows/auto-merge-deps.yml",
+                     ".github/workflows/auto-merge-deps.yml@main",
+                     ".github/workflows/auto-merge-deps.yml@refs/heads/renovate/test"):
+            client.runs = {}
+            client.rest = lambda endpoint: ({"path": path}, {})
+            self.assertEqual(client.run(9)["path"], ".github/workflows/auto-merge-deps.yml")
+        for path in (None, "../auto-merge-deps.yml", ".github/workflows/fake.yml@",
+                     ".github/workflows/fake.yml@main\ninvalid"):
+            client.runs = {}
+            client.rest = lambda endpoint: ({"path": path}, {})
+            with self.subTest(path=path), self.assertRaises(ApiError):
+                client.run(9)
+
     def test_malformed_run_ids_never_reach_authenticated_request(self):
         api = GitHub(REPO, "stub")
-        for run_id in ("../artifacts", "%2e%2e/artifacts", "123?per_page=1",
+        for run_id in ("١", "1٢", "１", "../artifacts", "%2e%2e/artifacts", "123?per_page=1",
                        "123#ignored", True, 0, -1, "12/34", "1\n"):
             with self.subTest(run_id=run_id), mock.patch.object(api, "rest") as request:
                 with self.assertRaises(ApiError):
