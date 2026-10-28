@@ -79,6 +79,32 @@ and the server's expected-head check prevent old evaluations mutating a new
 head. Producers have separate repository/PR/head groups, so completion events
 cannot replace a pending writer.
 
+Each complete snapshot lists repository workflow runs once per explicit
+head/test-merge SHA and shares that snapshot's validated producer metadata.
+Missing producer IDs use the single-run API. Check timestamps or attempt
+evidence newer than cached run metadata require one coherent fresh single-run
+read or block; a refreshed pending retry also updates workflow readiness.
+Terminal checks use their completion timestamp, which must be present; active
+checks use their start timestamp. A skipped check can have a synthetic start
+later than its completion and does not become evidence of a newer retry.
+The next snapshot discards the entire cache. PR metadata and the first history,
+review and thread pages share one GraphQL query, with independent continuation
+cursors and a ten-page limit for each connection, including its first page.
+Both full fresh ready snapshots remain mandatory before enqueue.
+
+Repository-wide workflow search has a shared 1,000-result ceiling for each SHA,
+rather than a separate ceiling for each required workflow. A count at that
+ceiling, missing/changing count, incomplete pagination or duplicate run identity
+blocks instead of treating a truncated list as complete. This can block a SHA
+with many workflow runs earlier than the per-workflow lookup did. The one-page
+fixture with two SHAs and ten producer runs uses eight adapter requests per
+snapshot instead of 35; fallback reads and extra pages add their real requests.
+This is an API-demand measurement, not a hosted elapsed-time improvement.
+Unreferenced sane `dynamic/` paths with event `dynamic` remain part of the
+bounded inventory but cannot enter the trusted workflow cache. Unknown or
+malformed workflow identities block. If a check references a dynamic producer,
+its single-run lookup retains strict workflow-path validation and blocks.
+
 The producer uses `pull_request_target` opened/synchronize/reopened. The separate
 evaluator uses `pull_request_review` submitted/dismissed and `workflow_run:
 completed` with the complete gate-name allowlist **plus the explicit producer

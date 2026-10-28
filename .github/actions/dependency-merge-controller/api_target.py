@@ -24,7 +24,7 @@ def git_ref(value):
 
 ROUTES = (
     ("GET", r"actions/runs/[1-9][0-9]*", "single"),
-    ("GET", r"actions/workflows/[A-Za-z0-9_-]+\.ya?ml/runs", "runs"),
+    ("GET", r"actions/runs", "runs"),
     ("GET", r"actions/artifacts", "artifacts"),
     ("GET", r"actions/artifacts/[1-9][0-9]*/zip", "single"),
     ("GET", r"commits/[0-9a-f]{40}/statuses", "list"),

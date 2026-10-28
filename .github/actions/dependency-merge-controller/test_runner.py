@@ -177,7 +177,9 @@ class RunnerTest(unittest.TestCase):
                      ".github/workflows/auto-merge-deps.yml@refs/heads/renovate/pkg@1",
                      ".github/workflows/auto-merge-deps.yml@refs/heads/feature#part"):
             client.runs = {}
-            client.rest = lambda endpoint: ({"path": path}, {})
+            client.rest = lambda endpoint: ({"id": 9, "path": path, "run_attempt": 1,
+                "repository": {"full_name": REPO}, "head_sha": SHA, "event": "pull_request",
+                "status": "completed", "conclusion": "success", "updated_at": TIME}, {})
             self.assertEqual(client.run(9)["path"], ".github/workflows/auto-merge-deps.yml")
         for path in (None, "../auto-merge-deps.yml", ".github/workflows/fake.yml@",
                      ".github/workflows/fake.yml@main\ninvalid", ".github/workflows/fake.yml@main\n@other"):
@@ -213,7 +215,7 @@ class RunnerTest(unittest.TestCase):
         api = GitHub(REPO, "stub")
         root = f"/repos/{REPO}"
         paths = [root + "/actions/runs/123", root + f"/commits/{SHA}/check-runs?filter=all&per_page=100&page=2",
-                 root + "/actions/workflows/ci.yml/runs?head_sha=" + SHA,
+                 root + "/actions/runs?head_sha=" + SHA,
                  root + f"/actions/artifacts?name=merge-intent-pr-42-{SHA}",
                  root + "/pulls?state=open&head=netresearch%3Arenovate%2Fa%26b%3Dc"]
         for branch in ("release%2F2026.10", "release%252F2026", "feature%23part", "feature%252e%252e%2Fname"):

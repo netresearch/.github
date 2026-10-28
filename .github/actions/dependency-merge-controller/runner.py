@@ -109,6 +109,8 @@ class GitHub:
         self.token = token
         self.write_token = write_token or token
         self.runs = {}
+        self.refreshed_runs = set()
+        self.listed_run_ids = set()
         self.policy = policy or {}
         if not isinstance(observe_only, bool):
             raise ApiError("observe_only must be a boolean")
@@ -175,17 +177,29 @@ class GitHub:
     def rest(self, path):
         return self.request(path)
 
-    def collection(self, path, key=None, maximum_pages=10):
-        result = []
+    def collection(self, path, key=None, maximum_pages=10, search_limit=None):
+        result, total = [], None
         for page in range(1, maximum_pages + 1):
             separator = "&" if "?" in path else "?"
             data, headers = self.rest(f"{path}{separator}per_page=100&page={page}")
+            if key and (not isinstance(data, dict) or key not in data):
+                raise ApiError("Missing paginated API collection")
             values = data[key] if key else data
             if not isinstance(values, list):
                 raise ApiError("Expected a paginated API list")
+            if search_limit is not None:
+                count = data.get("total_count")
+                if (type(count) is not int or not 0 <= count < search_limit
+                        or (total is not None and count != total)):
+                    raise ApiError("Workflow search count is unavailable, changing or capped")
+                total = count
             result.extend(values)
             link = next((value for name, value in headers.items() if name.lower() == "link"), "")
+            if search_limit is not None and not values and 'rel="next"' in link:
+                raise ApiError("Workflow search returned an empty nonfinal page")
             if 'rel="next"' not in link:
+                if total is not None and len(result) != total:
+                    raise ApiError("Workflow search did not return its complete inventory")
                 return result
         raise ApiError("API pagination was truncated at its explicit safety cap")
 
@@ -200,37 +214,86 @@ class GitHub:
         query = (f"query($owner:String!,$repo:String!,$number:Int!{extra}){{"
                  f"repository(owner:$owner,name:$repo){{pullRequest(number:$number){{{fields}}}}}}}")
         data = self.graphql(query, {"owner": self.owner, "repo": self.repo, "number": number} | (variables or {}))
-        return data["repository"]["pullRequest"]
+        repository = data.get("repository")
+        if not isinstance(repository, dict) or not isinstance(repository.get("pullRequest"), dict):
+            raise ApiError("GraphQL did not return the requested pull request")
+        return repository["pullRequest"]
 
-    def connection(self, number, name, arguments, fields):
-        result, after = [], None
+    @staticmethod
+    def connection_field(name, arguments, fields, after=False):
+        suffix = "," + arguments if arguments else ""
+        cursor = ",after:$after" if after else ""
+        return f"{name}(first:100{cursor}{suffix}){{nodes{{{fields}}}pageInfo{{hasNextPage endCursor}}}}"
+
+    def connection(self, number, name, arguments, fields, first_page=None):
+        result, after, seen = [], None, set()
+        data = first_page
         for _ in range(10):
-            suffix = "," + arguments if arguments else ""
-            data = self.pr_query(number,
-                f"{name}(first:100,after:$after{suffix}){{nodes{{{fields}}}pageInfo{{hasNextPage endCursor}}}}",
-                {"after": after})[name]
+            if data is None:
+                data = self.pr_query(number, self.connection_field(name, arguments, fields, after=True),
+                                     {"after": after}).get(name)
+            if (not isinstance(data, dict) or not isinstance(data.get("nodes"), list)
+                    or not isinstance(data.get("pageInfo"), dict)
+                    or type(data["pageInfo"].get("hasNextPage")) is not bool):
+                raise ApiError("GraphQL connection is missing or malformed")
             result.extend(data["nodes"])
             if not data["pageInfo"]["hasNextPage"]:
                 return result
-            after = data["pageInfo"]["endCursor"]
-            if not after:
-                raise ApiError("GraphQL pagination has no next cursor")
+            after = data["pageInfo"].get("endCursor")
+            if not isinstance(after, str) or not after or after in seen:
+                raise ApiError("GraphQL pagination has no advancing cursor")
+            seen.add(after)
+            data = None
         raise ApiError("GraphQL pagination was truncated at its explicit safety cap")
 
-    def run(self, run_id):
+    def run_metadata(self, raw, expected_id=None, expected_sha=None, canonical=True):
+        if not isinstance(raw, dict):
+            raise ApiError("Missing workflow run metadata")
+        run = raw.copy()
+        try:
+            run_id = positive_id(run["id"])
+            if (run["id"] != run_id or type(run["run_attempt"]) is not int or run["run_attempt"] < 1
+                    or run["repository"]["full_name"] != self.repository
+                    or not re.fullmatch(r"[0-9a-f]{40}", run["head_sha"])
+                    or (expected_id is not None and run_id != expected_id)
+                    or (expected_sha is not None and run["head_sha"] != expected_sha)
+                    or not isinstance(run["event"], str) or not run["event"]
+                    or not isinstance(run["status"], str) or not run["status"]
+                    or (run["conclusion"] is not None and not isinstance(run["conclusion"], str))):
+                raise ApiError("Workflow run identity or attempt did not verify")
+            if not isinstance(run.get("path"), str) or not run["path"]:
+                raise ApiError("Workflow run path is missing")
+            if canonical:
+                run["path"] = workflow_path(run["path"])
+            if timestamp(run["updated_at"]).tzinfo is None:
+                raise ApiError("Workflow run timestamp has no timezone")
+        except (KeyError, TypeError, ValueError, AttributeError) as error:
+            raise ApiError("Workflow run metadata is incomplete or malformed") from error
+        return run
+
+    def run(self, run_id, refresh=False):
         run_id = positive_id(run_id)
-        if run_id not in self.runs:
+        if refresh or run_id not in self.runs:
             run = self.rest(f"/repos/{self.repository}/actions/runs/{run_id}")[0]
-            run["path"] = workflow_path(run.get("path"))
-            self.runs[run_id] = run
+            self.runs[run_id] = self.run_metadata(run, expected_id=run_id)
         return self.runs[run_id]
 
     def snapshot(self, number):
         self.runs = {}  # A final reread must see a newly retried workflow attempt.
+        self.refreshed_runs = set()
+        self.listed_run_ids = set()
+        history_fields = " ".join(f"... on {kind}{{createdAt actor{{login __typename}}}}" for kind in (
+            "AddedToMergeQueueEvent", "RemovedFromMergeQueueEvent", "AutoMergeEnabledEvent", "AutoMergeDisabledEvent"))
+        connections = {"timelineItems": (f"itemTypes:[{HISTORY_TYPES}]", "__typename " + history_fields),
+                       "latestReviews": ("", "author{login}state commit{oid}"),
+                       "reviewThreads": ("", "isResolved")}
+        initial = " ".join(self.connection_field(name, *fields) for name, fields in connections.items())
         raw = self.pr_query(number, """id number state isDraft headRefOid baseRefOid baseRefName headRefName
             author{login} headRepository{nameWithOwner} baseRepository{nameWithOwner}
             mergeable reviewDecision isInMergeQueue potentialMergeCommit{oid}
-            labels(first:100){nodes{name}pageInfo{hasNextPage}}""")
+            labels(first:100){nodes{name}pageInfo{hasNextPage}} """ + initial)
+        if not isinstance(raw, dict) or any(not isinstance(raw.get(name), dict) for name in connections):
+            raise ApiError("Initial GraphQL inventory is incomplete")
         pr = {"id": raw["id"], "number": raw["number"], "state": raw["state"], "draft": raw["isDraft"],
               "head": raw["headRefOid"], "base": raw["baseRefOid"], "base_ref": raw["baseRefName"],
               "head_ref": raw["headRefName"], "author": raw["author"]["login"],
@@ -239,11 +302,8 @@ class GitHub:
               "mergeable": raw["mergeable"], "review_decision": raw["reviewDecision"],
               "queued": raw["isInMergeQueue"], "test_merge": (raw["potentialMergeCommit"] or {}).get("oid"),
               "labels": [label["name"] for label in raw["labels"]["nodes"]]}
-        history_fields = " ".join(f"... on {kind}{{createdAt actor{{login __typename}}}}" for kind in (
-            "AddedToMergeQueueEvent", "RemovedFromMergeQueueEvent", "AutoMergeEnabledEvent", "AutoMergeDisabledEvent"))
-        history = self.connection(number, "timelineItems", f"itemTypes:[{HISTORY_TYPES}]", "__typename " + history_fields)
-        reviews = self.connection(number, "latestReviews", "", "author{login}state commit{oid}")
-        threads = self.connection(number, "reviewThreads", "", "isResolved")
+        history, reviews, threads = (self.connection(number, name, *fields, first_page=raw[name])
+                                    for name, fields in connections.items())
         rules = self.collection(f"/repos/{self.repository}/rules/branches/{urllib.parse.quote(pr['base_ref'], safe='')}")
         checks, statuses, workflows = self.verification_records(pr)
         return {"pr": pr, "checks": checks, "statuses": statuses, "rules": rules, "workflows": workflows,
@@ -258,12 +318,29 @@ class GitHub:
 
     def workflow_records(self, sha):
         workflows = []
-        for filename in sorted({item["workflow"] for item in self.policy["required_checks"]}):
-            for run in self.collection(f"/repos/{self.repository}/actions/workflows/{filename}/runs?head_sha={sha}", "workflow_runs"):
-                workflows.append({"workflow": filename, "sha": run["head_sha"],
-                    "repository": run["repository"]["full_name"], "event": run["event"],
-                    "run_id": run["id"], "status": run["status"], "conclusion": run["conclusion"]})
+        expected = {".github/workflows/" + item["workflow"] for item in self.policy["required_checks"]}
+        for raw in self.collection(f"/repos/{self.repository}/actions/runs?head_sha={sha}",
+                                   "workflow_runs", search_limit=1000):
+            run = self.run_metadata(raw, expected_sha=sha, canonical=False)
+            if run["id"] in self.listed_run_ids:
+                raise ApiError("Duplicate workflow run identity makes the search inventory ambiguous")
+            self.listed_run_ids.add(run["id"])
+            if (run["event"] == "dynamic"
+                    and re.fullmatch(r"dynamic/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*", run["path"])):
+                # Only observed dynamic identities are inventory-only. A check
+                # reference still takes strict single-run path validation.
+                continue
+            run["path"] = workflow_path(run["path"])
+            self.runs[run["id"]] = run
+            if run["path"] in expected:
+                workflows.append(self.workflow_record(run))
         return workflows
+
+    @staticmethod
+    def workflow_record(run):
+        return {"workflow": run["path"].split("/")[-1], "sha": run["head_sha"],
+                "repository": run["repository"]["full_name"], "event": run["event"],
+                "run_id": run["id"], "status": run["status"], "conclusion": run["conclusion"]}
 
     def normalize_check(self, check, pr):
         normalized = {"id": check["id"], "name": check["name"], "sha": check["head_sha"],
@@ -273,13 +350,47 @@ class GitHub:
         match = re.fullmatch(r"https://github\.com/" + re.escape(self.repository)
                              + r"/actions/runs/(\d+)(?:/job/\d+)?", check.get("details_url") or "")
         if match:
-            run = self.run(int(match[1]))
+            run_id = int(match[1])
+            cached = run_id in self.runs
+            run = self.run(run_id)
+            if not cached:
+                self.refreshed_runs.add(run_id)
+            if self.check_newer_than_run(check, run):
+                if run_id in self.refreshed_runs:
+                    raise ApiError("Check evidence is newer than its workflow run metadata")
+                self.refreshed_runs.add(run_id)
+                previous, run = run, self.run(run_id, refresh=True)
+                if (any(run[field] != previous[field] for field in ("path", "head_sha", "event", "repository"))
+                        or run["run_attempt"] < previous["run_attempt"]
+                        or timestamp(run["updated_at"]) < timestamp(previous["updated_at"])
+                        or self.check_newer_than_run(check, run)):
+                    raise ApiError("Workflow run refresh did not establish coherent check metadata")
             if run["head_sha"] not in {pr["head"], pr["test_merge"]}:
                 raise ApiError("Check producer run is bound to a different commit")
             normalized.update(run_id=run["id"], attempt=run["run_attempt"],
                 repository=run["repository"]["full_name"], workflow=run["path"].split("/")[-1],
                 event=run["event"])
         return normalized
+
+    @staticmethod
+    def check_newer_than_run(check, run):
+        attempt = check.get("run_attempt")
+        if attempt is not None and (type(attempt) is not int or attempt < 1):
+            raise ApiError("Check attempt evidence is malformed")
+        try:
+            # GitHub can synthesize a skipped check's start after completion.
+            # Terminal completion is its freshness witness; active work uses start.
+            terminal = check["status"] == "completed"
+            value = check.get("completed_at" if terminal else "started_at")
+            if terminal and (not isinstance(value, str) or not value):
+                raise ApiError("Terminal check has no completion timestamp")
+            times = [timestamp(value)] if value is not None else []
+            if any(value.tzinfo is None for value in times):
+                raise ApiError("Check timestamp has no timezone")
+            return ((attempt is not None and attempt > run["run_attempt"])
+                    or any(value > timestamp(run["updated_at"]) for value in times))
+        except (ValueError, TypeError, AttributeError) as error:
+            raise ApiError("Check timestamp evidence is malformed") from error
 
     def verification_records(self, pr):
         checks, statuses, workflows = [], [], []
@@ -289,6 +400,9 @@ class GitHub:
             statuses.extend(self.collection(f"/repos/{self.repository}/commits/{sha}/statuses"))
             records = self.collection(f"/repos/{self.repository}/commits/{sha}/check-runs?filter=all", "check_runs")
             checks.extend(self.normalize_check(check, pr) for check in records)
+        # A check can reveal a retry newer than the list read. Its coherent
+        # single-run refresh must also update the workflow readiness evidence.
+        workflows = [self.workflow_record(self.runs[item["run_id"]]) for item in workflows]
         return checks, statuses, workflows
 
     def intent(self, context):
