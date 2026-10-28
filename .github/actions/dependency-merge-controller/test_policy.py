@@ -47,6 +47,7 @@ def fixtures():
         "checks": [{"name": c["name"], "app_id": 15368, "app_slug": "github-actions",
                     "sha": SHA, "workflow": c["workflow"], "event": "pull_request",
                     "repository": REPO, "run_id": 20, "attempt": 1,
+                    "job_verified": True, "job_current": True,
                     "id": i, "status": "completed", "conclusion": "success"}
                    for i, c in enumerate(POLICY["required_checks"], start=1)],
         "statuses": [],
@@ -86,6 +87,7 @@ class PolicyTest(unittest.TestCase):
     def test_older_success_does_not_hide_newer_pending(self):
         newer = self.snapshot["checks"][0] | {"run_id": 21, "status": "queued"}
         self.snapshot["checks"].append(newer)
+        self.snapshot["workflows"].append(self.snapshot["workflows"][0] | {"run_id": 21, "status": "queued", "conclusion": None})
         self.assertEqual(self.result(), "waiting")
 
     def test_new_workflow_pending_before_any_new_check_exists(self):

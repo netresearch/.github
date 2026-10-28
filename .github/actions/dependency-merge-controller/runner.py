@@ -14,6 +14,7 @@ import zipfile
 
 from policy import BOTS, Blocked, check_intent, decide, digest, initial_intent
 from api_target import ApiError, positive_id, target_url
+from job_binding import bind_check, json_id, run_revision
 
 MAX_BYTES = 4 * 1024 * 1024
 HISTORY_TYPES = "ADDED_TO_MERGE_QUEUE_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT,AUTO_MERGE_ENABLED_EVENT,AUTO_MERGE_DISABLED_EVENT"
@@ -113,6 +114,7 @@ class GitHub:
         self.runs = {}
         self.refreshed_runs = set()
         self.listed_run_ids = set()
+        self.job_inventories = {}
         self.policy = policy or {}
         if not isinstance(observe_only, bool):
             raise ApiError("observe_only must be a boolean")
@@ -179,7 +181,7 @@ class GitHub:
     def rest(self, path):
         return self.request(path)
 
-    def collection(self, path, key=None, maximum_pages=10, search_limit=None):
+    def collection(self, path, key=None, maximum_pages=10, search_limit=None, require_total=False):
         result, total = [], None
         for page in range(1, maximum_pages + 1):
             separator = "&" if "?" in path else "?"
@@ -189,15 +191,27 @@ class GitHub:
             values = data[key] if key else data
             if not isinstance(values, list):
                 raise ApiError("Expected a paginated API list")
-            if search_limit is not None:
+            if require_total and len(values) > 100:
+                raise ApiError("Job inventory page exceeds its requested size")
+            if search_limit is not None or require_total:
                 count = data.get("total_count")
-                if (type(count) is not int or not 0 <= count < search_limit
+                if (type(count) is not int or count < 0 or (search_limit is not None and count >= search_limit)
                         or (total is not None and count != total)):
                     raise ApiError("Workflow search count is unavailable, changing or capped")
                 total = count
             result.extend(values)
             link = next((value for name, value in headers.items() if name.lower() == "link"), "")
-            if search_limit is not None and not values and 'rel="next"' in link:
+            if require_total and 'rel="next"' in link:
+                targets = re.findall(r'<([^>]+)>;\s*rel="next"', link)
+                expected = urllib.parse.urlsplit(self.api_url(f"{path}{separator}per_page=100&page={page + 1}"))
+                actual = urllib.parse.urlsplit(targets[0]) if len(targets) == 1 else None
+                if (actual is None or actual.fragment or actual[:3] != expected[:3]
+                        or urllib.parse.parse_qs(actual.query, keep_blank_values=True, strict_parsing=True)
+                        != urllib.parse.parse_qs(expected.query, keep_blank_values=True, strict_parsing=True)
+                        or len(urllib.parse.parse_qsl(actual.query, keep_blank_values=True, strict_parsing=True))
+                        != len(urllib.parse.parse_qs(actual.query, keep_blank_values=True, strict_parsing=True))):
+                    raise ApiError("Job pagination link leaves its exact advancing inventory")
+            if (search_limit is not None or require_total) and not values and 'rel="next"' in link:
                 raise ApiError("Workflow search returned an empty nonfinal page")
             if 'rel="next"' not in link:
                 if total is not None and len(result) != total:
@@ -267,6 +281,7 @@ class GitHub:
                 raise ApiError("Workflow run path is missing")
             if canonical:
                 run["path"] = workflow_path(run["path"])
+                json_id(run["check_suite_id"])
             if timestamp(run["updated_at"]).tzinfo is None:
                 raise ApiError("Workflow run timestamp has no timezone")
         except (KeyError, TypeError, ValueError, AttributeError) as error:
@@ -284,6 +299,7 @@ class GitHub:
         self.runs = {}  # A final reread must see a newly retried workflow attempt.
         self.refreshed_runs = set()
         self.listed_run_ids = set()
+        self.job_inventories = {}
         history_fields = " ".join(f"... on {kind}{{createdAt actor{{login __typename}}}}" for kind in (
             "AddedToMergeQueueEvent", "RemovedFromMergeQueueEvent", "AutoMergeEnabledEvent", "AutoMergeDisabledEvent"))
         connections = {"timelineItems": (f"itemTypes:[{HISTORY_TYPES}]", "__typename " + history_fields),
@@ -333,6 +349,7 @@ class GitHub:
                 # reference still takes strict single-run path validation.
                 continue
             run["path"] = workflow_path(run["path"])
+            json_id(run.get("check_suite_id"))
             self.runs[run["id"]] = run
             if run["path"] in expected:
                 workflows.append(self.workflow_record(run))
@@ -344,14 +361,15 @@ class GitHub:
                 "repository": run["repository"]["full_name"], "event": run["event"],
                 "run_id": run["id"], "status": run["status"], "conclusion": run["conclusion"]}
 
-    def normalize_check(self, check, pr):
+    def normalize_check(self, check, pr, expected_sha=None):
         normalized = {"id": check["id"], "name": check["name"], "sha": check["head_sha"],
             "status": check["status"], "conclusion": check["conclusion"],
             "app_id": check["app"]["id"], "app_slug": check["app"]["slug"],
-            "run_id": 0, "attempt": 0, "repository": None, "workflow": None, "event": None}
+            "run_id": 0, "attempt": 0, "repository": None, "workflow": None, "event": None,
+            "job_verified": False, "job_current": False, "job_run_revision": None}
         match = re.fullmatch(r"https://github\.com/" + re.escape(self.repository)
-                             + r"/actions/runs/(\d+)(?:/job/\d+)?", check.get("details_url") or "")
-        if match:
+                             + r"/actions/runs/([1-9][0-9]*)(?:/job/([1-9][0-9]*))?", check.get("details_url") or "")
+        if match and (normalized["app_id"], normalized["app_slug"]) == (15368, "github-actions"):
             run_id = int(match[1])
             cached = run_id in self.runs
             run = self.run(run_id)
@@ -362,14 +380,17 @@ class GitHub:
                     raise ApiError("Check evidence is newer than its workflow run metadata")
                 self.refreshed_runs.add(run_id)
                 previous, run = run, self.run(run_id, refresh=True)
-                if (any(run[field] != previous[field] for field in ("path", "head_sha", "event", "repository"))
+                if (any(run[field] != previous[field] for field in ("path", "head_sha", "event", "repository", "check_suite_id"))
                         or run["run_attempt"] < previous["run_attempt"]
                         or timestamp(run["updated_at"]) < timestamp(previous["updated_at"])
                         or self.check_newer_than_run(check, run)):
                     raise ApiError("Workflow run refresh did not establish coherent check metadata")
             if run["head_sha"] not in {pr["head"], pr["test_merge"]}:
                 raise ApiError("Check producer run is bound to a different commit")
-            normalized.update(run_id=run["id"], attempt=run["run_attempt"],
+            job, current = bind_check(self, check, run, expected_sha or check["head_sha"],
+                                      int(match[2]) if match[2] else None)
+            normalized.update(run_id=run["id"], attempt=job["run_attempt"], job_verified=True, job_current=current,
+                job_run_revision=run_revision(run),
                 repository=run["repository"]["full_name"], workflow=run["path"].split("/")[-1],
                 event=run["event"])
         return normalized
@@ -401,7 +422,10 @@ class GitHub:
             workflows.extend(self.workflow_records(sha))
             statuses.extend(self.collection(f"/repos/{self.repository}/commits/{sha}/statuses"))
             records = self.collection(f"/repos/{self.repository}/commits/{sha}/check-runs?filter=all", "check_runs")
-            checks.extend(self.normalize_check(check, pr) for check in records)
+            checks.extend(self.normalize_check(check, pr, sha) for check in records)
+        for check in checks:
+            if check["job_verified"] and check["job_run_revision"] != run_revision(self.runs[check["run_id"]]):
+                raise ApiError("Actions job membership proof changed within the snapshot")
         # Keep every initially observed negative. A coherent newer negative
         # refresh of a green record must also affect workflow readiness.
         workflows = [item if (item["status"], item["conclusion"]) != ("completed", "success")

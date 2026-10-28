@@ -120,6 +120,7 @@ def check_intent(context, snapshot, policy, intent):
 
 
 def require_workflows(context, snapshot, requirements):
+    selected = {}
     pr = snapshot["pr"]
     for requirement in requirements:
         runs = [run for run in snapshot["workflows"]
@@ -130,10 +131,12 @@ def require_workflows(context, snapshot, requirements):
         if not runs:
             raise Waiting(f"Missing expected workflow: {requirement['workflow']}")
         newest = max(runs, key=lambda run: run["run_id"])
+        selected[requirement["workflow"]] = newest
         if newest["status"] != "completed":
             raise Waiting(f"Newest workflow is pending: {requirement['workflow']}")
         if newest["conclusion"] != "success":
             raise Blocked(f"Newest workflow did not succeed: {requirement['workflow']}")
+    return selected
 
 
 def latest_checks(checks):
@@ -145,7 +148,7 @@ def latest_checks(checks):
     return {name: item[1] for name, item in latest.items()}
 
 
-def require_check_producers(context, snapshot, expected, latest):
+def require_check_producers(context, snapshot, expected, latest, workflows):
     pr = snapshot["pr"]
     for name, requirement in expected.items():
         if name not in latest:
@@ -156,6 +159,9 @@ def require_check_producers(context, snapshot, expected, latest):
                 or check.get("workflow") != requirement["workflow"]
                 or check.get("event") not in requirement["events"]
                 or check.get("repository") != context["repository"]
+                or check.get("job_verified") is not True or check.get("job_current") is not True
+                or check.get("run_id") != workflows[requirement["workflow"]]["run_id"]
+                or check.get("sha") != workflows[requirement["workflow"]]["sha"]
                 or check.get("sha") not in {pr["head"], pr.get("test_merge")}):
             raise Blocked(f"Unexpected producer or commit for required check: {name}")
         if check["status"] != "completed":
@@ -167,6 +173,7 @@ def require_check_producers(context, snapshot, expected, latest):
 def require_additional_checks(context, latest, advisory):
     for name, check in latest.items():
         own = (check.get("run_id") == context["run_id"]
+               and check.get("job_verified") is True and check.get("job_current") is True
                and check.get("workflow") == context["caller_path"].split("/")[-1]
                and check.get("app_id") == 15368
                and name.endswith(" / Dependency merge controller"))
@@ -195,9 +202,9 @@ def require_statuses(statuses, advisory):
 
 def evaluate_checks(context, snapshot, policy):
     expected = {check["name"]: check for check in policy["required_checks"]}
-    require_workflows(context, snapshot, expected.values())
+    workflows = require_workflows(context, snapshot, expected.values())
     latest = latest_checks(snapshot["checks"])
-    require_check_producers(context, snapshot, expected, latest)
+    require_check_producers(context, snapshot, expected, latest, workflows)
     advisory = set(policy.get("advisory_checks", []))
     require_additional_checks(context, latest, advisory)
     require_statuses(snapshot["statuses"], advisory)
