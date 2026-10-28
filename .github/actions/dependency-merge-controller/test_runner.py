@@ -178,6 +178,7 @@ class RunnerTest(unittest.TestCase):
                      ".github/workflows/auto-merge-deps.yml@refs/heads/feature#part"):
             client.runs = {}
             client.rest = lambda endpoint: ({"id": 9, "path": path, "run_attempt": 1,
+                "check_suite_id": 10009,
                 "repository": {"full_name": REPO}, "head_sha": SHA, "event": "pull_request",
                 "status": "completed", "conclusion": "success", "updated_at": TIME}, {})
             self.assertEqual(client.run(9)["path"], ".github/workflows/auto-merge-deps.yml")

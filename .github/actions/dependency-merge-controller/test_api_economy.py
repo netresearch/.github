@@ -4,6 +4,7 @@ import copy
 import io
 import json
 import os
+import re
 from pathlib import Path
 import tempfile
 import urllib.parse
@@ -25,9 +26,10 @@ def page(nodes, after=None):
 
 def run_record(number, workflow, **changes):
     return {"id": number, "path": ".github/workflows/" + workflow,
+            "check_suite_id": 10000 + number,
             "head_sha": SHA, "head_branch": "renovate/phpunit", "event": "pull_request",
             "run_attempt": 1, "status": "completed", "conclusion": "success",
-            "repository": {"full_name": REPO}, "head_repository": {"full_name": REPO},
+            "repository": {"id": 1124082336, "full_name": REPO}, "head_repository": {"full_name": REPO},
             "actor": {"login": "renovate[bot]"}, "created_at": TIME,
             "updated_at": TIME, **changes}
 
@@ -73,6 +75,7 @@ class Server:
     @staticmethod
     def check(number, name, **changes):
         return {"id": number, "name": name, "head_sha": SHA, "status": "completed",
+                "check_suite": {"id": 10000 + number},
                 "conclusion": "success", "app": {"id": 15368, "slug": "github-actions"},
                 "details_url": f"https://github.com/{REPO}/actions/runs/{number}/job/{number}",
                 "started_at": TIME, "completed_at": TIME, **changes}
@@ -104,6 +107,20 @@ class Server:
             if resource.startswith("actions/workflows/"):
                 values = [r for r in values if r["path"].split("/")[-1] == resource.split("/")[2]]
             return Response({"total_count": len(values), "workflow_runs": values})
+        if resource.startswith("actions/runs/") and resource.endswith("/jobs"):
+            number = int(resource.split("/")[2])
+            run = self.run_responses.get(number, self.runs[number])
+            values = []
+            for check in self.checks:
+                match = re.fullmatch(r"https://github.com/" + re.escape(REPO)
+                    + r"/actions/runs/([1-9][0-9]*)(?:/job/([1-9][0-9]*))?", check.get("details_url", ""))
+                if match and int(match[1]) == number:
+                    values.append({"id": int(match[2]) if match[2] else check["id"], "run_id": number,
+                        "run_attempt": run["run_attempt"], "head_sha": run["head_sha"], "name": check["name"],
+                        "status": check["status"], "conclusion": check["conclusion"],
+                        "run_url": f"https://api.github.com/repos/{REPO}/actions/runs/{number}",
+                        "check_run_url": f"https://api.github.com/repos/{REPO}/check-runs/{check['id']}"})
+            return Response({"total_count": len(values), "jobs": values})
         if resource.startswith("actions/runs/"):
             number = int(resource.split("/")[-1])
             return Response(self.run_responses.get(number, self.runs[number]))
@@ -121,7 +138,7 @@ class Server:
 
 
 class EconomyTest(unittest.TestCase):
-    def test_complete_ready_snapshot_uses_eight_real_adapter_requests(self):
+    def test_complete_ready_snapshot_uses_eighteen_real_adapter_requests(self):
         server = Server()
         api = server.client()
         with server.transport():
@@ -131,7 +148,7 @@ class EconomyTest(unittest.TestCase):
         self.assertEqual(decide(context, snapshot, server.policy, intent)[0], "ready")
         self.assertEqual(len(snapshot["checks"]), 10)
         self.assertEqual(len(snapshot["workflows"]), 8)
-        self.assertEqual(api.api_calls, 8)
+        self.assertEqual(api.api_calls, 18)
         self.assertEqual(api.mutation_attempts, 0)
 
     def test_receipt_accounts_for_actual_snapshot_requests(self):
@@ -145,7 +162,7 @@ class EconomyTest(unittest.TestCase):
                 mock.patch("runner.output"):
             write_receipt(api, context, server.policy, "evaluate", None, "blocked", "no native intent")
             receipt = json.loads((Path(directory) / "dependency-controller-receipt.json").read_text())
-        self.assertEqual(receipt["api_calls"], 8)
+        self.assertEqual(receipt["api_calls"], 18)
         self.assertEqual(receipt["mutation_attempts"], 0)
 
     def test_missing_unlisted_producer_uses_one_single_run_fallback(self):
@@ -155,7 +172,7 @@ class EconomyTest(unittest.TestCase):
         with server.transport():
             snapshot = api.snapshot(42)
         self.assertEqual(next(c for c in snapshot["checks"] if c["id"] == 91)["workflow"], "labeler.yml")
-        self.assertEqual(api.api_calls, 9)
+        self.assertEqual(api.api_calls, 19)
 
     def test_new_required_fallback_run_participates_in_workflow_readiness(self):
         for status, conclusion, outcome in (("in_progress", None, "waiting"),
@@ -166,6 +183,7 @@ class EconomyTest(unittest.TestCase):
             # check is visible and green before the workflow itself is ready.
             server.runs[200] = run_record(200, "ci.yml", status=status, conclusion=conclusion)
             server.checks[0]["details_url"] = f"https://github.com/{REPO}/actions/runs/200/job/200"
+            server.checks[0]["check_suite"]["id"] = 10200
             api = server.client()
             context, initial = fixtures()
             intent = initial_intent(context, initial, server.policy)
@@ -173,7 +191,7 @@ class EconomyTest(unittest.TestCase):
                 snapshot = api.snapshot(42)
             self.assertEqual(decide(context, snapshot, server.policy, intent)[0], outcome)
             self.assertEqual({r["run_id"] for r in snapshot["workflows"]}, set(range(20, 28)) | {200})
-            self.assertEqual(api.api_calls, 9)
+            self.assertEqual(api.api_calls, 19)
 
     def test_initial_negative_cannot_be_replaced_by_a_green_cache_refresh(self):
         for status, conclusion, outcome in (("in_progress", None, "waiting"),
@@ -189,13 +207,14 @@ class EconomyTest(unittest.TestCase):
             with self.subTest(status=status), server.transport():
                 snapshot = api.snapshot(42)
             self.assertEqual(decide(context, snapshot, server.policy, intent)[0], outcome)
-            self.assertEqual(api.api_calls, 9)
+            self.assertEqual(api.api_calls, 19)
 
     def test_older_green_fallback_cannot_mask_newer_initial_negative(self):
         server = Server()
         server.runs[20].update(status="in_progress", conclusion=None)
         server.runs[10] = run_record(10, "ci.yml")
         server.checks[0]["details_url"] = f"https://github.com/{REPO}/actions/runs/10/job/10"
+        server.checks[0]["check_suite"]["id"] = 10010
         context, initial = fixtures()
         intent = initial_intent(context, initial, server.policy)
         with server.transport():
@@ -206,6 +225,7 @@ class EconomyTest(unittest.TestCase):
         server = Server()
         server.runs[200] = run_record(200, "unrequired.yml", status="in_progress", conclusion=None)
         server.checks[-1]["details_url"] = f"https://github.com/{REPO}/actions/runs/200/job/200"
+        server.checks[-1]["check_suite"]["id"] = 10200
         context, initial = fixtures()
         intent = initial_intent(context, initial, server.policy)
         with server.transport():
@@ -224,6 +244,7 @@ class EconomyTest(unittest.TestCase):
             if reads:
                 server.runs[200] = run_record(200, "ci.yml", status="in_progress", conclusion=None)
                 server.checks[0]["details_url"] = f"https://github.com/{REPO}/actions/runs/200/job/200"
+                server.checks[0]["check_suite"]["id"] = 10200
             reads.append(number)
             return original(number)
 
@@ -232,7 +253,7 @@ class EconomyTest(unittest.TestCase):
             result = evaluate_and_enqueue(api, context, server.policy, intent)
         self.assertEqual(result[0], "waiting")
         self.assertEqual(reads, [42, 42])
-        self.assertEqual(api.api_calls, 17)
+        self.assertEqual(api.api_calls, 37)
         self.assertEqual(api.mutation_attempts, 0)
 
     def test_conflicting_duplicate_run_metadata_blocks(self):
@@ -253,7 +274,7 @@ class EconomyTest(unittest.TestCase):
         intent = initial_intent(context, initial, server.policy)
         self.assertEqual(decide(context, snapshot, server.policy, intent)[0], "ready")
         self.assertNotIn(40634492828, api.runs)
-        self.assertEqual(api.api_calls, 8)
+        self.assertEqual(api.api_calls, 18)
 
     def test_referenced_dynamic_producer_keeps_strict_single_run_validation(self):
         server = Server()
@@ -321,7 +342,7 @@ class EconomyTest(unittest.TestCase):
                 if second == "complete":
                     api = server.client()
                     self.assertEqual(len(api.snapshot(42)["workflows"]), 8)
-                    self.assertEqual(api.api_calls, 9)
+                    self.assertEqual(api.api_calls, 19)
                 else:
                     with self.assertRaises(ApiError):
                         server.client().snapshot(42)
@@ -357,7 +378,7 @@ class EconomyTest(unittest.TestCase):
             result = api.snapshot(42)
         self.assertEqual(len(result["reviews"]), 2)
         self.assertEqual(result["history"], [])
-        self.assertEqual(api.api_calls, 11)
+        self.assertEqual(api.api_calls, 21)
 
     def test_missing_seed_connection_and_repeated_cursor_block(self):
         for broken in ("missing", "repeat"):
@@ -394,7 +415,7 @@ class EconomyTest(unittest.TestCase):
             context, initial = fixtures()
             intent = initial_intent(context, initial, server.policy)
             self.assertEqual(decide(context, snapshot, server.policy, intent)[0], "blocked")
-            self.assertEqual(api.api_calls, 5)
+            self.assertEqual(api.api_calls, 15)
 
     def test_ten_page_cap_includes_combined_seed(self):
         for last in (10, 11):
@@ -407,7 +428,7 @@ class EconomyTest(unittest.TestCase):
             with self.subTest(last=last), server.transport():
                 if last == 10:
                     self.assertEqual(api.snapshot(42)["threads"], [])
-                    self.assertEqual(api.api_calls, 17)
+                    self.assertEqual(api.api_calls, 27)
                 else:
                     with self.assertRaises(ApiError):
                         api.snapshot(42)
@@ -420,7 +441,7 @@ class EconomyTest(unittest.TestCase):
         with server.transport():
             snapshot = api.snapshot(42)
         self.assertEqual(snapshot["checks"][0]["attempt"], 2)
-        self.assertEqual(api.api_calls, 9)
+        self.assertEqual(api.api_calls, 19)
 
     def test_newer_check_with_incoherent_single_run_blocks(self):
         server = Server()
@@ -437,7 +458,7 @@ class EconomyTest(unittest.TestCase):
         with server.transport():
             snapshot = api.snapshot(42)
         self.assertEqual(snapshot["checks"][-1]["conclusion"], "skipped")
-        self.assertEqual(api.api_calls, 8)
+        self.assertEqual(api.api_calls, 18)
 
     def test_missing_malformed_terminal_time_or_newer_attempt_blocks(self):
         for changes in ({"completed_at": None}, {"completed_at": ""},
@@ -512,7 +533,7 @@ class EconomyTest(unittest.TestCase):
             result = evaluate_and_enqueue(api, context, server.policy, intent)
         self.assertEqual(result[0], "waiting")
         self.assertEqual(reads, [42, 42])
-        self.assertEqual(api.api_calls, 16)
+        self.assertEqual(api.api_calls, 36)
         self.assertEqual(api.mutation_attempts, 0)
 
     def test_only_sha_bound_repository_run_listing_is_allowed(self):

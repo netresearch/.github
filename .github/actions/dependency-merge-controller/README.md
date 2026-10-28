@@ -99,13 +99,39 @@ review and thread pages share one GraphQL query, with independent continuation
 cursors and a ten-page limit for each connection, including its first page.
 Both full fresh ready snapshots remain mandatory before enqueue.
 
+Actions check provenance also requires positive server suite IDs and exact
+check/run/collection SHA equality. A check's name and details link cannot prove
+its producer: its exact ID must appear in the run's server-owned jobs through
+`check_run_url`, with matching name, run, head and status. A job suffix, if
+present in the details link, must identify that actual job. Required gates must
+belong to the newest expected workflow run and its current server `latest`
+jobs. The controller's own-job exception requires the same verified current
+membership. Foreign-App checks retain their generic additional-check semantics.
+
+Each snapshot caches `latest` jobs once per referenced Actions run. A historical
+check absent there uses one cached `all` inventory; old and new checks remain
+available, but historical success cannot fill a missing current gate. Failed-job
+retries can clone successful jobs with new IDs and old execution timestamps.
+Current server membership is authoritative; raw check attempt numbers or
+execution after retry start are not required. Complete stable counts, unique
+job/check identities and exact advancing pagination are mandatory. The jobs
+endpoint has no workflow-search 1,000-result restriction; the ten-page/response
+safety bounds still fail closed rather than accepting incomplete inventory.
+Each normalized membership proof records its source run revision. If a later
+check refreshes that run within the same snapshot, earlier proofs must still
+match the final run cache or the snapshot blocks without additional reads.
+The proof revision is distinct from a carried job's older originating attempt.
+
 Repository-wide workflow search has a shared 1,000-result ceiling for each SHA,
 rather than a separate ceiling for each required workflow. A count at that
 ceiling, missing/changing count, incomplete pagination or duplicate run identity
 blocks instead of treating a truncated list as complete. This can block a SHA
 with many workflow runs earlier than the per-workflow lookup did. The one-page
-fixture with two SHAs and ten producer runs uses eight adapter requests per
-snapshot instead of 35; fallback reads and extra pages add their real requests.
+fixture with two SHAs and ten producer runs uses eight base adapter requests
+plus ten current job inventories: 18 per snapshot. When all ten have historical
+checks, ten cached `all` reads bring it to 28. Fallback run reads and extra pages
+add their real requests. A retained 24-check native failed-job retry binds all
+records through two cached job reads, preserving its 11 cloned successes.
 This is an API-demand measurement, not a hosted elapsed-time improvement.
 Unreferenced sane `dynamic/` paths with event `dynamic` remain part of the
 bounded inventory but cannot enter the trusted workflow cache. Unknown or

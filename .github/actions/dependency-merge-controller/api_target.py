@@ -25,6 +25,7 @@ def git_ref(value):
 ROUTES = (
     ("GET", r"actions/runs/[1-9][0-9]*", "single"),
     ("GET", r"actions/runs", "runs"),
+    ("GET", r"actions/runs/[1-9][0-9]*/jobs", "jobs"),
     ("GET", r"actions/artifacts", "artifacts"),
     ("GET", r"actions/artifacts/[1-9][0-9]*/zip", "single"),
     ("GET", r"commits/[0-9a-f]{40}/statuses", "list"),
@@ -37,6 +38,7 @@ QUERY_FIELDS = {
     "single": {}, "list": {}, "branch": {},
     "runs": {"head_sha": r"[0-9a-f]{40}"},
     "checks": {"filter": "all"},
+    "jobs": {"filter": "latest|all"},
     "artifacts": {"name": r"merge-intent-pr-[1-9][0-9]*-[0-9a-f]{40}"},
     "pulls": {"state": "open", "head": r"[^\x00-\x20\x7f]+"},
 }
