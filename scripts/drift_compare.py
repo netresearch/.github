@@ -139,7 +139,7 @@ def semantic_fingerprint(document: object) -> str | None:
         data = json.dumps(document, sort_keys=True, separators=(",", ":"),
                           ensure_ascii=False, allow_nan=False) + "\n"
         return hashlib.sha256(data.encode("utf-8")).hexdigest()
-    except (TypeError, ValueError, UnicodeError):
+    except (TypeError, ValueError):
         return None
 
 
