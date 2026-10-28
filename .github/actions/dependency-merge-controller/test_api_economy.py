@@ -29,7 +29,7 @@ def run_record(number, workflow, **changes):
             "check_suite_id": 10000 + number,
             "head_sha": SHA, "head_branch": "renovate/phpunit", "event": "pull_request",
             "run_attempt": 1, "status": "completed", "conclusion": "success",
-            "repository": {"full_name": REPO}, "head_repository": {"full_name": REPO},
+            "repository": {"id": 1124082336, "full_name": REPO}, "head_repository": {"full_name": REPO},
             "actor": {"login": "renovate[bot]"}, "created_at": TIME,
             "updated_at": TIME, **changes}
 

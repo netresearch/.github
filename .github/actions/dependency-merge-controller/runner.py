@@ -181,7 +181,9 @@ class GitHub:
     def rest(self, path):
         return self.request(path)
 
-    def collection(self, path, key=None, maximum_pages=10, search_limit=None, require_total=False):
+    def collection(self, path, key=None, maximum_pages=10, search_limit=None, require_total=False, repository_id=None):
+        if require_total:
+            repository_id = json_id(repository_id)
         result, total = [], None
         for page in range(1, maximum_pages + 1):
             separator = "&" if "?" in path else "?"
@@ -205,7 +207,9 @@ class GitHub:
                 targets = re.findall(r'<([^>]+)>;\s*rel="next"', link)
                 expected = urllib.parse.urlsplit(self.api_url(f"{path}{separator}per_page=100&page={page + 1}"))
                 actual = urllib.parse.urlsplit(targets[0]) if len(targets) == 1 else None
-                if (actual is None or actual.fragment or actual[:3] != expected[:3]
+                alias_path = expected.path.replace(f"/repos/{self.repository}/", f"/repositories/{repository_id}/", 1)
+                if (actual is None or actual.fragment or actual.scheme != expected.scheme or actual.scheme != "https"
+                        or actual.netloc != expected.netloc or actual.path not in {expected.path, alias_path}
                         or urllib.parse.parse_qs(actual.query, keep_blank_values=True, strict_parsing=True)
                         != urllib.parse.parse_qs(expected.query, keep_blank_values=True, strict_parsing=True)
                         or len(urllib.parse.parse_qsl(actual.query, keep_blank_values=True, strict_parsing=True))

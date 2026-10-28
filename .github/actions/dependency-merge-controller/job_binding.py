@@ -15,11 +15,12 @@ def run_revision(run):
 
 
 def inventory(api, run, view):
+    repository_id = json_id(run["repository"].get("id"))
     key = run_revision(run) + (view,)
     if key in api.job_inventories:
         return api.job_inventories[key]
     rows = api.collection(f"/repos/{api.repository}/actions/runs/{run['id']}/jobs?filter={view}",
-                          "jobs", require_total=True)
+                          "jobs", require_total=True, repository_id=repository_id)
     result, ids = {}, set()
     prefix = re.escape(api.base + "/repos/" + api.repository)
     for row in rows:

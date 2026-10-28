@@ -131,7 +131,7 @@ def require_workflows(context, snapshot, requirements):
         if not runs:
             raise Waiting(f"Missing expected workflow: {requirement['workflow']}")
         newest = max(runs, key=lambda run: run["run_id"])
-        selected[requirement["workflow"]] = newest
+        selected[requirement["name"]] = newest
         if newest["status"] != "completed":
             raise Waiting(f"Newest workflow is pending: {requirement['workflow']}")
         if newest["conclusion"] != "success":
@@ -160,8 +160,8 @@ def require_check_producers(context, snapshot, expected, latest, workflows):
                 or check.get("event") not in requirement["events"]
                 or check.get("repository") != context["repository"]
                 or check.get("job_verified") is not True or check.get("job_current") is not True
-                or check.get("run_id") != workflows[requirement["workflow"]]["run_id"]
-                or check.get("sha") != workflows[requirement["workflow"]]["sha"]
+                or check.get("run_id") != workflows[name]["run_id"]
+                or check.get("sha") != workflows[name]["sha"]
                 or check.get("sha") not in {pr["head"], pr.get("test_merge")}):
             raise Blocked(f"Unexpected producer or commit for required check: {name}")
         if check["status"] != "completed":
