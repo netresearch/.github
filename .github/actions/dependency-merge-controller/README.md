@@ -114,6 +114,31 @@ repository and successful target event. Keep main, merge-group and ordinary
 feature completions out of scope. A completion before origin completion blocks;
 the later successful producer completion supplies the progress event.
 
+An opt-in evaluator may additionally subscribe to `pull_request_target` types
+`unlabeled`, `ready_for_review`, `edited` and `auto_merge_enabled`. Mirror the
+shared reusable's metadata job filter in the caller before allocation: require
+a same-repository Renovate/Dependabot dependency branch, removal of exactly
+`deps-no-automerge`/`deps-major`, ready draft state, an actual changed
+`changes.base.ref.from`, or human User auto-merge activation respectively.
+Ordinary labels/title/body edits and other PRs must not allocate a controller.
+These events execute only `evaluate` in its separate caller and share its full
+head concurrency group. They never prepare intent or post an approval. A PR
+that had no eligible bot intent before a label/draft change still needs valid
+intent or the existing independently verified human recovery history.
+
+Resolving the last thread or completing an external/unlisted check does not
+have a guaranteed supported evaluator wakeup. For bounded manual recovery,
+re-run all jobs on the latest actual evaluator run for that same current head.
+It re-reads the full policy and preserves intent/provenance/removal checks; an
+old-head run cannot be repointed. Observer receipt artifact names include run
+ID and attempt. A rerun does not create a trusted bot origin if none exists.
+Do not describe this as complete automatic liveness or add an unsupported
+Actions review-thread trigger. Native auto-merge can enqueue before the
+evaluator runs and enforces the server's configured rules, which may be weaker
+than the controller inventory and approval minimum. Human activation is not a
+substitute for full controller readiness. `GITHUB_TOKEN` metadata activity also
+does not guarantee a follow-on workflow run.
+
 Set `observe-only: true` for a native pilot. It creates owned intent/receipt
 artifacts but never approves a PR or enqueues, and never mints an App token.
 The adapter separately rejects all REST writes and GraphQL mutations even when

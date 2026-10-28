@@ -37,14 +37,29 @@ jobs:
   controller:
     name: Dependency merge controller
     if: >- # zizmor: ignore[bot-conditions] -- actor narrows author; action re-reads author, source and current head
-      (github.event_name == 'pull_request_target' &&
+      (inputs.phase == 'prepare' && github.event_name == 'pull_request_target' &&
+       (github.event.action == 'opened' || github.event.action == 'synchronize' || github.event.action == 'reopened') &&
        (github.event.pull_request.user.login == 'dependabot[bot]' || github.event.pull_request.user.login == 'renovate[bot]') &&
        (github.actor == 'dependabot[bot]' || github.actor == 'renovate[bot]')) ||
-      (github.event_name == 'pull_request_review' &&
+      (inputs.phase == 'evaluate' && github.event_name == 'pull_request_target' &&
+       github.event.repository.full_name == github.repository &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.base.repo.full_name == github.repository &&
+       (github.event.pull_request.user.login == 'dependabot[bot]' || github.event.pull_request.user.login == 'renovate[bot]') &&
+       (startsWith(github.event.pull_request.head.ref, 'renovate/') ||
+        startsWith(github.event.pull_request.head.ref, 'dependabot/')) &&
+       ((github.event.action == 'unlabeled' &&
+         (github.event.label.name == 'deps-no-automerge' || github.event.label.name == 'deps-major')) ||
+        (github.event.action == 'ready_for_review' && github.event.pull_request.draft == false) ||
+        (github.event.action == 'edited' && github.event.changes.base.ref['from'] != '' &&
+         github.event.changes.base.ref['from'] != github.event.pull_request.base.ref) ||
+        (github.event.action == 'auto_merge_enabled' && github.event.sender.type == 'User' &&
+         github.event.sender.login != ''))) ||
+      (inputs.phase == 'evaluate' && github.event_name == 'pull_request_review' &&
        (github.event.pull_request.user.login == 'dependabot[bot]' || github.event.pull_request.user.login == 'renovate[bot]') &&
        (startsWith(github.event.pull_request.head.ref, 'renovate/') ||
         startsWith(github.event.pull_request.head.ref, 'dependabot/'))) ||
-      (github.event_name == 'workflow_run' &&
+      (inputs.phase == 'evaluate' && github.event_name == 'workflow_run' &&
        (startsWith(github.event.workflow_run.head_branch, 'renovate/') ||
         startsWith(github.event.workflow_run.head_branch, 'dependabot/')))
     runs-on: ubuntu-latest
@@ -73,12 +88,20 @@ jobs:
         env:
           PHASE: ${{ inputs.phase }}
           EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
           CALLER: ${{ inputs.caller-workflow }}
           INTENT: ${{ inputs.intent-workflow }}
         run: |
           case "$PHASE:$EVENT" in
-            prepare:pull_request_target) test "$CALLER" = "$INTENT" ;;
+            prepare:pull_request_target)
+              test "$CALLER" = "$INTENT"
+              case "$ACTION" in opened|synchronize|reopened) ;; *) exit 1 ;; esac
+              ;;
             evaluate:workflow_run|evaluate:pull_request_review) test "$CALLER" != "$INTENT" ;;
+            evaluate:pull_request_target)
+              test "$CALLER" != "$INTENT"
+              case "$ACTION" in unlabeled|ready_for_review|edited|auto_merge_enabled) ;; *) exit 1 ;; esac
+              ;;
             *) echo 'Unsupported phase/event combination' >&2; exit 1 ;;
           esac
 
