@@ -17,6 +17,8 @@ from api_target import ApiError, positive_id, target_url
 
 MAX_BYTES = 4 * 1024 * 1024
 HISTORY_TYPES = "ADDED_TO_MERGE_QUEUE_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT,AUTO_MERGE_ENABLED_EVENT,AUTO_MERGE_DISABLED_EVENT"
+INITIAL_TARGET_ACTIONS = {"opened", "synchronize", "reopened"}
+METADATA_ACTIONS = {"unlabeled", "ready_for_review", "edited", "auto_merge_enabled"}
 
 
 def workflow_path(value):
@@ -400,9 +402,20 @@ class GitHub:
             statuses.extend(self.collection(f"/repos/{self.repository}/commits/{sha}/statuses"))
             records = self.collection(f"/repos/{self.repository}/commits/{sha}/check-runs?filter=all", "check_runs")
             checks.extend(self.normalize_check(check, pr) for check in records)
-        # A check can reveal a retry newer than the list read. Its coherent
-        # single-run refresh must also update the workflow readiness evidence.
-        workflows = [self.workflow_record(self.runs[item["run_id"]]) for item in workflows]
+        # Keep every initially observed negative. A coherent newer negative
+        # refresh of a green record must also affect workflow readiness.
+        workflows = [item if (item["status"], item["conclusion"]) != ("completed", "success")
+                     else self.workflow_record(self.runs[item["run_id"]]) for item in workflows]
+        initial_ids = {item["run_id"] for item in workflows}
+        required = {(".github/workflows/" + item["workflow"], event)
+                    for item in self.policy["required_checks"] for event in item["events"]}
+        # A run can appear after the complete list read but before its checks.
+        # Strict single-run fallback metadata is already known in this snapshot;
+        # do not lose a newly discovered pending/failed required producer.
+        workflows.extend(self.workflow_record(run) for run_id, run in self.runs.items()
+                         if run_id not in initial_ids and (run["path"], run["event"]) in required
+                         and run["repository"]["full_name"] == self.repository
+                         and run["head_sha"] in {pr["head"], pr["test_merge"]})
         return checks, statuses, workflows
 
     def intent(self, context):
@@ -453,6 +466,33 @@ def configured_workflow_paths():
     return paths
 
 
+def metadata_wakeup(event, repository):
+    """A selected metadata hint can request evaluation, never create intent."""
+    try:
+        pr, action = event["pull_request"], event["action"]
+        if (event["repository"]["full_name"] != repository
+                or pr["head"]["repo"]["full_name"] != repository
+                or pr["base"]["repo"]["full_name"] != repository
+                or pr["user"]["login"] not in BOTS
+                or not pr["head"]["ref"].startswith(("renovate/", "dependabot/"))
+                or not re.fullmatch(r"[0-9a-f]{40}", pr["head"]["sha"])
+                or type(pr["number"]) is not int or pr["number"] < 1):
+            return False
+        if action == "unlabeled":
+            return event["label"]["name"] in {"deps-no-automerge", "deps-major"}
+        if action == "ready_for_review":
+            return pr["draft"] is False
+        if action == "edited":
+            previous = event["changes"]["base"]["ref"]["from"]
+            return isinstance(previous, str) and bool(previous) and previous != pr["base"]["ref"]
+        if action == "auto_merge_enabled":
+            sender = event["sender"]
+            return sender["type"] == "User" and isinstance(sender["login"], str) and bool(sender["login"])
+    except (KeyError, TypeError, AttributeError):
+        return False
+    return False
+
+
 def context_from_event(api, event, policy):
     event_name = os.environ["GITHUB_EVENT_NAME"]
     context = {"repository": api.repository, "event": event_name,
@@ -466,6 +506,10 @@ def context_from_event(api, event, policy):
     if event_name in {"pull_request_target", "pull_request_review"}:
         if event_name == "pull_request_review" and event.get("action") not in {"submitted", "dismissed"}:
             raise Blocked("Unsupported review event")
+        if event_name == "pull_request_target" and event.get("action") not in INITIAL_TARGET_ACTIONS:
+            if not metadata_wakeup(event, api.repository):
+                raise Blocked("Target activity is outside the selected dependency metadata scope")
+            context["metadata_wakeup"] = True
         context.update(number=event["pull_request"]["number"], event_head=event["pull_request"]["head"]["sha"])
     elif event_name == "workflow_run":
         run = api.run(event["workflow_run"]["id"])
@@ -495,10 +539,15 @@ def output(**values):
 
 def phase_context(context, phase):
     producer = context["caller_path"] == context["intent_path"]
-    if phase == "prepare" and (context["event"] != "pull_request_target" or not producer):
+    if phase == "prepare" and (context["event"] != "pull_request_target" or not producer
+                               or context.get("action") not in INITIAL_TARGET_ACTIONS):
         raise Blocked("Prepare requires the separate trusted PR-target intent caller")
-    if phase == "evaluate" and (context["event"] == "pull_request_target" or producer):
-        raise Blocked("Evaluate requires a different completion/review caller run")
+    selected_target = (context["event"] == "pull_request_target"
+                       and context.get("metadata_wakeup") is True
+                       and context.get("action") in METADATA_ACTIONS)
+    if phase == "evaluate" and (producer or (context["event"] not in {"workflow_run", "pull_request_review"}
+                                            and not selected_target)):
+        raise Blocked("Evaluate requires a separate completion, review or selected metadata caller")
 
 
 def prepare_intent(api, context, policy):
