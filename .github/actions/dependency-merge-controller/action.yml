@@ -1,0 +1,84 @@
+name: Dependency merge controller
+description: Evaluate trusted dependency PR intent and enqueue once without waiting.
+inputs:
+  phase:
+    description: Exactly prepare or evaluate; one phase per caller workflow.
+    required: true
+  observe-only:
+    description: Exactly true or false; observation forbids PR and queue mutations.
+    default: 'false'
+  policy:
+    description: Versioned canonical required-check policy JSON from the trusted caller.
+    required: true
+  caller-workflow:
+    description: Repository-relative path of this executing caller.
+    required: true
+  intent-workflow:
+    description: Separate trusted intent producer path, isolated between observer and production.
+    required: true
+  token:
+    description: Token for actions/checks/content reads and initial eligibility approval.
+    required: true
+  write-token:
+    description: Repository-scoped token for the final queue mutation.
+    required: true
+outputs:
+  state:
+    description: prepared, waiting, blocked, observed-ready, observed-existing, or confirmed queued.
+    value: ${{ steps.phase.outputs.state }}
+runs:
+  using: composite
+  steps:
+    - name: Validate the public phase and observation inputs
+      shell: bash
+      env:
+        PHASE: ${{ inputs.phase }}
+        OBSERVE: ${{ inputs.observe-only }}
+      run: |
+        case "$PHASE" in prepare|evaluate) ;; *) echo 'Invalid phase' >&2; exit 1 ;; esac
+        case "$OBSERVE" in true|false) ;; *) echo 'Invalid observe-only value' >&2; exit 1 ;; esac
+
+    - name: Read Dependabot metadata at the trusted initial entry
+      id: metadata
+      if: >-
+        inputs.phase == 'prepare' &&
+        github.event_name == 'pull_request_target' &&
+        github.event.pull_request.user.login == 'dependabot[bot]' &&
+        github.actor == 'dependabot[bot]'
+      uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+      with:
+        github-token: ${{ inputs.token }}
+
+    - name: Run exactly the selected controller phase
+      id: phase
+      shell: bash
+      env:
+        ACTION_ROOT: ${{ github.action_path }}
+        CONTROLLER_POLICY: ${{ inputs.policy }}
+        CALLER_WORKFLOW: ${{ inputs.caller-workflow }}
+        INTENT_WORKFLOW: ${{ inputs.intent-workflow }}
+        OBSERVE_ONLY: ${{ inputs.observe-only }}
+        PHASE: ${{ inputs.phase }}
+        READ_TOKEN: ${{ inputs.token }}
+        WRITE_TOKEN: ${{ inputs.write-token }}
+        UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+        ECOSYSTEM: ${{ steps.metadata.outputs.package-ecosystem }}
+      run: python3 "$ACTION_ROOT/runner.py" "$PHASE"
+
+    - name: Persist current-head intent before any queue decision
+      if: inputs.phase == 'prepare' && steps.phase.outputs.state == 'prepared' && steps.phase.outputs.intent_name != ''
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ${{ steps.phase.outputs.intent_name }}
+        path: ${{ steps.phase.outputs.intent_path }}
+        retention-days: 7
+        if-no-files-found: error
+
+    - name: Retain the observer receipt without modifying a PR
+      if: inputs.observe-only == 'true' && steps.phase.outputs.receipt_path != ''
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: dependency-controller-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ steps.phase.outputs.receipt_path }}
+        retention-days: 7
+        if-no-files-found: error

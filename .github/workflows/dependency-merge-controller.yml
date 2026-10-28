@@ -1,0 +1,104 @@
+name: Dependency merge controller (opt-in)
+
+on:
+  workflow_call:
+    inputs:
+      phase:
+        description: Exactly prepare or evaluate; use separate caller workflows.
+        type: string
+        required: true
+      observe-only:
+        description: Produce owned pilot evidence without PR or queue mutations.
+        type: boolean
+        default: false
+      policy:
+        description: Version-1 canonical required-check JSON from the trusted caller.
+        type: string
+        required: true
+      caller-workflow:
+        description: Exact path of this executing caller workflow.
+        type: string
+        required: true
+      intent-workflow:
+        description: Exact path of the separate trusted intent producer.
+        type: string
+        required: true
+    secrets:
+      merge-app-id:
+        required: false
+      merge-app-private-key:
+        required: false
+
+# This new opt-in contract intentionally does not alter auto-merge-deps.yml.
+# Callers grant this full set explicitly. No PR code is ever checked out.
+permissions: {}
+
+jobs:
+  controller:
+    name: Dependency merge controller
+    if: >- # zizmor: ignore[bot-conditions] -- actor narrows author; action re-reads author, source and current head
+      (github.event_name == 'pull_request_target' &&
+       (github.event.pull_request.user.login == 'dependabot[bot]' || github.event.pull_request.user.login == 'renovate[bot]') &&
+       (github.actor == 'dependabot[bot]' || github.actor == 'renovate[bot]')) ||
+      (github.event_name == 'pull_request_review' &&
+       (github.event.pull_request.user.login == 'dependabot[bot]' || github.event.pull_request.user.login == 'renovate[bot]') &&
+       (startsWith(github.event.pull_request.head.ref, 'renovate/') ||
+        startsWith(github.event.pull_request.head.ref, 'dependabot/'))) ||
+      (github.event_name == 'workflow_run' &&
+       (startsWith(github.event.workflow_run.head_branch, 'renovate/') ||
+        startsWith(github.event.workflow_run.head_branch, 'dependabot/')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+      checks: read
+      statuses: read
+    concurrency:
+      # Initial writers cannot be displaced by completion evaluations. All
+      # evaluator sources for one head share its mutation group. Late events
+      # for an old head cannot displace the current head's pending evaluation.
+      group: ${{ inputs.phase == 'prepare' && format('dependency-intent-{0}-{1}-{2}-{3}', github.repository, github.event.pull_request.number, github.event.pull_request.head.sha, inputs.observe-only) || format('dependency-evaluate-{0}-{1}-{2}-{3}', github.repository, github.event.pull_request.head.ref || github.event.workflow_run.head_branch, github.event.pull_request.head.sha || github.event.workflow_run.head_sha, inputs.observe-only) }}
+      cancel-in-progress: false
+    env:
+      MERGE_APP_CONFIGURED: ${{ secrets.merge-app-id != '' && secrets.merge-app-private-key != '' }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Validate phase and separate caller identities before minting
+        env:
+          PHASE: ${{ inputs.phase }}
+          EVENT: ${{ github.event_name }}
+          CALLER: ${{ inputs.caller-workflow }}
+          INTENT: ${{ inputs.intent-workflow }}
+        run: |
+          case "$PHASE:$EVENT" in
+            prepare:pull_request_target) test "$CALLER" = "$INTENT" ;;
+            evaluate:workflow_run|evaluate:pull_request_review) test "$CALLER" != "$INTENT" ;;
+            *) echo 'Unsupported phase/event combination' >&2; exit 1 ;;
+          esac
+
+      - name: Mint repository-scoped queue token
+        id: app-token
+        if: inputs.phase == 'evaluate' && !inputs.observe-only && env.MERGE_APP_CONFIGURED == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.merge-app-id }}
+          private-key: ${{ secrets.merge-app-private-key }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Evaluate dependency queue policy
+        uses: netresearch/.github/.github/actions/dependency-merge-controller@main
+        with:
+          phase: ${{ inputs.phase }}
+          observe-only: ${{ inputs.observe-only }}
+          policy: ${{ inputs.policy }}
+          caller-workflow: ${{ inputs.caller-workflow }}
+          intent-workflow: ${{ inputs.intent-workflow }}
+          token: ${{ github.token }}
+          write-token: ${{ steps.app-token.outputs.token || github.token }}
