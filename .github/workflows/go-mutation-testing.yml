@@ -200,7 +200,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
         continue-on-error: true
 
-      - name: Fail on packages gremlins could not build
+      - name: Fail when gremlins did not produce a score
         if: always()
         run: |
           # gremlins compiles the packages it mutates. One it cannot build is
@@ -216,11 +216,21 @@ jobs:
           # that would swallow this check too. A missing score is a threshold
           # question; a package that does not compile is not.
           [ -f mutation-output.txt ] || exit 0
-          grep -q '\[build failed\]' mutation-output.txt || exit 0
-          echo "::error::gremlins could not build these packages, so they are"
-          echo "::error::absent from the mutation score:"
-          grep '\[build failed\]' mutation-output.txt
-          echo "If the Go code depends on generated sources, pass pre-build-cmd."
+          if grep -q '\[build failed\]' mutation-output.txt; then
+            echo "::error::gremlins could not build these packages, so they are"
+            echo "::error::absent from the mutation score:"
+            grep '\[build failed\]' mutation-output.txt
+            echo "If the Go code depends on generated sources, pass pre-build-cmd."
+            exit 1
+          fi
+          # A run that ends normally prints "Test efficacy", or "No results to
+          # report." when it found no mutants. Anything else means gremlins
+          # stopped before mutating: in go-cron the config file named by
+          # config-path did not exist, gremlins printed "initialization error"
+          # and exited, and every pull request showed a green check with 0%.
+          grep -qE 'Test efficacy:|No results to report' mutation-output.txt && exit 0
+          echo "::error::gremlins stopped before it reported a score:"
+          tail -n 20 mutation-output.txt
           exit 1
 
       - name: Upload mutation reports
