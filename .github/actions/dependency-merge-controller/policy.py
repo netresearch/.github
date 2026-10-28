@@ -113,9 +113,22 @@ def check_intent(context, snapshot, policy, intent):
 def evaluate_checks(context, snapshot, policy):
     pr = snapshot["pr"]
     expected = {check["name"]: check for check in policy["required_checks"]}
+    for requirement in expected.values():
+        runs = [run for run in snapshot["workflows"]
+                if run["workflow"] == requirement["workflow"]
+                and run["event"] in requirement["events"]
+                and run["repository"] == context["repository"]
+                and run["sha"] in {pr["head"], pr.get("test_merge")}]
+        if not runs:
+            return "waiting", f"Missing expected workflow: {requirement['workflow']}"
+        newest = max(runs, key=lambda run: run["run_id"])
+        if newest["status"] != "completed":
+            return "waiting", f"Newest workflow is pending: {requirement['workflow']}"
+        if newest["conclusion"] != "success":
+            raise Blocked(f"Newest workflow did not succeed: {requirement['workflow']}")
     latest = {}
     for check in snapshot["checks"]:
-        key = (check.get("run_id", 0), check.get("attempt", 0), check["id"])
+        key = (check["id"], check.get("run_id", 0), check.get("attempt", 0))
         if check["name"] not in latest or key > latest[check["name"]][0]:
             latest[check["name"]] = (key, check)
     for name, requirement in expected.items():
@@ -135,7 +148,11 @@ def evaluate_checks(context, snapshot, policy):
             raise Blocked(f"Required check did not succeed: {name}")
     advisory = set(policy.get("advisory_checks", []))
     for name, (_, check) in latest.items():
-        if name in advisory or name.endswith(" / Dependency merge controller"):
+        own = (check.get("run_id") == context["run_id"]
+               and check.get("workflow") == context["caller_path"].split("/")[-1]
+               and check.get("app_id") == 15368
+               and name.endswith(" / Dependency merge controller"))
+        if name in advisory or own:
             continue
         if check.get("conclusion") in {"failure", "cancelled", "timed_out", "action_required", "startup_failure"}:
             raise Blocked(f"An additional check failed: {name}")

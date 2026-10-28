@@ -1,0 +1,64 @@
+name: Dependency merge controller
+description: Evaluate trusted dependency PR intent and enqueue once without waiting.
+inputs:
+  policy:
+    description: Versioned canonical required-check policy JSON from the trusted caller.
+    required: true
+  caller-workflow:
+    description: Repository-relative path of the caller that owns intent artifacts.
+    required: true
+  token:
+    description: Token for actions/checks/content reads and initial eligibility approval.
+    required: true
+  write-token:
+    description: Repository-scoped token for the final queue mutation.
+    required: true
+outputs:
+  state:
+    description: waiting, blocked, or queued; queued always has a confirmed server entry.
+    value: ${{ steps.evaluate.outputs.state || steps.prepare.outputs.state }}
+runs:
+  using: composite
+  steps:
+    - name: Read Dependabot metadata at the trusted initial entry
+      id: metadata
+      if: >-
+        github.event_name == 'pull_request_target' &&
+        github.event.pull_request.user.login == 'dependabot[bot]' &&
+        github.actor == 'dependabot[bot]'
+      uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+      with:
+        github-token: ${{ inputs.token }}
+
+    - name: Prepare verified initial intent
+      id: prepare
+      shell: bash
+      env:
+        ACTION_ROOT: ${{ github.action_path }}
+        CONTROLLER_POLICY: ${{ inputs.policy }}
+        CALLER_WORKFLOW: ${{ inputs.caller-workflow }}
+        READ_TOKEN: ${{ inputs.token }}
+        UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+        ECOSYSTEM: ${{ steps.metadata.outputs.package-ecosystem }}
+      run: python3 "$ACTION_ROOT/runner.py" prepare
+
+    - name: Persist current-head intent before any queue decision
+      if: steps.prepare.outputs.intent_name != ''
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ${{ steps.prepare.outputs.intent_name }}
+        path: ${{ steps.prepare.outputs.intent_path }}
+        retention-days: 7
+        if-no-files-found: error
+
+    - name: Re-read policy and enqueue only when ready
+      id: evaluate
+      if: steps.prepare.outputs.state != 'blocked'
+      shell: bash
+      env:
+        ACTION_ROOT: ${{ github.action_path }}
+        CONTROLLER_POLICY: ${{ inputs.policy }}
+        CALLER_WORKFLOW: ${{ inputs.caller-workflow }}
+        READ_TOKEN: ${{ inputs.token }}
+        WRITE_TOKEN: ${{ inputs.write-token }}
+      run: python3 "$ACTION_ROOT/runner.py" evaluate

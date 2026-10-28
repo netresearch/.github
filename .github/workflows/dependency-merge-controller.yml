@@ -1,0 +1,71 @@
+name: Dependency merge controller (opt-in)
+
+on:
+  workflow_call:
+    inputs:
+      policy:
+        description: Version-1 canonical required-check JSON from the trusted caller.
+        type: string
+        required: true
+      caller-workflow:
+        description: Caller path used to verify originating intent runs.
+        type: string
+        default: .github/workflows/auto-merge-deps.yml
+    secrets:
+      merge-app-id:
+        required: false
+      merge-app-private-key:
+        required: false
+
+# This new opt-in contract intentionally does not alter auto-merge-deps.yml.
+# Callers grant this full set explicitly. No PR code is ever checked out.
+permissions: {}
+
+jobs:
+  controller:
+    name: Dependency merge controller
+    if: >- # zizmor: ignore[bot-conditions] -- actor narrows author; action re-reads author, source and current head
+      (github.event_name == 'pull_request_target' &&
+       (github.event.pull_request.user.login == 'dependabot[bot]' || github.event.pull_request.user.login == 'renovate[bot]') &&
+       (github.actor == 'dependabot[bot]' || github.actor == 'renovate[bot]')) ||
+      github.event_name == 'pull_request_review' ||
+      (github.event_name == 'workflow_run' &&
+       (startsWith(github.event.workflow_run.head_branch, 'renovate/') ||
+        startsWith(github.event.workflow_run.head_branch, 'dependabot/')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+      checks: read
+      statuses: read
+    concurrency:
+      # Both the initial PR event and workflow completion use the same branch.
+      group: dependency-merge-${{ github.repository }}-${{ github.event.pull_request.head.ref || github.event.workflow_run.head_branch || github.run_id }}
+      cancel-in-progress: false
+    env:
+      MERGE_APP_CONFIGURED: ${{ secrets.merge-app-id != '' && secrets.merge-app-private-key != '' }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Mint repository-scoped queue token
+        id: app-token
+        if: env.MERGE_APP_CONFIGURED == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.merge-app-id }}
+          private-key: ${{ secrets.merge-app-private-key }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Evaluate dependency queue policy
+        uses: netresearch/.github/.github/actions/dependency-merge-controller@main
+        with:
+          policy: ${{ inputs.policy }}
+          caller-workflow: ${{ inputs.caller-workflow }}
+          token: ${{ github.token }}
+          write-token: ${{ steps.app-token.outputs.token || github.token }}

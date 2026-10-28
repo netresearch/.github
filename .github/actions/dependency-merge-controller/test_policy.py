@@ -49,6 +49,10 @@ def fixtures():
                     "id": i, "status": "completed", "conclusion": "success"}
                    for i, c in enumerate(POLICY["required_checks"], start=1)],
         "statuses": [],
+        "workflows": [{"workflow": check["workflow"], "event": "pull_request",
+                       "repository": REPO, "sha": SHA, "run_id": 20,
+                       "status": "completed", "conclusion": "success"}
+                      for check in POLICY["required_checks"]],
     }
     return context, snapshot
 
@@ -82,6 +86,16 @@ class PolicyTest(unittest.TestCase):
         self.snapshot["checks"].append(newer)
         self.assertEqual(self.result(), "waiting")
 
+    def test_new_workflow_pending_before_any_new_check_exists(self):
+        self.snapshot["workflows"].append(self.snapshot["workflows"][0] | {
+            "run_id": 21, "status": "queued", "conclusion": None})
+        self.assertEqual(self.result(), "waiting")
+
+    def test_controller_name_from_other_run_does_not_hide_failure(self):
+        self.snapshot["checks"].append(self.snapshot["checks"][0] | {
+            "name": "auto-merge / Dependency merge controller", "conclusion": "failure"})
+        self.assertEqual(self.result(), "blocked")
+
     def test_newer_failed_attempt_blocks(self):
         self.snapshot["checks"].append(self.snapshot["checks"][0] | {
             "attempt": 2, "id": 50, "conclusion": "failure"})
@@ -94,6 +108,11 @@ class PolicyTest(unittest.TestCase):
             with self.subTest(changes=changes):
                 self.snapshot["checks"][0] = fixtures()[1]["checks"][0] | changes
                 self.assertEqual(self.result(), "blocked")
+
+    def test_new_wrong_app_does_not_hide_behind_old_trusted_success(self):
+        self.snapshot["checks"].append(self.snapshot["checks"][0] | {
+            "id": 500, "run_id": 0, "app_id": 12, "app_slug": "fake"})
+        self.assertEqual(self.result(), "blocked")
 
     def test_additional_failure_is_not_hidden_by_inventory(self):
         self.snapshot["checks"].append(self.snapshot["checks"][0] | {
