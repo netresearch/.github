@@ -157,7 +157,7 @@ class GitHub:
         read_query = (path == "/graphql" and method == "POST" and isinstance(data, dict)
                       and set(data) <= {"query", "variables"}
                       and isinstance(data.get("query"), str)
-                      and re.match(r"\s*query\s*(?:\(|\{)", data["query"])
+                      and re.match(r"\s*query\s*[(\{]", data["query"])
                       and not re.search(r"\bmutation\b", data["query"]))
         mutating = write or (method != "GET" and not read_query)
         if not mutating:
@@ -419,7 +419,9 @@ def write_receipt(api, context, policy, phase, intent, state, reason):
                "mutation_attempts": getattr(api, "mutation_attempts", 0),
                "api_calls": getattr(api, "api_calls", 0)}
     text = json.dumps(receipt, sort_keys=True, indent=2) + "\n"
-    path = Path(os.environ["RUNNER_TEMP"]) / f"dependency-receipt-{context.get('run_id', 'blocked')}-{phase}.json"
+    # One explicit phase executes per isolated job. Keep the filename constant:
+    # CLI/context data belongs inside JSON, never in the filesystem path.
+    path = Path(os.environ["RUNNER_TEMP"]) / "dependency-controller-receipt.json"
     path.write_text(text)
     output(state=state, receipt_path=path)
     with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:

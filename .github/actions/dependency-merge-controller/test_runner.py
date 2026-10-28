@@ -10,7 +10,7 @@ import urllib.error
 from unittest import mock
 
 from policy import initial_intent
-from runner import ApiError, GitHub, evaluate_and_enqueue, main, verify_intent_record
+from runner import ApiError, GitHub, evaluate_and_enqueue, main, verify_intent_record, write_receipt
 from test_policy import POLICY, REPO, SHA, TIME, fixtures
 
 
@@ -32,6 +32,20 @@ class RunnerTest(unittest.TestCase):
     def setUp(self):
         self.context, self.snapshot = fixtures()
         self.intent = initial_intent(self.context, self.snapshot, POLICY)
+
+    def test_receipt_never_uses_context_or_phase_as_a_path(self):
+        class ReadOnlyAPI:
+            observe_only = True
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment = {"RUNNER_TEMP": directory, "GITHUB_STEP_SUMMARY": str(root / "summary")}
+            with mock.patch.dict(os.environ, environment), mock.patch("runner.output") as emitted:
+                write_receipt(ReadOnlyAPI(), {"run_id": "../../escaped"}, POLICY,
+                              "../../outside", None, "blocked", "fixture")
+            receipt = Path(emitted.call_args.kwargs["receipt_path"])
+            self.assertEqual(receipt.parent, root)
+            self.assertEqual(receipt.name, "dependency-controller-receipt.json")
+            self.assertEqual(json.loads(receipt.read_text())["phase"], "../../outside")
 
     def test_insert_once_with_expected_head_and_confirm_once(self):
         queued = copy.deepcopy(self.snapshot)
