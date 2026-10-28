@@ -1,0 +1,47 @@
+name: Template transition fixtures
+
+on:
+  pull_request:
+    paths:
+      - scripts/drift_compare.py
+      - scripts/check-drift.sh
+      - scripts/test_drift_compare.py
+      - scripts/requirements-drift-tests.txt
+      - templates/typo3-extension/.github/workflows/checks.yml
+      - .github/workflows/template-transition-tests.yml
+  push:
+    branches: [main]
+    paths:
+      - scripts/drift_compare.py
+      - scripts/check-drift.sh
+      - scripts/test_drift_compare.py
+      - scripts/requirements-drift-tests.txt
+      - templates/typo3-extension/.github/workflows/checks.yml
+      - .github/workflows/template-transition-tests.yml
+
+permissions:
+  contents: read
+
+jobs:
+  fixtures:
+    name: Exact Checks transition fixtures
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the hash-pinned YAML test runtime
+        run: >-
+          python3 -m pip install --disable-pip-version-check --only-binary=:all:
+          --require-hashes --target "$RUNNER_TEMP/drift-fixtures-python"
+          -r scripts/requirements-drift-tests.txt
+      - name: Compare both rollout directions and negative controls
+        env:
+          PYTHONPATH: ${{ runner.temp }}/drift-fixtures-python
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 -m unittest discover -s scripts -p 'test_drift_compare.py' -v

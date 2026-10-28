@@ -27,6 +27,8 @@ cannot disagree.
 from __future__ import annotations
 
 import difflib
+import hashlib
+import json
 import os
 import re
 import sys
@@ -35,6 +37,14 @@ from pathlib import Path
 import yaml
 
 IN_ACTIONS = bool(os.environ.get("GITHUB_ACTIONS"))
+
+# Complete reviewed Checks documents, before and after PR-only cancellation.
+# Do not extend this set to future templates: retire this transition after
+# all applicable TYPO3 consumers have moved to the new canonical document.
+CHECKS_CONCURRENCY_VARIANTS = frozenset({
+    "65c451549abd2ebd6fcdb367d47b855e25b2d48b8315149276caf33af2a01656",
+    "9255cc2adf021436f7f52875e0d8e654d1e7aad8dad4dacfb1638f4ab1e18a22",
+})
 
 
 class WorkflowLoader(yaml.SafeLoader):
@@ -123,12 +133,47 @@ def parsed(path: Path) -> tuple[bool, object]:
         return False, None
 
 
+def semantic_fingerprint(document: object) -> str | None:
+    """A stable whole-document identity; unsupported YAML values are not allowed."""
+    try:
+        data = json.dumps(document, sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=False, allow_nan=False) + "\n"
+        return hashlib.sha256(data.encode("utf-8")).hexdigest()
+    except (TypeError, ValueError):
+        return None
+
+
+def checks_concurrency_transition(template_root: Path, rel: str,
+                                 template: object, consumer: object) -> bool:
+    """Permit exactly A↔B at the one reviewed TYPO3 Checks path."""
+    if template_root.name != "typo3-extension" or rel != ".github/workflows/checks.yml":
+        return False
+    variants = {semantic_fingerprint(template), semantic_fingerprint(consumer)}
+    return variants == CHECKS_CONCURRENCY_VARIANTS
+
+
+def document_difference(consumer_path: Path, tpl_file: Path, template_root: Path,
+                        rel: str) -> str:
+    """Distinguish cosmetic equality, the exact transition and ordinary drift."""
+    ok_consumer, doc_consumer = parsed(consumer_path)
+    ok_template, doc_template = parsed(tpl_file)
+    if not ok_consumer or not ok_template:
+        return "differing"
+    if doc_consumer == doc_template:
+        return "cosmetic"
+    if checks_concurrency_transition(template_root, rel, doc_template, doc_consumer):
+        return "transition"
+    return "differing"
+
+
 def classify(consumer_root: Path, template_root: Path, intentional: set[str]):
-    """Split the governed files into missing, differing, cosmetic and escaping."""
+    """Classify governed files, preserving the exact transition as its own result."""
     missing: list[str] = []
     differing: list[str] = []
     cosmetic: list[str] = []
     escaped: list[str] = []
+    transition: list[str] = []
+    documents = {"cosmetic": cosmetic, "differing": differing, "transition": transition}
 
     governed = sorted(p for p in (template_root / ".github").rglob("*") if p.is_file())
     for tpl_file in governed:
@@ -152,14 +197,10 @@ def classify(consumer_root: Path, template_root: Path, intentional: set[str]):
         if consumer_path.read_bytes() == tpl_file.read_bytes():
             continue
 
-        ok_consumer, doc_consumer = parsed(consumer_path)
-        ok_template, doc_template = parsed(tpl_file)
-        if ok_consumer and ok_template and doc_consumer == doc_template:
-            cosmetic.append(rel)
-        else:
-            differing.append(rel)
+        category = document_difference(consumer_path, tpl_file, template_root, rel)
+        documents[category].append(rel)
 
-    return missing, differing, cosmetic, escaped
+    return missing, differing, cosmetic, escaped, transition
 
 
 def main(argv: list[str]) -> int:
@@ -196,7 +237,7 @@ def main(argv: list[str]) -> int:
     else:
         print("No intentional-drift entries.")
 
-    missing, differing, cosmetic, escaped = classify(
+    missing, differing, cosmetic, escaped, transition = classify(
         consumer_root, template_root, intentional
     )
 
@@ -208,6 +249,11 @@ def main(argv: list[str]) -> int:
         )
         for rel in cosmetic:
             print(f"  ~ {rel}")
+
+    if transition:
+        annotate("notice", "Approved Checks PR-concurrency transition (exact reviewed A/B documents).")
+        for rel in transition:
+            print(f"  ↔ {rel}")
 
     if escaped:
         annotate(
