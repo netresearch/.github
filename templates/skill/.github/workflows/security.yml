@@ -98,6 +98,11 @@ jobs:
   # github-advanced-security app against the pull request, not by these jobs.
   # Require `All security checks` instead -- it depends on every job here and
   # its name does not change with the event.
+  #
+  # The gate does not block a zizmor finding: zizmor is report-only and its
+  # job succeeds whatever it finds (zizmor.yml). A finding blocks a pull
+  # request only through a ruleset `code_scanning` rule, which this gate does
+  # not replace.
   gate:
     name: All security checks
     needs:
