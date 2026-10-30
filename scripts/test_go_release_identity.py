@@ -19,11 +19,15 @@ WORKFLOWS = {
 
 
 def step(workflow, job, name):
+    """Select the actual reusable step whose guard the fixture will execute."""
     return next(item for item in WORKFLOWS[workflow]["jobs"][job]["steps"] if item.get("name") == name)
 
 
 class ReleaseIdentityTest(unittest.TestCase):
+    """Exercise tag/provenance identity while blocking every real publisher."""
+
     def setUp(self):
+        """Build isolated commits/tags and a CLI stub with no network path."""
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.directory = Path(self.temp.name)
@@ -71,10 +75,12 @@ fi
         }
 
     def git(self, *arguments):
+        """Run Git only in the temporary fixture with hooks disabled."""
         return subprocess.check_output(["git", "-c", "core.hooksPath=/dev/null", *arguments],
                                        cwd=self.repo, text=True, stderr=subprocess.DEVNULL).strip()
 
     def execute(self, item, **environment):
+        """Execute a source guard and capture its success-only identity outputs."""
         output = self.directory / "output"
         output.write_text("")
         result = subprocess.run(["bash", "-euo", "pipefail", "-c", item["run"]], cwd=self.repo,
@@ -84,10 +90,12 @@ fi
         return result, values
 
     def bind_steps(self):
+        """Return both library and application event-to-tag binding guards."""
         return (step("golib-create-release", "test", "Bind release tag to event source"),
                 step("release-go-app", "preflight", "Resolve tag"))
 
     def test_tag_event_and_dispatch_at_selected_tag_preserve_sha_and_tag_object(self):
+        """Accept the exact tag identity with an explicit or default selection."""
         for item in self.bind_steps():
             for override in ("", "v1.2.3"):
                 result, values = self.execute(item, INPUT_TAG=override)
@@ -97,6 +105,7 @@ fi
                 self.assertEqual(values["tag-object"], self.tag_object)
 
     def test_wrong_oidc_branch_other_tag_or_sha_fails_before_outputs(self):
+        """Reject wrong event refs/commits and malformed or missing tag selections."""
         variants = ({"EVENT_REF": "refs/heads/main", "EVENT_REF_TYPE": "branch"},
                     {"EVENT_REF": "refs/tags/v1.2.4"}, {"EVENT_SHA": self.other_sha},
                     {"INPUT_TAG": "missing", "EVENT_REF": "refs/tags/missing"},
@@ -112,12 +121,14 @@ fi
             self.git("checkout", "-q", "--detach", self.sha)
 
     def test_library_still_refuses_lightweight_tag(self):
+        """Retain the existing library annotated-tag requirement."""
         result, values = self.execute(self.bind_steps()[0], INPUT_TAG="v1.2.5",
                                       EVENT_REF="refs/tags/v1.2.5", REF_NAME="v1.2.5")
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(values, {})
 
     def test_library_release_checkout_and_local_tag_must_match_tested_identity(self):
+        """Reject a publishing checkout or local tag that moved after testing."""
         item = step("golib-create-release", "release", "Verify tested release source")
         self.assertEqual(self.execute(item)[0].returncode, 0)
         self.git("checkout", "-q", "--detach", self.other_sha)
@@ -127,6 +138,7 @@ fi
         self.assertNotEqual(self.execute(item)[0].returncode, 0)
 
     def test_remote_replacement_deletion_and_read_failure_block_every_publisher_guard(self):
+        """Fail every publisher guard on remote identity/read errors before publish."""
         guards = (step("golib-create-release", "release", "Verify tested release source"),
                   step("golib-create-release", "release", "Recheck release tag before publication"),
                   step("release-go-app", "container", "Recheck release tag before image publication"),
@@ -145,6 +157,7 @@ fi
                     marker.unlink()
 
     def test_native_graph_race_and_platform_contracts_remain(self):
+        """Retain native jobs, race tests, platform scope and immutable checkouts."""
         library, app = WORKFLOWS["golib-create-release"], WORKFLOWS["release-go-app"]
         self.assertEqual(set(library["jobs"]), {"test", "release"})
         self.assertEqual(step("golib-create-release", "test", "Run tests")["run"].strip(),
