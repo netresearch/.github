@@ -87,6 +87,18 @@ def prepare():
             "go-version": metadata["GOVERSION"], "source-sha256": source}
 
 
+def cache_install_paths(build_cache, module_cache):
+    """Use the original installer when executable/cache paths cannot be proved safe."""
+    try:
+        paths = go_json("env", "-json", "GOBIN", "GOPATH")
+        if install_paths_disjoint(paths, build_cache, module_cache):
+            return paths
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    print("::notice::Executable/cache layout is uncertain or overlapping; using the original installer.")
+    return {}
+
+
 def install():
     """Always install the pinned tool; cache faults retry the original installer."""
     kind, _ = target()
@@ -98,13 +110,8 @@ def install():
     use_cache = os.environ.get("TOOL_CACHE_ENABLED") == "true" and all(cached[key] for key in ("GOCACHE", "GOMODCACHE"))
     paths = {}
     if use_cache:
-        try:
-            paths = go_json("env", "-json", "GOBIN", "GOPATH")
-            use_cache = install_paths_disjoint(paths, cached["GOCACHE"], cached["GOMODCACHE"])
-        except (OSError, ValueError, subprocess.SubprocessError):
-            use_cache = False
-        if not use_cache:
-            print("::notice::Executable/cache layout is uncertain or overlapping; using the original installer.")
+        paths = cache_install_paths(cached["GOCACHE"], cached["GOMODCACHE"])
+        use_cache = bool(paths)
     result = subprocess.run(["go", "install", os.environ["TOOL_TARGET"]], env=cached if use_cache else original, check=False)
     cache_built = use_cache and result.returncode == 0
     if use_cache and result.returncode:
