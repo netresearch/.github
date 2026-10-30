@@ -41,6 +41,10 @@ on:
         description: "Per-job timeout in minutes."
         type: number
         default: 15
+      enable-tool-build-cache:
+        description: "Opt in to install-only compiler/module caches for commit-pinned gosec and go-licenses; scans always execute."
+        type: boolean
+        default: false
 
       setup-bun:
         description: "Install Bun before running pre-build-cmd."
@@ -488,6 +492,8 @@ jobs:
     permissions:
       contents: read
       security-events: write
+    env:
+      GOSEC_TARGET: github.com/securego/gosec/v2/cmd/gosec@d2b649ec01825c20bd101ec584e559adb287e578 # master
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
@@ -500,6 +506,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Go
+        id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: ${{ inputs.go-version-file }}
@@ -520,9 +527,17 @@ jobs:
           # continuing into the Go build with a half-built frontend.
           bash -euo pipefail -c "$PRE_BUILD_CMD"
 
-      - name: Run gosec
-        env:
-          GOSEC_STRICT: ${{ inputs.gosec-strict }}
+      - name: Install gosec with the optional tool build cache
+        id: tool-cache
+        if: ${{ inputs.enable-tool-build-cache }}
+        uses: netresearch/.github/.github/actions/go-tool-build-cache@main
+        with:
+          tool: gosec
+          target: ${{ env.GOSEC_TARGET }}
+          go-version: ${{ steps.setup-go.outputs.go-version }}
+
+      - name: Install gosec
+        if: ${{ !inputs.enable-tool-build-cache }}
         run: |
           set -euo pipefail
           # Built here with the Go that "Set up Go" installed, rather than run
@@ -543,7 +558,13 @@ jobs:
           # so a caller on an older Go would fail here; `auto` on the install
           # alone fetches a toolchain new enough to build gosec, while the scan
           # below still runs with the caller's Go.
-          GOTOOLCHAIN=auto go install github.com/securego/gosec/v2/cmd/gosec@d2b649ec01825c20bd101ec584e559adb287e578  # master
+          GOTOOLCHAIN=auto go install "$GOSEC_TARGET"
+
+      - name: Run gosec
+        env:
+          GOSEC_STRICT: ${{ inputs.gosec-strict }}
+        run: |
+          set -euo pipefail
           # Findings fail the job unless gosec-strict is set false. They also
           # reach the Security tab through the SARIF upload below, which runs
           # on failure too (if: always()), so making this blocking costs no
@@ -565,6 +586,17 @@ jobs:
         uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           sarif_file: gosec-results.sarif
+
+      - name: Save the validated install-only tool cache
+        if: ${{ success() && inputs.enable-tool-build-cache && steps.tool-cache.outputs.cache-saveable == 'true' && steps.tool-cache.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref_protected == true && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: ${{ steps.tool-cache.outputs.key }}
+          path: |
+            ${{ steps.tool-cache.outputs.build-cache }}
+            ${{ steps.tool-cache.outputs.module-cache }}/cache/download
+            !${{ steps.tool-cache.outputs.module-cache }}/cache/download/golang.org/toolchain
 
   smoke-test:
     name: Smoke Tests (fast feedback)
@@ -664,6 +696,8 @@ jobs:
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
+    env:
+      GO_LICENSES_TARGET: github.com/google/go-licenses@5348b744d0983d85713295ea08a20cca1654a45e # v1.6.0
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
@@ -676,13 +710,24 @@ jobs:
           persist-credentials: false
 
       - name: Set up Go
+        id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: ${{ inputs.go-version-file }}
           cache: true
 
+      - name: Install go-licenses with the optional tool build cache
+        id: tool-cache
+        if: ${{ inputs.enable-tool-build-cache }}
+        uses: netresearch/.github/.github/actions/go-tool-build-cache@main
+        with:
+          tool: go-licenses
+          target: ${{ env.GO_LICENSES_TARGET }}
+          go-version: ${{ steps.setup-go.outputs.go-version }}
+
       - name: Install go-licenses
-        run: go install github.com/google/go-licenses@5348b744d0983d85713295ea08a20cca1654a45e  # pinned to v1.6.0 (post-v1 tags live in /v2 module path)
+        if: ${{ !inputs.enable-tool-build-cache }}
+        run: go install "$GO_LICENSES_TARGET"
 
       - name: Run license check
         env:
@@ -714,6 +759,17 @@ jobs:
           echo "Allowed licenses: $ALLOW"
           # shellcheck disable=SC2086
           go-licenses check ./... --allowed_licenses="$ALLOW" $IGNORE_ARGS
+
+      - name: Save the validated install-only tool cache
+        if: ${{ success() && inputs.enable-tool-build-cache && steps.tool-cache.outputs.cache-saveable == 'true' && steps.tool-cache.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref_protected == true && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: ${{ steps.tool-cache.outputs.key }}
+          path: |
+            ${{ steps.tool-cache.outputs.build-cache }}
+            ${{ steps.tool-cache.outputs.module-cache }}/cache/download
+            !${{ steps.tool-cache.outputs.module-cache }}/cache/download/golang.org/toolchain
 
   integration-tests:
     name: Integration Tests
