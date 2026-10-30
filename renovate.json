@@ -17,7 +17,7 @@
         "/^\\.github/workflows/go-check\\.ya?ml$/"
       ],
       "matchStrings": [
-        "go install github\\.com/securego/gosec/v2/cmd/gosec@(?<currentDigest>[0-9a-f]{40})\\s+# (?<currentValue>master)"
+        "GOSEC_TARGET: github\\.com/securego/gosec/v2/cmd/gosec@(?<currentDigest>[0-9a-f]{40})\\s+# (?<currentValue>master)"
       ],
       "depNameTemplate": "securego/gosec",
       "packageNameTemplate": "https://github.com/securego/gosec",
