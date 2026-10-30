@@ -20,12 +20,16 @@ NOTICE = "Approved Go PR-concurrency transition"
 
 
 def fingerprint(document):
+    """Hash a whole parsed document independently of the comparator helper."""
     return hashlib.sha256((json.dumps(document, sort_keys=True, separators=(",", ":"),
                                      ensure_ascii=False) + "\n").encode()).hexdigest()
 
 
 class GoTransitionTest(unittest.TestCase):
+    """Allow only reviewed migration pairs and reject changed gate contracts."""
+
     def documents(self, template, path):
+        """Rebuild both reviewed callers while preserving old mutation behavior."""
         current = yaml.load((ROOT / "templates" / template / path).read_text(), Loader=WorkflowLoader)
         before = copy.deepcopy(current)
         before.pop("concurrency", None)
@@ -37,6 +41,7 @@ class GoTransitionTest(unittest.TestCase):
         return current, before, after
 
     def compare(self, template, path, canonical, consumer, *, text=None, escape=False):
+        """Run the actual comparator CLI with isolated readable or unsafe paths."""
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             template_root, consumer_root = base / template, base / "consumer"
@@ -57,12 +62,14 @@ class GoTransitionTest(unittest.TestCase):
                                   capture_output=True, text=True, check=False)
 
     def test_frozen_documents_and_both_rollout_directions(self):
+        """Accept both frozen directions and retain ordinary equality behavior."""
         for template in ("go-lib", "go-app"):
             for path, allowed in GO_CONCURRENCY_VARIANTS.items():
                 current, before, after = self.documents(template, path)
                 with self.subTest(template=template, path=path):
                     self.assertIn(fingerprint(current), allowed)
-                    self.assertEqual({fingerprint(before), fingerprint(after)}, allowed)
+                    actual_variants = {fingerprint(before), fingerprint(after)}
+                    self.assertEqual(actual_variants, allowed)
                     for canonical, consumer in ((before, after), (after, before)):
                         result = self.compare(template, path, canonical, consumer)
                         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -73,6 +80,7 @@ class GoTransitionTest(unittest.TestCase):
                         self.assertNotIn(NOTICE, result.stdout)
 
     def test_changed_jobs_inputs_permissions_triggers_and_concurrency_still_fail(self):
+        """Reject gate changes and prevent future canonical revisions inheriting old pairs."""
         for path in GO_CONCURRENCY_VARIANTS:
             _, before, after = self.documents("go-lib", path)
             changes = []
@@ -103,6 +111,7 @@ class GoTransitionTest(unittest.TestCase):
                     self.assertEqual(self.compare("go-lib", path, changed, after).returncode, 1)
 
     def test_exact_template_path_and_readable_documents_required(self):
+        """Reject other paths/templates and missing, malformed or escaping files."""
         path = ".github/workflows/ci.yml"
         _, before, after = self.documents("go-lib", path)
         for template, other_path in (("typo3-extension", path), ("skill", path),
