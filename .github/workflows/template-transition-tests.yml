@@ -6,8 +6,11 @@ on:
       - scripts/drift_compare.py
       - scripts/check-drift.sh
       - scripts/test_drift_compare.py
+      - scripts/test_drift_compare_go.py
       - scripts/requirements-drift-tests.txt
       - templates/typo3-extension/.github/workflows/checks.yml
+      - templates/go-lib/.github/workflows/*.yml
+      - templates/go-app/.github/workflows/*.yml
       - .github/workflows/template-transition-tests.yml
   push:
     branches: [main]
@@ -15,8 +18,11 @@ on:
       - scripts/drift_compare.py
       - scripts/check-drift.sh
       - scripts/test_drift_compare.py
+      - scripts/test_drift_compare_go.py
       - scripts/requirements-drift-tests.txt
       - templates/typo3-extension/.github/workflows/checks.yml
+      - templates/go-lib/.github/workflows/*.yml
+      - templates/go-app/.github/workflows/*.yml
       - .github/workflows/template-transition-tests.yml
 
 permissions:
@@ -24,7 +30,7 @@ permissions:
 
 jobs:
   fixtures:
-    name: Exact Checks transition fixtures
+    name: Exact workflow transition fixtures
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -44,4 +50,4 @@ jobs:
         env:
           PYTHONPATH: ${{ runner.temp }}/drift-fixtures-python
           PYTHONDONTWRITEBYTECODE: '1'
-        run: python3 -m unittest discover -s scripts -p 'test_drift_compare.py' -v
+        run: python3 -m unittest discover -s scripts -p 'test_drift_compare*.py' -v
