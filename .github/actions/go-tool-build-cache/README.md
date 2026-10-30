@@ -11,7 +11,8 @@ Its actual helper/descriptor digest is printed and forms part of the key;
 native qualification must also retain the downloaded action's resolved SHA.
 
 Keys bind full tool commit, actual configured Go patch release, OS/architecture,
-compiler flags, versioned Linux runner image and helper source. Unknown image,
+architecture features/CGO mode, versioned Linux runner image and helper source.
+Go's internal cache identities handle other compiler flags. Unknown image,
 custom/uncertain toolchain, mutable target or newer module requirement disables
 the cache. A different installed compiler forbids saving. The existing pinned
 installer always executes, including exact cache hits; a cache install failure
@@ -27,10 +28,16 @@ Saving is explicitly after a successful scan/SARIF job, on a protected default
 branch push only. Pull requests, merge groups, tags, unprotected refs and failed
 scans cannot save. Cache service failures do not replace quality outcomes.
 
-Local proof on Go1.27.3 retains byte-identical tool binaries, identical clean
+The protected-default rule governs this helper's writes. Restores retain
+GitHub's current/base/default branch-scope lookup. Keys and compiler metadata
+identify contents without authenticating protected-main provenance. GOCACHE
+retains the existing runner/cache trust; a download-only module archive adds
+no provenance authentication to GOCACHE.
+
+Local proof on Go 1.27.3 retains byte-identical tool binaries, identical clean
 gosec SARIF and real red gosec/license findings. Download-only replay at the same
 module path also preserves bytes/scans, while the module archive compresses
-from54.4MB to32.0MB for licenses and142.9MB to86.4MB for gosec (zstd level3).
+from 54.4 MB to 32.0 MB for licenses and 142.9 MB to 86.4 MB for gosec (zstd level 3).
 These local results do not include hosted transfer time or prove a hosted gain.
 
 Review/activation: independently review guard and negative fixtures, merge the
