@@ -46,6 +46,31 @@ CHECKS_CONCURRENCY_VARIANTS = frozenset({
     "9255cc2adf021436f7f52875e0d8e654d1e7aad8dad4dacfb1638f4ab1e18a22",
 })
 
+# Complete reviewed Go caller documents, not a concurrency-field exemption.
+# Retire each pair only after read-only discovery proves its consumers migrated.
+GO_CONCURRENCY_VARIANTS = {
+    ".github/workflows/ci.yml": frozenset({
+        "e26ea16b1f76c83d4ce01e1cf6d75d741fd32386bb9e78c202c5f356b01f461b",
+        "fb2840a850cf893ad0d40ae0f7ed124220fa03ca897be075d4462ecd38835c45",
+    }),
+    ".github/workflows/codeql.yml": frozenset({
+        "30c54a9bfa68bc900cfd7fd8bbea592bd85ed9deda224728764d94d7f57f0037",
+        "9797f59a21fbc962b2e13c2d505898f3daaf31cdaaf5dfa5755e545c54df8e4e",
+    }),
+    ".github/workflows/betterleaks.yml": frozenset({
+        "cd20037e125efd45568f48a30eef21f4cd077e43ed5bb835969ebf915ce4d373",
+        "74146965e5e63c00d44d362c26b9597284f52698201870ac4429f14c455205e9",
+    }),
+    ".github/workflows/zizmor.yml": frozenset({
+        "818be610c09a931beb57783e459ed6b5f37dc461d938c4f14ec923b1777df317",
+        "f514f2e25efe9684874ba9e9bc2e68e542103399503e037195c5ea87f0024c03",
+    }),
+    ".github/workflows/mutation.yml": frozenset({
+        "280dbde91c0b21db6abb49907ea9f9b5849a546336b7bc90f8da8011d35719ee",
+        "0c301b1f2eb746f49d921e1a3f0d9141f6820191a91cf5bf7cd4cb59cc3e5595",
+    }),
+}
+
 
 class WorkflowLoader(yaml.SafeLoader):
     """SafeLoader with YAML 1.2 boolean semantics.
@@ -152,6 +177,17 @@ def checks_concurrency_transition(template_root: Path, rel: str,
     return variants == CHECKS_CONCURRENCY_VARIANTS
 
 
+def go_concurrency_transition(template_root: Path, rel: str,
+                              template: object, consumer: object) -> bool:
+    """Permit only the frozen A↔B callers in the two reviewed Go templates."""
+    if template_root.name not in {"go-lib", "go-app"}:
+        return False
+    allowed = GO_CONCURRENCY_VARIANTS.get(rel)
+    return allowed is not None and {
+        semantic_fingerprint(template), semantic_fingerprint(consumer)
+    } == allowed
+
+
 def document_difference(consumer_path: Path, tpl_file: Path, template_root: Path,
                         rel: str) -> str:
     """Distinguish cosmetic equality, the exact transition and ordinary drift."""
@@ -162,6 +198,8 @@ def document_difference(consumer_path: Path, tpl_file: Path, template_root: Path
     if doc_consumer == doc_template:
         return "cosmetic"
     if checks_concurrency_transition(template_root, rel, doc_template, doc_consumer):
+        return "transition"
+    if go_concurrency_transition(template_root, rel, doc_template, doc_consumer):
         return "transition"
     return "differing"
 
@@ -251,7 +289,10 @@ def main(argv: list[str]) -> int:
             print(f"  ~ {rel}")
 
     if transition:
-        annotate("notice", "Approved Checks PR-concurrency transition (exact reviewed A/B documents).")
+        if ".github/workflows/checks.yml" in transition:
+            annotate("notice", "Approved Checks PR-concurrency transition (exact reviewed A/B documents).")
+        if any(rel in GO_CONCURRENCY_VARIANTS for rel in transition):
+            annotate("notice", "Approved Go PR-concurrency transition (exact reviewed A/B documents).")
         for rel in transition:
             print(f"  ↔ {rel}")
 

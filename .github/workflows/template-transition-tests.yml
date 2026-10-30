@@ -10,8 +10,14 @@ on:
       - .github/actions/go-tool-build-cache/**
       - .github/workflows/go-check.yml
       - renovate.json
+      - scripts/test_go_release_identity.py
+      - .github/workflows/golib-create-release.yml
+      - .github/workflows/release-go-app.yml
+      - scripts/test_drift_compare_go.py
       - scripts/requirements-drift-tests.txt
       - templates/typo3-extension/.github/workflows/checks.yml
+      - templates/go-lib/.github/workflows/*.yml
+      - templates/go-app/.github/workflows/*.yml
       - .github/workflows/template-transition-tests.yml
   push:
     branches: [main]
@@ -23,8 +29,14 @@ on:
       - .github/actions/go-tool-build-cache/**
       - .github/workflows/go-check.yml
       - renovate.json
+      - scripts/test_go_release_identity.py
+      - .github/workflows/golib-create-release.yml
+      - .github/workflows/release-go-app.yml
+      - scripts/test_drift_compare_go.py
       - scripts/requirements-drift-tests.txt
       - templates/typo3-extension/.github/workflows/checks.yml
+      - templates/go-lib/.github/workflows/*.yml
+      - templates/go-app/.github/workflows/*.yml
       - .github/workflows/template-transition-tests.yml
 
 permissions:
@@ -32,7 +44,7 @@ permissions:
 
 jobs:
   fixtures:
-    name: Exact Checks transition fixtures
+    name: Exact workflow transition fixtures
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -52,9 +64,14 @@ jobs:
         env:
           PYTHONPATH: ${{ runner.temp }}/drift-fixtures-python
           PYTHONDONTWRITEBYTECODE: '1'
-        run: python3 -m unittest discover -s scripts -p 'test_drift_compare.py' -v
+        run: python3 -m unittest discover -s scripts -p 'test_drift_compare*.py' -v
       - name: Check pinned Go tool cache boundaries without hosted cache access
         env:
           PYTHONPATH: ${{ runner.temp }}/drift-fixtures-python
           PYTHONDONTWRITEBYTECODE: '1'
         run: python3 -m unittest discover -s scripts -p 'test_go_tool_build_cache.py' -v
+      - name: Check Go release identity without publishing
+        env:
+          PYTHONPATH: ${{ runner.temp }}/drift-fixtures-python
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 -m unittest discover -s scripts -p 'test_go_release_identity.py' -v

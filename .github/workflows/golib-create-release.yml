@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       tag:
-        description: "Release tag (e.g., v1.10.0). Defaults to the triggering ref name."
+        description: "Release tag (e.g., v1.10.0). Must match the triggering tag ref and commit, including manual dispatch."
         required: false
         type: string
         default: ""
@@ -57,6 +57,10 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
+    outputs:
+      tag: ${{ steps.source.outputs.tag }}
+      sha: ${{ steps.source.outputs.sha }}
+      tag-object: ${{ steps.source.outputs.tag-object }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
@@ -68,6 +72,48 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Bind release tag to event source
+        id: source
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_REF: ${{ github.ref }}
+          EVENT_REF_TYPE: ${{ github.ref_type }}
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          TAG="${INPUT_TAG:-$REF_NAME}"
+          TAG_REF="refs/tags/$TAG"
+          git check-ref-format "$TAG_REF"
+          # Artifact provenance uses the event's OIDC ref/SHA, not checkout
+          # HEAD. A manual run must therefore be dispatched at this exact tag.
+          if [ "$EVENT_REF_TYPE" != "tag" ] || [ "$EVENT_REF" != "$TAG_REF" ]; then
+            echo "::error::Run this workflow at the selected tag ref $TAG_REF."
+            exit 1
+          fi
+          TAG_OBJECT=$(git rev-parse --verify "$TAG_REF")
+          if [ "$(git cat-file -t "$TAG_REF")" != "tag" ]; then
+            echo "::error::Only annotated/signed tags are allowed for releases."
+            exit 1
+          fi
+          SHA=$(git rev-parse --verify "${TAG_REF}^{commit}")
+          if [ "$SHA" != "$EVENT_SHA" ] || [ "$(git rev-parse HEAD)" != "$SHA" ]; then
+            echo "::error::Selected tag, triggering commit and tested checkout must match."
+            exit 1
+          fi
+          # Preserve the existing informational trust policy.
+          if git verify-tag "$TAG_REF" 2>/dev/null; then
+            echo "Tag signature verified"
+          else
+            echo "::warning::Tag $TAG signature could not be verified (signing key not available in CI)"
+          fi
+          {
+            echo "tag=$TAG"
+            echo "sha=$SHA"
+            echo "tag-object=$TAG_OBJECT"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -97,35 +143,31 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: ${{ needs.test.outputs.sha }}
 
-      - name: Resolve tag
+      - name: Verify tested release source
         id: tag
         env:
-          INPUT_TAG: ${{ inputs.tag }}
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          TAG="${INPUT_TAG:-$REF_NAME}"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Verify tag is annotated
-        env:
-          TAG: ${{ steps.tag.outputs.tag }}
+          TAG: ${{ needs.test.outputs.tag }}
+          EXPECTED_SHA: ${{ needs.test.outputs.sha }}
+          EXPECTED_TAG_OBJECT: ${{ needs.test.outputs.tag-object }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          TAG_TYPE=$(git cat-file -t "$TAG")
-          if [ "$TAG_TYPE" != "tag" ]; then
-            echo "::error::Tag $TAG is lightweight (type: $TAG_TYPE). Only annotated/signed tags are allowed for releases."
+          if [ "$(git rev-parse HEAD)" != "$EXPECTED_SHA" ] ||
+             [ "$(git rev-parse --verify "refs/tags/${TAG}")" != "$EXPECTED_TAG_OBJECT" ]; then
+            echo "::error::Release checkout/tag no longer matches the tested source."
             exit 1
           fi
-          echo "Tag $TAG is annotated (type: $TAG_TYPE)"
-
-          # Attempt signature verification (informational)
-          if git tag -v "$TAG" 2>/dev/null; then
-            echo "Tag signature verified"
-          else
-            echo "::warning::Tag $TAG signature could not be verified (signing key not available in CI)"
+          ENCODED_TAG=$(jq -rn --arg tag "$TAG" '$tag | @uri')
+          CURRENT_TAG_OBJECT=$(gh api "repos/$REPO/git/ref/tags/$ENCODED_TAG" --jq '.object.sha')
+          if [ "$CURRENT_TAG_OBJECT" != "$EXPECTED_TAG_OBJECT" ]; then
+            echo "::error::Release tag was moved, replaced or deleted after validation."
+            exit 1
           fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
       - name: Generate release notes
         id: notes
@@ -237,6 +279,21 @@ jobs:
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: checksums.txt
+
+      - name: Recheck release tag before publication
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ needs.test.outputs.tag }}
+          EXPECTED_TAG_OBJECT: ${{ needs.test.outputs.tag-object }}
+        run: |
+          set -euo pipefail
+          ENCODED_TAG=$(jq -rn --arg tag "$TAG" '$tag | @uri')
+          CURRENT_TAG_OBJECT=$(gh api "repos/$REPO/git/ref/tags/$ENCODED_TAG" --jq '.object.sha')
+          if [ "$CURRENT_TAG_OBJECT" != "$EXPECTED_TAG_OBJECT" ]; then
+            echo "::error::Release tag was moved, replaced or deleted after validation."
+            exit 1
+          fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
