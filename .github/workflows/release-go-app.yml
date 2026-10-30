@@ -16,7 +16,7 @@ on:
         required: true
         type: string
       tag:
-        description: "Tag to release (e.g. v1.2.3). Defaults to github.ref_name. Override for workflow_dispatch backfills."
+        description: "Tag to release (e.g. v1.2.3). Must match the triggering tag ref and commit; dispatch backfills at that tag."
         required: false
         type: string
         default: ""
@@ -174,6 +174,7 @@ jobs:
       tag: ${{ steps.tag.outputs.tag }}
       version: ${{ steps.tag.outputs.version }}
       sha: ${{ steps.tag.outputs.sha }}
+      tag-object: ${{ steps.tag.outputs.tag-object }}
       is-prerelease: ${{ steps.flags.outputs.is_prerelease }}
       make-latest: ${{ steps.flags.outputs.make_latest }}
       notes: ${{ steps.notes.outputs.notes }}
@@ -188,13 +189,16 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ github.sha }}
 
       - name: Resolve tag
         id: tag
         env:
           INPUT_TAG: ${{ inputs.tag }}
           REF_NAME: ${{ github.ref_name }}
+          EVENT_REF: ${{ github.ref }}
+          EVENT_REF_TYPE: ${{ github.ref_type }}
+          EVENT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           TAG="${INPUT_TAG:-$REF_NAME}"
@@ -203,11 +207,24 @@ jobs:
             echo "::error::Tag '$TAG' is not a valid vMAJOR.MINOR.PATCH semver (e.g. v1.2.3, v1.2.3-rc1)"
             exit 1
           fi
-          SHA=$(git rev-parse "${TAG}^{commit}")
+          TAG_REF="refs/tags/$TAG"
+          git check-ref-format "$TAG_REF"
+          # Attestations use the OIDC event source even after a checkout.
+          if [ "$EVENT_REF_TYPE" != "tag" ] || [ "$EVENT_REF" != "$TAG_REF" ]; then
+            echo "::error::Run this workflow at the selected tag ref $TAG_REF."
+            exit 1
+          fi
+          TAG_OBJECT=$(git rev-parse --verify "$TAG_REF")
+          SHA=$(git rev-parse --verify "${TAG_REF}^{commit}")
+          if [ "$SHA" != "$EVENT_SHA" ] || [ "$(git rev-parse HEAD)" != "$SHA" ]; then
+            echo "::error::Selected tag, triggering commit and checkout must match."
+            exit 1
+          fi
           {
             echo "tag=$TAG"
             echo "version=${TAG#v}"
             echo "sha=$SHA"
+            echo "tag-object=$TAG_OBJECT"
           } >> "$GITHUB_OUTPUT"
 
       - name: Verify annotated tag
@@ -216,13 +233,13 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -euo pipefail
-          TAG_TYPE=$(git cat-file -t "$TAG")
+          TAG_TYPE=$(git cat-file -t "refs/tags/$TAG")
           if [ "$TAG_TYPE" != "tag" ]; then
             echo "::error::Tag $TAG is lightweight (type: $TAG_TYPE). Only annotated/signed tags are allowed."
             exit 1
           fi
           echo "Tag $TAG is annotated (type: $TAG_TYPE)"
-          if git tag -v "$TAG" 2>/dev/null; then
+          if git verify-tag "refs/tags/$TAG" 2>/dev/null; then
             echo "Tag signature verified"
           else
             echo "::warning::Tag $TAG signature not verifiable (signing key not available in CI — informational only)"
@@ -357,7 +374,7 @@ jobs:
       - name: Checkout at tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ needs.preflight.outputs.tag }}
+          ref: ${{ needs.preflight.outputs.sha }}
           persist-credentials: false
 
       - name: Set up Go
@@ -546,7 +563,7 @@ jobs:
       - name: Checkout at tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ needs.preflight.outputs.tag }}
+          ref: ${{ needs.preflight.outputs.sha }}
           persist-credentials: false
 
       - name: Download linux binaries from artifacts
@@ -605,6 +622,21 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Recheck release tag before image publication
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          EXPECTED_TAG_OBJECT: ${{ needs.preflight.outputs.tag-object }}
+        run: |
+          set -euo pipefail
+          ENCODED_TAG=$(jq -rn --arg tag "$TAG" '$tag | @uri')
+          CURRENT_TAG_OBJECT=$(gh api "repos/$REPO/git/ref/tags/$ENCODED_TAG" --jq '.object.sha')
+          if [ "$CURRENT_TAG_OBJECT" != "$EXPECTED_TAG_OBJECT" ]; then
+            echo "::error::Release tag was moved, replaced or deleted after validation."
+            exit 1
+          fi
 
       - name: Build and push
         id: build
@@ -852,6 +884,21 @@ jobs:
             echo "$DELIMITER"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Recheck release tag before publication
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          EXPECTED_TAG_OBJECT: ${{ needs.preflight.outputs.tag-object }}
+        run: |
+          set -euo pipefail
+          ENCODED_TAG=$(jq -rn --arg tag "$TAG" '$tag | @uri')
+          CURRENT_TAG_OBJECT=$(gh api "repos/$REPO/git/ref/tags/$ENCODED_TAG" --jq '.object.sha')
+          if [ "$CURRENT_TAG_OBJECT" != "$EXPECTED_TAG_OBJECT" ]; then
+            echo "::error::Release tag was moved, replaced or deleted after validation."
+            exit 1
+          fi
+
       - name: Create draft release + upload all assets
         # Two-phase publish (atomic from caller's perspective, two-phase
         # at API level): create as draft so all assets can upload, then
@@ -887,8 +934,15 @@ jobs:
           REPO: ${{ github.repository }}
           MAKE_LATEST: ${{ needs.preflight.outputs.make-latest }}
           IS_PRE: ${{ needs.preflight.outputs.is-prerelease }}
+          EXPECTED_TAG_OBJECT: ${{ needs.preflight.outputs.tag-object }}
         run: |
           set -euo pipefail
+          ENCODED_TAG=$(jq -rn --arg tag "$TAG" '$tag | @uri')
+          CURRENT_TAG_OBJECT=$(gh api "repos/$REPO/git/ref/tags/$ENCODED_TAG" --jq '.object.sha')
+          if [ "$CURRENT_TAG_OBJECT" != "$EXPECTED_TAG_OBJECT" ]; then
+            echo "::error::Release tag was moved, replaced or deleted after validation."
+            exit 1
+          fi
           gh release edit "$TAG" --repo "$REPO" \
             --draft=false \
             --latest="$MAKE_LATEST" \

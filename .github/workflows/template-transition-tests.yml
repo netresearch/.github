@@ -6,6 +6,9 @@ on:
       - scripts/drift_compare.py
       - scripts/check-drift.sh
       - scripts/test_drift_compare.py
+      - scripts/test_go_release_identity.py
+      - .github/workflows/golib-create-release.yml
+      - .github/workflows/release-go-app.yml
       - scripts/test_drift_compare_go.py
       - scripts/requirements-drift-tests.txt
       - templates/typo3-extension/.github/workflows/checks.yml
@@ -18,6 +21,9 @@ on:
       - scripts/drift_compare.py
       - scripts/check-drift.sh
       - scripts/test_drift_compare.py
+      - scripts/test_go_release_identity.py
+      - .github/workflows/golib-create-release.yml
+      - .github/workflows/release-go-app.yml
       - scripts/test_drift_compare_go.py
       - scripts/requirements-drift-tests.txt
       - templates/typo3-extension/.github/workflows/checks.yml
@@ -51,3 +57,8 @@ jobs:
           PYTHONPATH: ${{ runner.temp }}/drift-fixtures-python
           PYTHONDONTWRITEBYTECODE: '1'
         run: python3 -m unittest discover -s scripts -p 'test_drift_compare*.py' -v
+      - name: Check Go release identity without publishing
+        env:
+          PYTHONPATH: ${{ runner.temp }}/drift-fixtures-python
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 -m unittest discover -s scripts -p 'test_go_release_identity.py' -v
