@@ -241,7 +241,18 @@ def classify(consumer_root: Path, template_root: Path, intentional: set[str]):
     return missing, differing, cosmetic, escaped, transition
 
 
+def report_transitions(transition: list[str]) -> None:
+    """Print approved transition notices and their paths in the existing order."""
+    if ".github/workflows/checks.yml" in transition:
+        annotate("notice", "Approved Checks PR-concurrency transition (exact reviewed A/B documents).")
+    if any(rel in GO_CONCURRENCY_VARIANTS for rel in transition):
+        annotate("notice", "Approved Go PR-concurrency transition (exact reviewed A/B documents).")
+    for rel in transition:
+        print(f"  ↔ {rel}")
+
+
 def main(argv: list[str]) -> int:
+    """Compare governed files, report their classifications and return the verdict."""
     if len(argv) != 3:
         print(__doc__, file=sys.stderr)
         return 2
@@ -289,12 +300,7 @@ def main(argv: list[str]) -> int:
             print(f"  ~ {rel}")
 
     if transition:
-        if ".github/workflows/checks.yml" in transition:
-            annotate("notice", "Approved Checks PR-concurrency transition (exact reviewed A/B documents).")
-        if any(rel in GO_CONCURRENCY_VARIANTS for rel in transition):
-            annotate("notice", "Approved Go PR-concurrency transition (exact reviewed A/B documents).")
-        for rel in transition:
-            print(f"  ↔ {rel}")
+        report_transitions(transition)
 
     if escaped:
         annotate(
