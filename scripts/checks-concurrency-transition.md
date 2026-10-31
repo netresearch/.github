@@ -20,6 +20,15 @@ gets no compatibility with either obsolete version. Matching future documents
 still pass the normal comparator; the frozen-canonical fixture makes a new
 canonical semantic change a deliberate migration decision while this rule exists.
 
+The fingerprints hash the documents as written, including the harden-runner pin
+in the `gate` job, and the frozen set is not extended for a pin bump. Since the
+template moved to harden-runner v2.22.3, its document is in neither fingerprint,
+so this exception no longer fires for the current template: a consumer without
+the concurrency block is drift until it is synced. The comparator's pin
+tolerance does not bridge that gap, because a pin difference next to a
+concurrency difference stays drift. The fixture rebuilds both documents with the
+reviewed pin; a canonical change other than that pin still fails it.
+
 Accepted cross-version comparisons emit an explicit transition notice instead
 of describing an execution change as merely cosmetic. Missing, malformed and
 escaping files preserve the existing error behavior. Local `check-drift.sh` and

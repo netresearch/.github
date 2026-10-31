@@ -19,6 +19,10 @@
 #     that differs only in comments, key order or whitespace runs exactly
 #     the same and is reported as a notice, not a failure. Non-YAML files
 #     are still compared byte-for-byte.
+#   - A workflow file whose only difference is the full commit SHA of the same
+#     action, in a job-level or step-level `uses:`, is reported as a notice,
+#     not a failure, so a pin bump in the template or in a consumer does not
+#     fail unrelated pull requests. Any other `uses:` difference is drift.
 #   - Consumer's `.github/template.yaml` is metadata; its content is
 #     expected to differ per-repo (different intentional-drift list) and
 #     is never in the diff comparison.

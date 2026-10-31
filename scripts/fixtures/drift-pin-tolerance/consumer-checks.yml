@@ -1,0 +1,184 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: Netresearch DTT GmbH
+name: Checks
+
+on:
+  push:
+    branches: [main, master]
+  # `ready_for_review` is NOT in the default type set (opened, synchronize,
+  # reopened), and without it a pull request opened as a draft never gets its
+  # auto-approval: `pr-quality`'s auto-approve job is gated on
+  # `github.event.pull_request.draft == false`, so it skips while the PR is a
+  # draft and nothing re-runs it when the draft is lifted. The PR then sits at
+  # `reviewDecision: REVIEW_REQUIRED` with nothing red, and the merge tooling
+  # reports the Copilot review quota — true, and not the cause.
+  #
+  # The Go templates already carry this type set in their own pr-quality.yml;
+  # this template folded that job into `checks.yml` and lost it on the way.
+  #
+  # The scan jobs deliberately run on `ready_for_review` too; do not skip them
+  # there. This run posts its own `All security checks` check-run on the head
+  # SHA, and the gate passes skipped jobs. With the scans skipped, that
+  # check-run went green without one scan having run in it — while the run
+  # that did scan this SHA could still be in progress (its gate check-run only
+  # appears once every job it needs has finished) or could have failed. The
+  # required context must never be satisfied by a run that scanned nothing.
+  # Skipped callers also post bare-named check-runs (`betterleaks`, `zizmor`)
+  # that collide with the code-scanning contexts of the same name, and a
+  # skipped job counts as passed.
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  merge_group:
+  schedule:
+    - cron: '0 6 * * 1'
+
+permissions: {}
+
+# Superseded PR scans stop consuming runners. Every non-PR run has its own
+# group, including active merge groups and main/scheduled runs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Security + quality jobs with their explicit per-call-site permissions. This
+# file is byte-identical and drift-enforced across every typo3-extension — the
+# extension-specific test matrix lives in ci.yml (intentional-drift). Every
+# `uses:` job grants exactly the reusable's caller contract; no reliance on
+# default_workflow_permissions.
+#
+# ANY JOB ADDED BELOW MUST ALSO BE ADDED TO `gate.needs`. The gate is the only
+# context a ruleset requires, so a job missing from that list is a job whose
+# failure cannot block a merge — the coverage loss is silent, and nothing in CI
+# catches it. GitHub Actions does not support YAML anchors in workflow files,
+# so the list cannot be shared with the job definitions; it has to be kept in
+# step by hand.
+jobs:
+  security:
+    uses: netresearch/typo3-ci-workflows/.github/workflows/security.yml@main
+    permissions:
+      contents: read
+      security-events: write
+
+  betterleaks:
+    uses: netresearch/.github/.github/workflows/betterleaks.yml@main
+    permissions:
+      contents: read
+      security-events: write
+
+  zizmor:
+    uses: netresearch/.github/.github/workflows/zizmor.yml@main
+    permissions:
+      contents: read
+      security-events: write
+
+  fuzz:
+    uses: netresearch/typo3-ci-workflows/.github/workflows/fuzz.yml@main
+    permissions:
+      contents: read
+
+  license-check:
+    uses: netresearch/typo3-ci-workflows/.github/workflows/license-check.yml@main
+    permissions:
+      contents: read
+
+  # `auto` rather than the `actions` default: a TYPO3 extension that ships
+  # JavaScript had none of it analysed, because the default scans workflows
+  # only and GitHub disables code-scanning default setup — which did cover
+  # javascript-typescript — as soon as an advanced configuration uploads its
+  # first SARIF. Merging this file is what triggers that handover, so the
+  # narrow default silently removed a control that had been in place.
+  codeql:
+    uses: netresearch/.github/.github/workflows/codeql.yml@main
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    with:
+      languages: auto
+
+  scorecard:
+    if: github.event_name == 'schedule' || (github.event_name == 'push' && github.ref_name == github.event.repository.default_branch)
+    uses: netresearch/.github/.github/workflows/scorecard.yml@main
+    permissions:
+      contents: read
+      security-events: write
+      id-token: write
+      actions: read
+
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    uses: netresearch/.github/.github/workflows/dependency-review.yml@main
+    permissions:
+      contents: read
+      pull-requests: write
+
+  pr-quality:
+    if: github.event_name == 'pull_request'
+    uses: netresearch/.github/.github/workflows/pr-quality.yml@main
+    permissions:
+      contents: read
+      pull-requests: write
+
+  # One stable check name for this workflow, so a branch ruleset has something
+  # it can require on EVERY event.
+  #
+  # Requiring the individual job checks breaks a merge queue. Two of the jobs
+  # above are pull-request-only by nature — `dependency-review` compares the
+  # dependency delta of a pull request, `pr-quality` inspects its title, body
+  # and author — and a `uses:` job whose `if:` is false is skipped WITHOUT
+  # materialising the called workflow's job names, so `dependency-review /
+  # Dependency Review` and `pr-quality / Quality Gate` simply never appear on a
+  # merge_group ref. A ruleset requiring them holds every queue entry until
+  # `check_response_timeout_minutes` expires and then dequeues it. Measured
+  # 2026-08-05 on netresearch/t3x-nr-llm: a pull request sat in the queue past
+  # the 60-minute timeout waiting for contexts that cannot arrive.
+  #
+  # The same is true of the code-scanning checks (`CodeQL`, `betterleaks`,
+  # `zizmor`, `Opengrep OSS`): those are posted by the github-advanced-security
+  # app against the pull request, not by these jobs, so they are not requirable
+  # for a queue either. Require `All security checks` instead — it depends on
+  # every job here and its name does not change with the event.
+  #
+  # The gate does not block a zizmor finding: zizmor is report-only and its
+  # job succeeds whatever it finds (zizmor.yml). A finding blocks a pull
+  # request only through a ruleset `code_scanning` rule, which this gate does
+  # not replace.
+  gate:
+    name: All security checks
+    needs:
+      - security
+      - betterleaks
+      - zizmor
+      - fuzz
+      - license-check
+      - codeql
+      - scorecard
+      - dependency-review
+      - pr-quality
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      # `skipped` passes: a job that does not apply to this event has nothing
+      # to say about the commit. Only `failure` and `cancelled` fail the gate.
+      - name: Fail unless every job succeeded or was skipped
+        shell: bash
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          bad=$(jq -r '
+            to_entries[]
+            | select(.value.result != "success" and .value.result != "skipped")
+            | "\(.key)=\(.value.result)"' <<<"$RESULTS")
+          if [ -n "$bad" ]; then
+            echo "::error::Security checks gate failed — $(tr "\n" " " <<<"$bad")"
+            exit 1
+          fi
+          jq -r 'to_entries[] | "  \(.key): \(.value.result)"' <<<"$RESULTS"
+          echo "All jobs succeeded or were skipped."
