@@ -8,10 +8,11 @@ import unittest
 # A pinned action reference, `uses: owner/repo@<40-hex sha> # vX.Y.Z`. Renovate
 # rewrites these lines on every action release, which is not a change to the
 # legacy gate this test freezes.
-ACTION_PIN = re.compile(rb"^(\s*(?:- )?uses: [\w.-]+/[\w./-]+@)[0-9a-f]{40}(?: #[^\n]*)?$", re.MULTILINE)
+ACTION_PIN = re.compile(rb"^([ \t]*(?:- )?uses: [\w.-]+/[\w./-]+@)[0-9a-f]{40}(?: # v\d+(?:\.\d+){0,2})?$", re.MULTILINE)
 
 
 def fingerprint(text):
+    """Exclude only full action pins and complete numeric version annotations."""
     return hashlib.sha256(ACTION_PIN.sub(rb"\1<pin>", text)).hexdigest()
 
 
