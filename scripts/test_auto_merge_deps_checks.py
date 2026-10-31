@@ -48,6 +48,12 @@ set -euo pipefail
 d="$STUB_DIR"
 case "$*" in
   "api graphql "*)
+    # The flags the shipped call cannot do without: without --paginate only
+    # the first 100 contexts are read, without --slurp the pages are not one
+    # JSON array, and without the number nothing names the pull request.
+    case " $* " in *" --paginate "*) ;; *) echo "graphql call without --paginate" >&2; exit 2 ;; esac
+    case " $* " in *" --slurp "*) ;; *) echo "graphql call without --slurp" >&2; exit 2 ;; esac
+    case " $* " in *" -F number=1 "*) ;; *) echo "graphql call without the PR number" >&2; exit 2 ;; esac
     n=$(cat "$d/graphql.count" 2>/dev/null || echo 0)
     n=$((n + 1)); echo "$n" > "$d/graphql.count"
     total=$(ls "$d"/poll-*.json | wc -l)
@@ -209,17 +215,37 @@ class SelectTest(unittest.TestCase):
 
     def test_run_for_another_event_does_not_supersede(self):
         recorded = load("t3x-nr-vault-478")
-        failing = next(node for node in nodes(recorded) if node.get("name") == "ci / All CI checks"
-                       and run_of(node) == NEW_CI_RUN)
-        failing["conclusion"] = "FAILURE"
-        other_event = copy.deepcopy(failing)
-        other_event.update(databaseId=failing["databaseId"] + 1000, name="ci / Other event",
+        cancelled = next(node for node in nodes(recorded) if node.get("name") == "ci / All CI checks"
+                         and run_of(node) == NEW_CI_RUN)
+        cancelled["conclusion"] = "CANCELLED"
+        other_event = copy.deepcopy(cancelled)
+        other_event.update(databaseId=cancelled["databaseId"] + 1000, name="ci / Other event",
                            conclusion="SUCCESS")
         other_event["checkSuite"]["workflowRun"].update(databaseId=NEW_CI_RUN + 1000,
                                                         event="pull_request_target")
         recorded[0]["data"]["repository"]["pullRequest"]["commits"]["nodes"][0]["commit"][
             "statusCheckRollup"]["contexts"]["nodes"].append(other_event)
-        self.assertEqual(select(recorded)["failed"], ["ci / All CI checks"])
+        self.assertEqual(select(recorded)["cancelled"], ["ci / All CI checks"])
+
+    def test_failure_of_superseded_run_counts_without_a_successor(self):
+        # The newer run does not run the failing job at all (a job `if:` that
+        # depends on the event action, say), so nothing replaces the failure.
+        recorded = load("t3x-nr-vault-478")
+
+        def change(node):
+            if run_of(node) == OLD_CI_RUN and node.get("name") == "ci / All CI checks":
+                node["conclusion"] = "FAILURE"
+
+        def keep(node):
+            return not (run_of(node) == NEW_CI_RUN and node.get("name") == "ci / All CI checks")
+
+        self.assertEqual(select(rewrite(recorded, keep, change))["failed"], ["ci / All CI checks"])
+
+    def test_failure_of_superseded_run_is_replaced_by_a_successor(self):
+        recorded = rewrite(load("t3x-nr-vault-478"), lambda n: True,
+                           lambda n: n.update(conclusion="FAILURE") if run_of(n) == OLD_CI_RUN
+                           and n.get("conclusion") == "SUCCESS" else None)
+        self.assertEqual(select(recorded)["failed"], [])
 
     def test_rerun_attempt_replaces_earlier_check_of_same_run(self):
         recorded = load("t3x-nr-vault-478")
@@ -256,6 +282,13 @@ class GateTest(unittest.TestCase):
         code, output, merges, polls = gate([load("t3x-nr-llm-1197")])
         self.assertEqual((code, merges), (0, []), output)
         self.assertIn("Waiting for 1 check(s)", output)
+
+    def test_own_check_alone_is_merged(self):
+        own = rewrite(load("ldap-manager-717"), lambda n: n.get("name", "").endswith(
+            "Auto-merge dependency PRs"), lambda n: n.update(status="IN_PROGRESS", conclusion=None))
+        self.assertEqual(len(list(nodes(own))), 1)
+        code, output, merges, polls = gate([own])
+        self.assertEqual((code, len(merges), polls), (0, 1, 1), output)
 
     def test_empty_check_list_is_not_merged(self):
         empty = rewrite(load("ldap-manager-717"), lambda n: False, lambda n: None)

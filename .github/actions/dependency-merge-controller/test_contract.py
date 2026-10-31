@@ -13,7 +13,7 @@ class ContractTest(unittest.TestCase):
         root = Path(__file__).resolve().parents[3]
         legacy = root / ".github/workflows/auto-merge-deps.yml"
         self.assertEqual(hashlib.sha256(legacy.read_bytes()).hexdigest(),
-                         "1c33d4dfd21d6fe5ef7db3c2f2a7cb8bf0f477442e70ecc3b766010273b74419")
+                         "30939bb2323e1a9f98003190672aeb086d79fcbdd95f83b3c2286ed9127f733c")
 
 
 if __name__ == "__main__":
