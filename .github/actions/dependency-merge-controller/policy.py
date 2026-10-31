@@ -33,13 +33,34 @@ def validate_version(policy):
     """Dispatch explicit policy versions without silently dropping v2 duties."""
     if policy.get("version") not in {1, 2} or not policy.get("required_checks"):
         raise Blocked("A nonempty version-1 or version-2 required-check inventory is required")
-    if policy["version"] == 1 and {"conditional_checks", "base_ref"}.intersection(policy):
-        raise Blocked("Conditional checks and base_ref require policy version 2")
+    if policy["version"] == 1 and {"conditional_checks", "base_ref", "completion_wakeups"}.intersection(policy):
+        raise Blocked("Conditional checks, base_ref and completion wakeups require policy version 2")
     if policy["version"] == 2:
         try:
             validate_conditions(policy)
         except (ApiError, KeyError, TypeError, ValueError) as error:
             raise Blocked("Invalid version-2 applicability policy: " + str(error)) from error
+
+
+def completion_wakeups(policy):
+    """Validate scheduling hints separately from every gate and advisory duty."""
+    rows = policy.get("completion_wakeups", [])
+    if "completion_wakeups" in policy and policy.get("version") != 2:
+        raise Blocked("Completion wakeups require policy version 2")
+    if not isinstance(rows, list):
+        raise Blocked("Completion wakeups must be a list")
+    producers = {(check["workflow"], event) for check in declared_checks(policy) for event in check["events"]}
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {"workflow", "events"}:
+            raise Blocked("Invalid completion wakeup declaration")
+        workflow = row["workflow"]
+        if (not isinstance(workflow, str) or not re.fullmatch(r"[A-Za-z0-9_-]+\.ya?ml", workflow)
+                or row["events"] != ["pull_request_target"] or workflow in seen
+                or (workflow, "pull_request_target") in producers):
+            raise Blocked("Invalid, duplicate or redundant completion wakeup identity")
+        seen.add(workflow)
+    return rows
 
 
 def validate_policy(policy):
@@ -59,6 +80,7 @@ def validate_policy(policy):
         raise Blocked("minimum_approvals must be a nonnegative integer")
     if names.intersection(policy.get("advisory_checks", [])):
         raise Blocked("A required check cannot also be advisory")
+    completion_wakeups(policy)
 
 
 def eligible(context, snapshot, policy):
@@ -265,11 +287,15 @@ def require_current_reviews(snapshot, minimum):
         raise Waiting("Review threads remain unresolved")
 
 
-def decide(context, snapshot, policy, intent):
+def decide(context, snapshot, policy, intent, *, inspect_queued=False):
+    """Keep production's queued no-op; only explicit v2 observation inspects it."""
     try:
+        if (not isinstance(inspect_queued, bool) or (inspect_queued
+                and (policy.get("version") != 2 or context.get("observe_only") is not True))):
+            raise Blocked("Queued readiness inspection requires version-2 observation")
         eligible(context, snapshot, policy)
         pr = snapshot["pr"]
-        if pr["queued"]:
+        if pr["queued"] and not inspect_queued:
             return "queued", "Existing queue entry remains untouched"
         check_intent(context, snapshot, policy, intent)
         minimum = branch_review_minimum(snapshot, policy)

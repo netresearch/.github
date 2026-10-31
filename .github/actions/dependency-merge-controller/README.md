@@ -46,6 +46,13 @@ ignored. The native queue remains the final enforcement of branch rules,
 Code Owners, signatures and review requirements. Reconcile classic protection
 separately with administrative read access before first adoption.
 
+GraphQL PR authors must have GitHub's `Bot` type. Only the exact
+`renovate`/`renovate[bot]` and `dependabot`/`dependabot[bot]` representations map
+to the existing canonical bot identities. Users, missing types and unknown bots
+are rejected. The existing snapshot query requests the type without adding a
+request, in both policy versions. Original event and workflow-run actors keep
+their canonical trusted-actor checks; this mapping does not create bot intent.
+
 ## Version 2: explicit conditional PR checks
 
 Version 1 retains its unconditional checks, defaults and API demand. The new
@@ -258,12 +265,55 @@ than the controller inventory and approval minimum. Human activation is not a
 substitute for full controller readiness. `GITHUB_TOKEN` metadata activity also
 does not guarantee a follow-on workflow run.
 
+## Completion wakeups and observation
+
+An optional v2 `completion_wakeups` list may declare an existing same-repository
+workflow whose successful bot completion requests another evaluation:
+
+```json
+"completion_wakeups": [
+  {"workflow": "auto-merge-deps.yml", "events": ["pull_request_target"]}
+]
+```
+
+Omission means an empty list. Each entry has exactly these two fields, with a
+bare canonical workflow filename and exactly this event list. Version 1 rejects
+the field, even when empty. Invalid, duplicate or redundant declared-producer
+identities, intent paths and the evaluator's own path are rejected. The full
+canonical policy digest binds these hints to intent just like every other field.
+The evaluator caller must independently subscribe to each exact workflow display
+name, with completed events and dependency-branch filters; filenames alone do
+not configure GitHub scheduling.
+
+The controller re-reads the run's actual identity, repository/source, current
+dependency branch/head and exactly one open PR. Only a successful completion
+with the original recognized bot actor can use a hint. A payload name cannot
+authorize it. Hints never enter required/conditional/advisory inventories or
+workflow-readiness duties, and add no API calls to an evaluation. Full workflow
+discovery, visible additional pending/failed checks, native rules, reviews,
+removal history and separate completed-origin intent verification remain intact.
+For the legacy merger, its polling deadline exits successfully; an actual failed,
+cancelled or timed-out job remains blocking. This adds a natural completion
+wakeup, not polling, a readiness exception or guaranteed event delivery.
+
 Set `observe-only: true` for a native pilot. It creates owned intent/receipt
 artifacts but never approves a PR or enqueues, and never mints an App token.
 The adapter separately rejects all REST writes and GraphQL mutations even when
 marked `write=False`. After two fresh ready snapshots it reports
-`observed-ready`; an already queued PR is `observed-existing`, never a claimed
-insertion. Use distinct observer producer/evaluator paths, for example
+`observed-ready`. Version 2 observation also evaluates an already queued PR
+through both complete predicates, including valid intent and every review/check
+guard. If the final snapshot is queued it reports `observed-ready-existing`,
+records `queue_present` in the receipt and attempts zero mutations. This proves
+readiness plus the final existing-queue fact, never controller insertion,
+continuous membership or eventual merge. Queue state can change between reads;
+the full removal/history and immutable head/base/applicability checks still apply.
+An already queued v2 observation therefore uses two full snapshots instead of
+one: 40/42 requests in the ahead/diverged small fixtures, excluding context and
+intent recovery; real pages and producers retain their bounded actual costs.
+Unqueued observation adds no snapshot or request. Version 1 observation retains
+the one-read `observed-existing` result, which proves no readiness. Every
+enforcing queued decision retains its existing one-read no-op. Use distinct
+observer producer/evaluator paths, for example
 `dependency-controller-observe-intent.yml` and `dependency-controller-observe.yml`.
 Their path and mode bindings prevent observer artifacts authorizing production.
 At cutover disable the observer and obtain fresh intent from the production
@@ -275,6 +325,25 @@ origin run/artifact, policy digest, required inventory, decision and API/mutatio
 attempt counts. Observer receipts are retained as artifacts for seven days.
 An observed ready predicate alone does not establish a native artifact handoff;
 the receipt must also show the actual trusted completed origin and artifact.
+
+Version 2 receipts also include `api_rate_limits`, at most six last-response
+samples: read/write credential role by core/GraphQL/unknown resource. Each row
+contains the existing API attempt ordinal and safe numeric limit, remaining,
+used and reset headers. Unknown or malformed values are null; genuine zero
+remains zero. Header names are case-insensitive, and unknown resource strings,
+other headers, URLs, credentials and bodies are never emitted. New responses
+replace the same role/resource sample, including missing values and reset windows.
+State persists across freshness snapshots; it is not a time series or minimum.
+
+These roles identify the existing request's write flag, not separate credentials
+or quota buckets. A prepare approval uses the read role; an enqueue uses write.
+Both may consume the same actual allowance. Concurrent consumers can change
+used/remaining, so sample differences are not this controller's GraphQL points.
+The measurements prove neither capacity nor savings. Original GitHub success,
+HTTP-error and artifact302 headers are sampled; signed-storage headers are
+ignored and receive no GitHub token. No request, query, retry, sleep, decision or
+permission is added. Version 1 receipts remain unchanged and collect no samples.
+
 A new reusable must exist on `@main` before migration. Count the initial producer
 and later evaluator allocations, completion/review evaluations and temporary
 observer work separately in organization-wide measurements.
