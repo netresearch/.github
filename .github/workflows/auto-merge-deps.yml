@@ -176,6 +176,55 @@ jobs:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           STRATEGY_OVERRIDE: ${{ inputs.merge-strategy }}
           CHECKS_TIMEOUT_MINUTES: ${{ inputs.checks-timeout-minutes || 15 }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          # Every check run and commit status on the head commit, each check
+          # run with the workflow run that produced it. `gh pr checks` cannot
+          # be used for this: it keeps one entry per name, chosen by start
+          # time, so a cancelled check of a superseded run can hide the queued
+          # check of the run that replaced it (#561). The workflow-run fields
+          # are the ones `gh pr checks` itself reads, so they need no
+          # permission beyond the two in CALLER REQUIREMENTS.
+          CHECKS_QUERY: >-
+            query($owner: String!, $repo: String!, $number: Int!, $endCursor: String) {
+            repository(owner: $owner, name: $repo) { pullRequest(number: $number) {
+            commits(last: 1) { nodes { commit { statusCheckRollup {
+            contexts(first: 100, after: $endCursor) {
+            pageInfo { hasNextPage endCursor }
+            nodes { __typename
+            ... on CheckRun { databaseId name status conclusion
+            checkSuite { workflowRun { databaseId event workflow { databaseId } } } }
+            ... on StatusContext { context state } } } } } } } } } }
+          # Reduces the pages of CHECKS_QUERY to the checks that gate the
+          # merge; scripts/test_auto_merge_deps_checks.py runs this program.
+          #
+          # A workflow run is superseded when a newer run of the same workflow
+          # for the same event exists on the head commit - typically a
+          # duplicate `pull_request` delivery whose first run the caller's
+          # concurrency group cancelled. Its checks are dropped, including
+          # the ones with names no later run produces (a matrix job cancelled
+          # before its matrix was expanded). Within a run, the latest check
+          # per name counts, so a re-run attempt replaces the one before it.
+          # Commit statuses and checks from other apps are kept unchanged.
+          CHECKS_SELECT: |-
+            [.[].data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]?]
+            | map(if .__typename == "CheckRun" then
+                    {id: .databaseId, name: .name,
+                     state: (if .status == "COMPLETED" then (.conclusion // "PENDING") else .status end),
+                     workflow: .checkSuite.workflowRun.workflow.databaseId,
+                     event: .checkSuite.workflowRun.event,
+                     run: .checkSuite.workflowRun.databaseId}
+                  else {id: null, name: .context, state: .state, workflow: null, event: null, run: null} end)
+            | map(select((.name | endswith("Auto-merge dependency PRs")) | not))
+            | (map(select(.run != null and .workflow != null))
+               | group_by([.workflow, .event])
+               | map({key: "\(.[0].workflow)/\(.[0].event)", value: (map(.run) | max)})
+               | from_entries) as $newest
+            | map(select(.run == null or .workflow == null or .run == $newest["\(.workflow)/\(.event)"]))
+            | group_by([.run, .name]) | map(max_by(.id // 0))
+            | {total: length,
+               failed: [.[] | select(.state | IN("FAILURE", "ERROR", "TIMED_OUT", "STARTUP_FAILURE", "ACTION_REQUIRED")) | .name],
+               cancelled: [.[] | select(.state == "CANCELLED") | .name],
+               pending: [.[] | select(.state | IN("PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", "EXPECTED")) | .name]}
         run: |
           set -euo pipefail
 
@@ -365,24 +414,46 @@ jobs:
             # until the timeout, and orphaning every bot PR in a repo without
             # required checks. `endswith` matches whether the caller prefixes it
             # or not (this reusable owns the job name that forms the suffix).
+            # CHECKS_SELECT applies that exclusion.
             #
             # A FAILED API call must never be read as "no checks": falling back
-            # to an empty array here would make the two counters below zero and
+            # to an empty array here would make the counters below zero and
             # the loop would conclude everything passed and merge an unverified
-            # PR on a transient error. Retry until the deadline instead.
-            if ! CHECKS=$(gh pr checks "$PR_URL" --json name,state \
-              --jq '[.[] | select((.name | endswith("Auto-merge dependency PRs")) | not)]' 2>/dev/null); then
+            # PR on a transient error. Retry until the deadline instead. An
+            # empty check list is waited on for the same reason.
+            if ! PAGES=$(gh api graphql --paginate --slurp -F owner="${REPO%%/*}" -F repo="${REPO#*/}" \
+                   -F number="$PR_NUMBER" -f query="$CHECKS_QUERY" 2>/dev/null) ||
+               ! SUMMARY=$(printf '%s' "$PAGES" | jq -c "$CHECKS_SELECT" 2>/dev/null); then
               echo "Could not read the check list — retrying."
               sleep 15
               continue
             fi
 
-            FAILED=$(printf '%s' "$CHECKS" | jq '[.[] | select(.state == "FAILURE" or .state == "ERROR" or .state == "TIMED_OUT" or .state == "CANCELLED")] | length')
-            PENDING=$(printf '%s' "$CHECKS" | jq '[.[] | select(.state == "PENDING" or .state == "QUEUED" or .state == "IN_PROGRESS" or .state == "WAITING")] | length')
+            TOTAL=$(printf '%s' "$SUMMARY" | jq '.total')
+            FAILED=$(printf '%s' "$SUMMARY" | jq '.failed | length')
+            CANCELLED=$(printf '%s' "$SUMMARY" | jq '.cancelled | length')
+            PENDING=$(printf '%s' "$SUMMARY" | jq '.pending | length')
 
             if [ "$FAILED" != "0" ]; then
-              echo "::notice::${FAILED} check(s) failed — approved, not merged."
+              echo "::notice::${FAILED} check(s) failed — approved, not merged: $(printf '%s' "$SUMMARY" | jq -r '.failed | join(", ")')"
               exit 0
+            fi
+
+            # A cancelled check is not final. The run that replaces a
+            # cancelled one is created at the same moment, but its checks can
+            # appear only on a later poll; until then the cancelled run is the
+            # newest one visible. So wait, and let the deadline settle a
+            # cancellation that nothing replaces.
+            if [ "$CANCELLED" != "0" ]; then
+              echo "Waiting for a run to replace ${CANCELLED} cancelled check(s): $(printf '%s' "$SUMMARY" | jq -r '.cancelled | join(", ")')"
+              sleep 15
+              continue
+            fi
+
+            if [ "$TOTAL" = "0" ]; then
+              echo "No checks reported yet — waiting."
+              sleep 15
+              continue
             fi
 
             if [ "$PENDING" = "0" ]; then
