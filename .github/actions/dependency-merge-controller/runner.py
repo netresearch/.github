@@ -13,7 +13,7 @@ import urllib.request
 import zipfile
 
 from policy import (BOTS, Blocked, check_intent, completion_wakeups, decide,
-                    declared_checks, digest, initial_intent, validate_policy)
+                    declared_checks, digest, initial_intent, observer_api_attempt_limit, validate_policy)
 from api_target import ApiError, positive_id, target_url
 from job_binding import bind_check, json_id, run_revision
 from changed_paths import (ANCHOR_FIELDS, anchor, closing_query, comparison, conditional_selection,
@@ -77,6 +77,23 @@ def rate_limit_sample(headers, credential_kind, api_call):
 def rate_limit_rows(samples):
     """Emit at most six last samples with stable ordering including null resource."""
     return sorted(samples.values(), key=lambda row: (row["credential_kind"], row["resource"] or ""))
+
+
+def configured_observer_limit(policy, observe_only):
+    """Reject a configured ceiling outside observation before any controller API."""
+    limit = observer_api_attempt_limit(policy)
+    if limit is not None and observe_only is not True:
+        raise ApiError("Observer API attempt limit requires observation mode")
+    return limit
+
+
+def api_attempt_budget_receipt(api):
+    """Expose truthful configured usage and denial without changing default receipts."""
+    limit = getattr(api, "observer_api_attempt_limit", None)
+    if limit is None:
+        return {}
+    return {"api_attempt_budget": {"limit": limit, "used": api.api_calls,
+                                   "exhausted": api.api_attempt_budget_exhausted}}
 
 
 def graphql_bot_author(author):
@@ -180,6 +197,8 @@ class GitHub:
         self.api_calls = 0
         self.mutation_attempts = 0
         self.api_rate_limits = {}
+        self.observer_api_attempt_limit = configured_observer_limit(self.policy, observe_only)
+        self.api_attempt_budget_exhausted = False
 
     def api_url(self, path, method="GET"):
         return target_url(self.base, self.repository, path, method)
@@ -187,6 +206,7 @@ class GitHub:
     def request(self, path, method="GET", data=None, write=False, binary=False):
         self.guard_operation(path, method, data, write)
         url = self.api_url(path, method)
+        self.check_api_attempt_budget()
         self.api_calls += 1
         encoded = json.dumps(data).encode() if data is not None else None
         headers = {"Authorization": "Bearer " + (self.write_token if write else self.token),
@@ -217,6 +237,12 @@ class GitHub:
         if len(body) > MAX_BYTES:
             raise ApiError("GitHub response exceeds the bounded response size")
         return (body if binary else json.loads(body)), response_headers
+
+    def check_api_attempt_budget(self):
+        """Deny the next permitted attempt before increment, request or opener creation."""
+        if self.observer_api_attempt_limit is not None and self.api_calls >= self.observer_api_attempt_limit:
+            self.api_attempt_budget_exhausted = True
+            raise ApiError("Observer API attempt budget exhausted")
 
     def record_rate_limits(self, headers, write):
         """Retain one v2 response per existing credential-role/resource pair."""
@@ -747,6 +773,7 @@ def write_receipt(api, context, policy, phase, intent, state, reason):
                "mutation_attempts": getattr(api, "mutation_attempts", 0),
                "api_calls": getattr(api, "api_calls", 0)}
     if policy.get("version") == 2:
+        receipt.update(api_attempt_budget_receipt(api))
         receipt["api_rate_limits"] = rate_limit_rows(getattr(api, "api_rate_limits", {}))
         receipt["conditional_checks"] = policy.get("conditional_checks")
         receipt["applicability"] = snapshot.get("applicability")

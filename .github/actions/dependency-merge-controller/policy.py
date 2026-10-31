@@ -63,6 +63,16 @@ def completion_wakeups(policy):
     return rows
 
 
+def observer_api_attempt_limit(policy):
+    """Validate only the optional version-2 integer ceiling, leaving absence inert."""
+    if "observer_api_attempt_limit" not in policy:
+        return None
+    limit = policy["observer_api_attempt_limit"]
+    if policy.get("version") != 2 or type(limit) is not int or not 1 <= limit <= 64:
+        raise Blocked("observer_api_attempt_limit requires a version-2 integer from 1 to 64")
+    return limit
+
+
 def validate_policy(policy):
     """Validate canonical identities, approval minima and advisory separation."""
     validate_version(policy)
@@ -81,6 +91,7 @@ def validate_policy(policy):
     if names.intersection(policy.get("advisory_checks", [])):
         raise Blocked("A required check cannot also be advisory")
     completion_wakeups(policy)
+    observer_api_attempt_limit(policy)
 
 
 def eligible(context, snapshot, policy):

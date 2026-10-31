@@ -348,6 +348,34 @@ A new reusable must exist on `@main` before migration. Count the initial produce
 and later evaluator allocations, completion/review evaluations and temporary
 observer work separately in organization-wide measurements.
 
+### Optional bounded observer measurement
+
+Version-2 observation may explicitly set `observer_api_attempt_limit` to a JSON
+integer from 1 through 64. Absence preserves every existing default. Zero, null,
+booleans, strings, fractions and larger values are invalid; version 1 and
+enforcing clients reject the configured key before any controller request.
+The complete policy digest includes it, so both phases need the same policy
+and old intent cannot authorize a changed or removed limit.
+
+The existing per-instance attempt counter spans context, intent recovery and
+every fresh snapshot. After the original operation/target guards, the next
+attempt beyond the configured limit is denied before increment or API opener
+creation. REST and GraphQL, errors and original artifact302 responses all count;
+there is no retry, fallback or throttle. Exhaustion emits a blocked receipt,
+never partial readiness or successful prepared intent. Existing artifacts and
+available safe header samples remain intact.
+
+Only configured receipts add `api_attempt_budget` with `limit`, `used` and
+`exhausted`. Usage equals `api_calls`; exhausted becomes true only after an
+additional request was denied, not merely after successful request64.
+This bounds joint authenticated API attempts, not GraphQL points or available
+quota. Two separately guarded single-use invocations at64 permit at most128
+such attempts; ordinary callback fanout is not bounded by this policy alone.
+Signed-storage traffic, artifact-uploader/metadata actions and setup/hardening
+remain separately disclosed outside the Python counter. Real inventories may
+exhaust the ceiling and yield inconclusive measurement. No spare capacity,
+full-observer admission or production adoption is established by this feature.
+
 Run offline fixtures with:
 
 ```sh
