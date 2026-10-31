@@ -247,6 +247,15 @@ class SelectTest(unittest.TestCase):
                            and n.get("conclusion") == "SUCCESS" else None)
         self.assertEqual(select(recorded)["failed"], [])
 
+    def test_commit_status_and_check_of_same_name_both_count(self):
+        recorded = load("t3x-nr-llm-1197")
+        contexts = recorded[0]["data"]["repository"]["pullRequest"]["commits"]["nodes"][0]["commit"][
+            "statusCheckRollup"]["contexts"]["nodes"]
+        contexts.append({"__typename": "StatusContext", "context": "shared", "state": "FAILURE"})
+        contexts.append({"__typename": "CheckRun", "databaseId": 1, "name": "shared", "status": "COMPLETED",
+                         "conclusion": "SUCCESS", "checkSuite": {"workflowRun": None}})
+        self.assertEqual(select(recorded)["failed"], ["shared"])
+
     def test_rerun_attempt_replaces_earlier_check_of_same_run(self):
         recorded = load("t3x-nr-vault-478")
         target = next(node for node in nodes(recorded) if node.get("name") == "ci / All CI checks"

@@ -212,12 +212,12 @@ jobs:
           CHECKS_SELECT: |-
             [.[].data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]?]
             | map(if .__typename == "CheckRun" then
-                    {id: .databaseId, name: .name,
+                    {type: "check", id: .databaseId, name: .name,
                      state: (if .status == "COMPLETED" then (.conclusion // "PENDING") else .status end),
                      workflow: .checkSuite.workflowRun.workflow.databaseId,
                      event: .checkSuite.workflowRun.event,
                      run: .checkSuite.workflowRun.databaseId}
-                  else {id: null, name: .context, state: .state, workflow: null, event: null, run: null} end)
+                  else {type: "status", id: null, name: .context, state: .state, workflow: null, event: null, run: null} end)
             | length as $seen
             | map(select((.name | endswith("Auto-merge dependency PRs")) | not))
             | (map(select(.run != null and .workflow != null))
@@ -229,7 +229,7 @@ jobs:
                | from_entries) as $current
             | map(select(.run == null or .workflow == null or .run == $newest["\(.workflow)/\(.event)"]
                          or (.state != "CANCELLED" and ($current["\(.workflow)/\(.event)/\(.name)"] | not))))
-            | group_by([.run, .name]) | map(max_by(.id // 0))
+            | group_by([.type, .run, .name]) | map(max_by(.id // 0))
             | {seen: $seen, total: length,
                failed: [.[] | select(.state | IN("FAILURE", "ERROR", "TIMED_OUT", "STARTUP_FAILURE", "ACTION_REQUIRED")) | .name],
                cancelled: [.[] | select(.state == "CANCELLED") | .name],
@@ -432,7 +432,7 @@ jobs:
             # list without even this job's own check is waited on for the same
             # reason, as `gh pr checks` failing on an empty list was; a list
             # with nothing but the own check passes, as it did before.
-            if ! PAGES=$(gh api graphql --paginate --slurp -F owner="${REPO%%/*}" -F repo="${REPO#*/}" \
+            if ! PAGES=$(gh api graphql --paginate --slurp -f owner="${REPO%%/*}" -f repo="${REPO#*/}" \
                    -F number="$PR_NUMBER" -f query="$CHECKS_QUERY" 2>/dev/null) ||
                ! SUMMARY=$(printf '%s' "$PAGES" | jq -c "$CHECKS_SELECT" 2>/dev/null); then
               echo "Could not read the check list — retrying."
