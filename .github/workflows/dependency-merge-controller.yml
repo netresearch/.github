@@ -12,7 +12,7 @@ on:
         type: boolean
         default: false
       policy:
-        description: Version-1 canonical required-check JSON from the trusted caller.
+        description: Versioned canonical required-check JSON from the trusted caller.
         type: string
         required: true
       caller-workflow:

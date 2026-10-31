@@ -46,6 +46,92 @@ ignored. The native queue remains the final enforcement of branch rules,
 Code Owners, signatures and review requirements. Reconcile classic protection
 separately with administrative read access before first adoption.
 
+## Version 2: explicit conditional PR checks
+
+Version 1 retains its unconditional checks, defaults and API demand. The new
+`base_ref` and `conditional_checks` fields require version 2; under version 1
+they are rejected rather than silently ignoring a declared obligation. All
+native required contexts must still appear in **unconditional** `required_checks`.
+A context declared only conditionally cannot cover an active branch rule.
+Every required check still needs a real completed successful current job;
+skipped jobs and status aliases are never accepted.
+
+For version 2, keep the complete unconditional inventory and add declarations
+in this form (one entry is an illustration, not a complete repository policy):
+
+```json
+{
+  "version": 2,
+  "base_ref": "main",
+  "required_checks": [
+    {"name": "ci / All CI checks", "app_id": 15368,
+     "workflow": "ci.yml", "events": ["pull_request"]}
+  ],
+  "conditional_checks": [
+    {"name": "docs / Render Documentation", "app_id": 15368,
+     "workflow": "docs.yml", "events": ["pull_request"],
+     "workflow_blob_oid": "823872351b0accbfb818fed642b26132dea4aaae",
+     "paths": {"exact": [".github/workflows/docs.yml"],
+               "prefix": ["Documentation/"]}}
+  ]
+}
+```
+
+Conditions support only case-sensitive literal ASCII file paths and directory
+prefixes ending in `/`. Globs, negation, whitespace, encoded paths, traversal and
+normalization are unsupported. Exact and prefix lists are both required, with
+at least one path between them. Names must be unique across both inventories
+and cannot be advisory. Multiple jobs from one workflow must declare identical
+paths, PR-only events and blob OID; every applicable job is mandatory.
+
+The caller blob OID pins the exact separately reviewed workflow bytes at both
+base and head. This is independent of the reusable `@main` convention. Check all
+declared caller OIDs even for nonmatching diffs, so changed trigger rules cannot
+make a stale condition silently waive a producer. A workflow-changing PR with
+different base/head blobs cannot be repaired by changing the single policy pin.
+It needs separately reviewed native/manual protected handling. Refresh the
+canonical pin after integration, when both evaluated revisions contain the same
+reviewed workflow. Old branches with different blobs remain automatically blocked.
+
+Each v2 snapshot reads the live `baseRef.target.oid` as its current base, retaining
+the distinct PR-associated `baseRefOid` as a separate anchor. It compares full
+immutable SHAs, accepts only complete 1–249 head-side commits and 1–299 unique
+ordinary added/modified/removed files, and requires the file count to equal
+GraphQL `changedFiles`. Renames/non-null previous names, unsupported paths,
+truncation, unknown/behind/identical history and any API uncertainty block.
+For diverged branches a second immutable merge-base-to-head comparison must
+agree on the complete commits and normalized files; no bot branch rewrite is
+required. The compare files cap is 300 and pagination cannot recover omitted
+files. [Compare API](https://docs.github.com/en/rest/commits/commits#compare-two-commits).
+
+A final combined GraphQL read verifies live/associated base, head, branch,
+repositories, potential test merge, changed-file count and every pinned blob.
+Both full ready snapshots must have identical applicability evidence. Missing
+applicable workflows/checks wait, including late producers whose checks have
+not appeared. Newest pending/failed runs cannot borrow old green jobs. Existing
+visible additional failed/pending checks and commit statuses retain their normal
+blocking behavior even when the conditional declaration is inapplicable.
+
+Workflow discovery, late-run reconciliation and completion authorization use
+both inventories. The evaluator's native `workflow_run` display-name subscription
+must likewise contain every conditional producer plus every unconditional and
+intent producer. Missing workflows never establish changed paths or inapplicability.
+
+The fixed extra cost per complete v2 snapshot is one compare GET and one combined
+closing-anchor/blob GraphQL read, plus one GET only for divergence: **2 reads for
+ahead, 3 for diverged**. There is no per-path/check/blob request or extra mutation.
+Two ready snapshots add 4/6 reads; with the current full post-enqueue confirmation
+snapshot, enforcing readiness adds 6/9 if classification stays the same. Count
+existing context/artifact/job pages separately. Version 1 adds zero requests.
+Receipts expose exact anchors, merge base, commits/paths, applicable/inapplicable
+names, workflow OIDs, proof digest and actual total API/mutation counts.
+
+This establishes observed base stability. `expectedHeadOid` atomically protects
+the head, not a base movement after the final read; protected native MQ remains
+the final requalification. Offline fixtures do not establish real bot origin,
+cross-run artifact handoff, actual workflow names/scheduling or production
+adoption. Those still require the separate native pilot and cutover below.
+
 Only a current same-repository Renovate/Dependabot PR on a `renovate/` or
 `dependabot/` branch can proceed. Existing major/no-automerge labels and safe
 update rules are retained. The trusted initial `pull_request_target` event
