@@ -51,7 +51,7 @@ def timestamp(value):
 
 def rate_limit_number(value):
     """Keep fitting ASCII decimal headers numeric and every unknown value null."""
-    if not isinstance(value, str) or not re.fullmatch(r"[0-9]+", value):
+    if not isinstance(value, str) or not re.fullmatch(r"\d+", value, flags=re.ASCII):
         return None
     digits = value.lstrip("0") or "0"
     if len(digits) > 19 or (len(digits) == 19 and digits > "9223372036854775807"):

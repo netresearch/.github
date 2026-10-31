@@ -147,7 +147,6 @@ class CompletionWakeupTest(unittest.TestCase):
         """Foreign, stale, nonbot, active or negative completions cannot advance."""
         changes = [{"event": "pull_request"}, {"event": "workflow_dispatch"},
                    {"actor": {"login": "human"}}, {"actor": {"login": "renovate"}},
-                   {"repository": {"full_name": "attacker/fork"}},
                    {"head_repository": {"full_name": "attacker/fork"}},
                    {"head_branch": "feature/example"}, {"head_sha": "c" * 40},
                    {"status": "in_progress", "conclusion": None},
@@ -155,8 +154,13 @@ class CompletionWakeupTest(unittest.TestCase):
         for changed in changes:
             server = CompletionServer()
             server.runs[400].update(changed)
-            with self.subTest(changed=changed), self.assertRaises((Blocked, runner.ApiError)):
+            reason = "exactly one" if "head_sha" in changed else "scope"
+            with self.subTest(changed=changed), self.assertRaisesRegex(Blocked, reason):
                 completion_context(server)
+        server = CompletionServer()
+        server.runs[400]["repository"] = {"full_name": "attacker/fork"}
+        with self.assertRaisesRegex(runner.ApiError, "identity or attempt"):
+            completion_context(server)
         server = CompletionServer()
         with self.assertRaisesRegex(Blocked, "scope"):
             completion_context(server, action="requested")
@@ -218,9 +222,10 @@ class CompletionWakeupTest(unittest.TestCase):
                                "INTENT_WORKFLOW": INTENT}
                 payload = {"action": "completed" if event == "workflow_run" else "opened",
                            "workflow_run": {"id": 400}, "pull_request": {"number": 42, "head": {"sha": SHA}}}
+                api = server.client()
                 with self.subTest(path=path, event=event), mock.patch.dict(os.environ, environment), \
                         server.transport(), self.assertRaises(Blocked):
-                    runner.context_from_event(server.client(), payload, server.policy)
+                    runner.context_from_event(api, payload, server.policy)
 
     def test_wake_does_not_change_complete_discovery_and_changes_intent_digest(self):
         """No extra producer, compare, job or required-check request is introduced."""
