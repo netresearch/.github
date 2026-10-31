@@ -153,8 +153,9 @@ class ApplicabilityTest(unittest.TestCase):
         for index, mutate in enumerate(mutations):
             server = PathServer()
             mutate(server)
+            api = server.client()
             with self.subTest(index=index), server.transport(), self.assertRaises((ApiError, ValueError)):
-                server.client().snapshot(42)
+                api.snapshot(42)
 
     def test_drift_is_rejected_even_for_nonmatching_paths(self):
         """Unrelated changed paths cannot hide drift in a declared workflow."""
@@ -162,8 +163,9 @@ class ApplicabilityTest(unittest.TestCase):
             for value in (None, {"__typename": "Tree", "oid": BLOB}, {"__typename": "Blob", "oid": BASE}):
                 server = PathServer()
                 server.blobs[alias] = value
+                api = server.client()
                 with self.subTest(alias=alias, value=value), server.transport(), self.assertRaises((ApiError, ValueError)):
-                    server.client().snapshot(42)
+                    api.snapshot(42)
 
     def test_closing_current_base_and_associated_anchor_races_block(self):
         """Movement during collection invalidates the entire path snapshot."""
@@ -174,16 +176,18 @@ class ApplicabilityTest(unittest.TestCase):
             server = PathServer()
             server.closing = copy.deepcopy(server.raw)
             mutate(server.closing)
+            api = server.client()
             with server.transport(), self.assertRaises((ApiError, ValueError)):
-                server.client().snapshot(42)
+                api.snapshot(42)
 
     def test_live_base_ref_never_falls_back_to_associated_oid(self):
         """Missing live refs cannot borrow the PR-associated base identity."""
         for value in (None, {}, {"name": "main", "target": {"oid": BASE}}):
             server = PathServer()
             server.raw["baseRef"] = value
+            api = server.client()
             with self.subTest(value=value), server.transport(), self.assertRaises((ApiError, ValueError)):
-                server.client().snapshot(42)
+                api.snapshot(42)
 
     def test_applicable_newer_pending_or_unsuccessful_run_is_not_hidden(self):
         """Older green jobs cannot satisfy a newer unfinished or failed run."""
@@ -234,11 +238,13 @@ class ApplicabilityTest(unittest.TestCase):
         for field, value in (("total_commits", 250), ("ahead_by", 250)):
             broken = copy.deepcopy(server)
             broken.compare[field] = value
+            api = broken.client()
             with broken.transport(), self.assertRaises(ApiError):
-                broken.client().snapshot(42)
+                api.snapshot(42)
         oversized = PathServer([f"src/file-{index}.php" for index in range(300)])
+        api = oversized.client()
         with oversized.transport(), self.assertRaises(ApiError):
-            oversized.client().snapshot(42)
+            api.snapshot(42)
 
     def test_diverged_second_comparison_cannot_disagree_or_be_pending_data(self):
         """The merge-base comparison must independently confirm the same diff."""
@@ -247,8 +253,9 @@ class ApplicabilityTest(unittest.TestCase):
                        lambda s: s.ancestor["base_commit"].update(sha=BASE)):
             server = PathServer(diverged=True)
             mutate(server)
+            api = server.client()
             with server.transport(), self.assertRaises(ApiError):
-                server.client().snapshot(42)
+                api.snapshot(42)
 
     def test_removed_files_and_null_previous_name_still_activate_producer(self):
         """Ordinary added, changed and removed paths all carry obligations."""
@@ -354,8 +361,9 @@ class ApplicabilityTest(unittest.TestCase):
             self.assertIn(decision(server)[0][0], {"waiting", "blocked"})
         server = PathServer()
         server.closing_errors = [{"message": "partial blob result"}]
+        api = server.client()
         with server.transport(), self.assertRaises(ApiError):
-            server.client().snapshot(42)
+            api.snapshot(42)
 
     def test_v2_receipt_binds_actual_paths_and_api_cost_without_mutations(self):
         """Receipts expose the actual proof digest, anchors and request counts."""
@@ -372,6 +380,14 @@ class ApplicabilityTest(unittest.TestCase):
         self.assertEqual(receipt["api_calls"], 21)
         self.assertEqual(receipt["mutation_attempts"], 0)
         self.assertEqual(receipt["applicability"]["anchor"]["pr_base_oid"], ASSOCIATED)
+
+    def test_client_setup_error_cannot_masquerade_as_snapshot_rejection(self):
+        """A broken fixture constructor must error, not satisfy a snapshot oracle."""
+        case = ApplicabilityTest("test_invalid_complete_file_and_commit_evidence_blocks")
+        result = unittest.TestResult()
+        with mock.patch.object(PathServer, "client", side_effect=ApiError("client setup failed")):
+            case.run(result)
+        self.assertTrue(result.errors, "Client setup failure was swallowed by an exception expectation")
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ from changed_paths import (ANCHOR_FIELDS, anchor, closing_query, comparison, con
                            verify_closing, workflow_pins)
 
 MAX_BYTES = 4 * 1024 * 1024
+WORKFLOW_DIRECTORY = ".github/workflows/"
 HISTORY_TYPES = "ADDED_TO_MERGE_QUEUE_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT,AUTO_MERGE_ENABLED_EVENT,AUTO_MERGE_DISABLED_EVENT"
 INITIAL_TARGET_ACTIONS = {"opened", "synchronize", "reopened"}
 METADATA_ACTIONS = {"unlabeled", "ready_for_review", "edited", "auto_merge_enabled"}
@@ -399,7 +400,7 @@ class GitHub:
     def workflow_records(self, sha):
         """Retain all declared producers from one bounded SHA-specific run list."""
         workflows = []
-        expected = {".github/workflows/" + item["workflow"] for item in declared_checks(self.policy)}
+        expected = {WORKFLOW_DIRECTORY + item["workflow"] for item in declared_checks(self.policy)}
         for raw in self.collection(f"/repos/{self.repository}/actions/runs?head_sha={sha}",
                                    "workflow_runs", search_limit=1000):
             run = self.run_metadata(raw, expected_sha=sha, canonical=False)
@@ -495,7 +496,7 @@ class GitHub:
         workflows = [item if (item["status"], item["conclusion"]) != ("completed", "success")
                      else self.workflow_record(self.runs[item["run_id"]]) for item in workflows]
         initial_ids = {item["run_id"] for item in workflows}
-        required = {(".github/workflows/" + item["workflow"], event)
+        required = {(WORKFLOW_DIRECTORY + item["workflow"], event)
                     for item in declared_checks(self.policy) for event in item["events"]}
         # A run can appear after the complete list read but before its checks.
         # Strict single-run fallback metadata is already known in this snapshot;
@@ -543,7 +544,7 @@ def allowed_completion(run, context, policy):
     if run["path"] == context["intent_path"]:
         return (run["event"] == "pull_request_target" and run["actor"]["login"] in BOTS
                 and run["conclusion"] == "success")
-    return any(run["path"] == ".github/workflows/" + check["workflow"]
+    return any(run["path"] == WORKFLOW_DIRECTORY + check["workflow"]
                and run["event"] in check["events"] for check in declared_checks(policy))
 
 
