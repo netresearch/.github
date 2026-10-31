@@ -4,6 +4,9 @@ import hashlib
 import json
 import re
 
+from changed_paths import effective_checks, validate_conditions
+from api_target import ApiError
+
 BOTS = {"dependabot[bot]", "renovate[bot]"}
 REMOVALS = {"RemovedFromMergeQueueEvent", "AutoMergeDisabledEvent"}
 ACTIVATIONS = {"AddedToMergeQueueEvent", "AutoMergeEnabledEvent"}
@@ -21,11 +24,29 @@ def digest(policy):
     return hashlib.sha256(json.dumps(policy, sort_keys=True).encode()).hexdigest()
 
 
+def declared_checks(policy):
+    """List every declared producer, including currently inapplicable ones."""
+    return policy["required_checks"] + (policy["conditional_checks"] if policy.get("version") == 2 else [])
+
+
+def validate_version(policy):
+    """Dispatch explicit policy versions without silently dropping v2 duties."""
+    if policy.get("version") not in {1, 2} or not policy.get("required_checks"):
+        raise Blocked("A nonempty version-1 or version-2 required-check inventory is required")
+    if policy["version"] == 1 and {"conditional_checks", "base_ref"}.intersection(policy):
+        raise Blocked("Conditional checks and base_ref require policy version 2")
+    if policy["version"] == 2:
+        try:
+            validate_conditions(policy)
+        except (ApiError, KeyError, TypeError, ValueError) as error:
+            raise Blocked("Invalid version-2 applicability policy: " + str(error)) from error
+
+
 def validate_policy(policy):
-    if policy.get("version") != 1 or not policy.get("required_checks"):
-        raise Blocked("A nonempty version-1 required-check inventory is required")
+    """Validate canonical identities, approval minima and advisory separation."""
+    validate_version(policy)
     names = set()
-    for check in policy["required_checks"]:
+    for check in declared_checks(policy):
         if (not isinstance(check.get("name"), str) or check["name"] in names
                 or check.get("app_id") != 15368
                 or not re.fullmatch(r"[A-Za-z0-9_-]+\.ya?ml", check.get("workflow", ""))
@@ -201,7 +222,10 @@ def require_statuses(statuses, advisory):
 
 
 def evaluate_checks(context, snapshot, policy):
-    expected = {check["name"]: check for check in policy["required_checks"]}
+    """Require all applicable jobs plus the unchanged additional-check guards."""
+    requirements = (effective_checks(snapshot, policy, digest(policy))
+                    if policy["version"] == 2 else policy["required_checks"])
+    expected = {check["name"]: check for check in requirements}
     workflows = require_workflows(context, snapshot, expected.values())
     latest = latest_checks(snapshot["checks"])
     require_check_producers(context, snapshot, expected, latest, workflows)

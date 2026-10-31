@@ -12,11 +12,14 @@ import urllib.parse
 import urllib.request
 import zipfile
 
-from policy import BOTS, Blocked, check_intent, decide, digest, initial_intent
+from policy import BOTS, Blocked, check_intent, decide, declared_checks, digest, initial_intent, validate_policy
 from api_target import ApiError, positive_id, target_url
 from job_binding import bind_check, json_id, run_revision
+from changed_paths import (ANCHOR_FIELDS, anchor, closing_query, comparison, conditional_selection,
+                           verify_closing, workflow_pins)
 
 MAX_BYTES = 4 * 1024 * 1024
+WORKFLOW_DIRECTORY = ".github/workflows/"
 HISTORY_TYPES = "ADDED_TO_MERGE_QUEUE_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT,AUTO_MERGE_ENABLED_EVENT,AUTO_MERGE_DISABLED_EVENT"
 INITIAL_TARGET_ACTIONS = {"opened", "synchronize", "reopened"}
 METADATA_ACTIONS = {"unlabeled", "ready_for_review", "edited", "auto_merge_enabled"}
@@ -74,6 +77,7 @@ def verify_intent_record(document, artifact, run, context):
 
 
 def evaluate_and_enqueue(api, context, policy, intent):
+    """Require two fresh ready snapshots before one expected-head enqueue."""
     snapshot = api.snapshot(context["number"])
     api.last_snapshot = snapshot
     result = decide(context, snapshot, policy, intent)
@@ -83,6 +87,8 @@ def evaluate_and_enqueue(api, context, policy, intent):
     api.last_snapshot = fresh
     if (fresh["pr"]["head"], fresh["pr"]["base"]) != (snapshot["pr"]["head"], snapshot["pr"]["base"]):
         return "blocked", "Head or base changed before enqueue; a new event must re-evaluate"
+    if policy.get("version") == 2 and fresh.get("applicability") != snapshot.get("applicability"):
+        return "blocked", "Applicability anchors or evidence changed before enqueue"
     result = decide(context, fresh, policy, intent)
     if result[0] != "ready":
         return observer_result(api, result)
@@ -300,6 +306,10 @@ class GitHub:
         return self.runs[run_id]
 
     def snapshot(self, number):
+        """Collect one fresh complete PR inventory with versioned path evidence."""
+        conditional = self.policy.get("version") == 2
+        if conditional:
+            validate_policy(self.policy)
         self.runs = {}  # A final reread must see a newly retried workflow attempt.
         self.refreshed_runs = set()
         self.listed_run_ids = set()
@@ -313,7 +323,8 @@ class GitHub:
         raw = self.pr_query(number, """id number state isDraft headRefOid baseRefOid baseRefName headRefName
             author{login} headRepository{nameWithOwner} baseRepository{nameWithOwner}
             mergeable reviewDecision isInMergeQueue potentialMergeCommit{oid}
-            labels(first:100){nodes{name}pageInfo{hasNextPage}} """ + initial)
+            labels(first:100){nodes{name}pageInfo{hasNextPage}} """ + initial
+            + (" " + ANCHOR_FIELDS if conditional else ""))
         if not isinstance(raw, dict) or any(not isinstance(raw.get(name), dict) for name in connections):
             raise ApiError("Initial GraphQL inventory is incomplete")
         pr = {"id": raw["id"], "number": raw["number"], "state": raw["state"], "draft": raw["isDraft"],
@@ -324,11 +335,13 @@ class GitHub:
               "mergeable": raw["mergeable"], "review_decision": raw["reviewDecision"],
               "queued": raw["isInMergeQueue"], "test_merge": (raw["potentialMergeCommit"] or {}).get("oid"),
               "labels": [label["name"] for label in raw["labels"]["nodes"]]}
+        proof = self.start_applicability(raw, pr)
         history, reviews, threads = (self.connection(number, name, *fields, first_page=raw[name])
                                     for name, fields in connections.items())
         rules = self.collection(f"/repos/{self.repository}/rules/branches/{urllib.parse.quote(pr['base_ref'], safe='')}")
         checks, statuses, workflows = self.verification_records(pr)
-        return {"pr": pr, "checks": checks, "statuses": statuses, "rules": rules, "workflows": workflows,
+        self.finish_applicability(number, proof)
+        snapshot = {"pr": pr, "checks": checks, "statuses": statuses, "rules": rules, "workflows": workflows,
             "history": [{"type": item["__typename"], "created_at": item["createdAt"],
                          "actor": (item["actor"] or {}).get("login"),
                          "actor_type": (item["actor"] or {}).get("__typename")} for item in history],
@@ -337,10 +350,57 @@ class GitHub:
             "threads": [{"resolved": item["isResolved"]} for item in threads],
             "complete": {"history": True, "reviews": True, "threads": True, "rules": True,
                          "checks": True, "statuses": True, "labels": not raw["labels"]["pageInfo"]["hasNextPage"]}}
+        if conditional:
+            snapshot["applicability"] = proof
+            snapshot["complete"].update(changed_files=True, conditional_workflows=True)
+        return snapshot
+
+    def start_applicability(self, raw, pr):
+        """Read immutable v2 comparisons while retaining v1's exact API budget."""
+        if self.policy.get("version") != 2:
+            return None
+        try:
+            return self.changed_paths(raw, pr)
+        except (KeyError, TypeError, ValueError) as error:
+            raise ApiError("Changed-path evidence is incomplete or invalid: " + str(error)) from error
+
+    def finish_applicability(self, number, proof):
+        """Close v2 evidence with one live-anchor and immutable-blob read."""
+        if proof is None:
+            return
+        try:
+            data = self.graphql(*closing_query(self.repository, number, proof["anchor"], self.policy))
+            verify_closing(data, proof["anchor"], self.policy)
+        except (KeyError, TypeError, ValueError) as error:
+            raise ApiError("Closing applicability evidence did not verify: " + str(error)) from error
+
+    def changed_paths(self, raw, pr):
+        """Bind complete changed paths to the live base, head and reviewed policy."""
+        captured = anchor(raw, self.repository, self.policy["base_ref"])
+        pr.update(captured)
+        base, head = captured["base"], captured["head"]
+        data, _ = self.rest(f"/repos/{self.repository}/compare/{base}...{head}")
+        evidence = comparison(data, base, head, captured["changed_files"])
+        if evidence["status"] == "diverged":
+            merge_base = evidence["merge_base"]
+            data, _ = self.rest(f"/repos/{self.repository}/compare/{merge_base}...{head}")
+            ancestor = comparison(data, merge_base, head, captured["changed_files"])
+            if (ancestor["status"] != "ahead" or ancestor["commits"] != evidence["commits"]
+                    or ancestor["files"] != evidence["files"]):
+                raise ApiError("Diverged and merge-base comparisons are inconsistent")
+        paths = [name for name, _ in evidence["files"]]
+        applicable = [entry["name"] for entry in conditional_selection(paths, self.policy)]
+        return {"anchor": captured, "merge_base": evidence["merge_base"],
+                "comparison_status": evidence["status"], "commits": evidence["commits"],
+                "paths": paths, "applicable_checks": applicable,
+                "inapplicable_checks": [entry["name"] for entry in self.policy["conditional_checks"]
+                                        if entry["name"] not in applicable],
+                "workflow_blobs": workflow_pins(self.policy), "policy_digest": digest(self.policy)}
 
     def workflow_records(self, sha):
+        """Retain all declared producers from one bounded SHA-specific run list."""
         workflows = []
-        expected = {".github/workflows/" + item["workflow"] for item in self.policy["required_checks"]}
+        expected = {WORKFLOW_DIRECTORY + item["workflow"] for item in declared_checks(self.policy)}
         for raw in self.collection(f"/repos/{self.repository}/actions/runs?head_sha={sha}",
                                    "workflow_runs", search_limit=1000):
             run = self.run_metadata(raw, expected_sha=sha, canonical=False)
@@ -420,6 +480,7 @@ class GitHub:
             raise ApiError("Check timestamp evidence is malformed") from error
 
     def verification_records(self, pr):
+        """Bind current checks and late producers to coherent server run/jobs."""
         checks, statuses, workflows = [], [], []
         # Both SHA locations are explicit and bound to this freshly read PR.
         for sha in sorted({pr["head"], pr["test_merge"]} - {None}):
@@ -435,8 +496,8 @@ class GitHub:
         workflows = [item if (item["status"], item["conclusion"]) != ("completed", "success")
                      else self.workflow_record(self.runs[item["run_id"]]) for item in workflows]
         initial_ids = {item["run_id"] for item in workflows}
-        required = {(".github/workflows/" + item["workflow"], event)
-                    for item in self.policy["required_checks"] for event in item["events"]}
+        required = {(WORKFLOW_DIRECTORY + item["workflow"], event)
+                    for item in declared_checks(self.policy) for event in item["events"]}
         # A run can appear after the complete list read but before its checks.
         # Strict single-run fallback metadata is already known in this snapshot;
         # do not lose a newly discovered pending/failed required producer.
@@ -479,11 +540,12 @@ class GitHub:
 
 
 def allowed_completion(run, context, policy):
+    """Allow only the trusted origin or explicitly declared producer events."""
     if run["path"] == context["intent_path"]:
         return (run["event"] == "pull_request_target" and run["actor"]["login"] in BOTS
                 and run["conclusion"] == "success")
-    return any(run["path"] == ".github/workflows/" + check["workflow"]
-               and run["event"] in check["events"] for check in policy["required_checks"])
+    return any(run["path"] == WORKFLOW_DIRECTORY + check["workflow"]
+               and run["event"] in check["events"] for check in declared_checks(policy))
 
 
 def configured_workflow_paths():
@@ -598,6 +660,7 @@ def prepare_intent(api, context, policy):
 
 
 def write_receipt(api, context, policy, phase, intent, state, reason):
+    """Record the observed decision, immutable evidence and actual API demand."""
     snapshot = getattr(api, "last_snapshot", {})
     pr = snapshot.get("pr", {})
     receipt = {"phase": phase, "observe_only": api.observe_only, "event": context.get("event"),
@@ -609,6 +672,10 @@ def write_receipt(api, context, policy, phase, intent, state, reason):
                "decision": state, "reason": reason, "required_checks": policy.get("required_checks"),
                "mutation_attempts": getattr(api, "mutation_attempts", 0),
                "api_calls": getattr(api, "api_calls", 0)}
+    if policy.get("version") == 2:
+        receipt["conditional_checks"] = policy.get("conditional_checks")
+        receipt["applicability"] = snapshot.get("applicability")
+        receipt["applicability_digest"] = digest(snapshot["applicability"]) if "applicability" in snapshot else None
     text = json.dumps(receipt, sort_keys=True, indent=2) + "\n"
     # One explicit phase executes per isolated job. Keep the filename constant:
     # CLI/context data belongs inside JSON, never in the filesystem path.

@@ -23,6 +23,7 @@ def git_ref(value):
 
 
 ROUTES = (
+    ("GET", r"compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}", "single"),
     ("GET", r"actions/runs/[1-9][0-9]*", "single"),
     ("GET", r"actions/runs", "runs"),
     ("GET", r"actions/runs/[1-9][0-9]*/jobs", "jobs"),
