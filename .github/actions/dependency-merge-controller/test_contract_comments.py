@@ -1,6 +1,8 @@
 """Protect real legacy workflow bytes outside the explicit pin/version exception."""
 
+import hashlib
 from pathlib import Path
+import struct
 import unittest
 from unittest import mock
 
@@ -94,6 +96,41 @@ class ContractCommentTest(unittest.TestCase):
             malformed = prefix + line.lstrip(b" \t")
             with self.subTest(prefix=prefix):
                 self.assertIsNone(contract.ACTION_PIN.search(malformed))
+
+    def test_real_workflow_rejects_literal_markers_and_frame_looking_raw_bytes(self):
+        """Unmatched input cannot impersonate a normalized pin at any real action."""
+        document = LEGACY.read_bytes()
+        lines = [line for line in document.splitlines(keepends=True)
+                 if contract.ACTION_PIN.fullmatch(line.rstrip(b"\n"))]
+        self.assertEqual(len(lines), 3)
+        for line in lines:
+            prefix = line.split(b"@", 1)[0] + b"@"
+            for reference in (b"<pin>", b"<pin> # v2.22.3"):
+                changed = document.replace(line, prefix + reference + b"\n", 1)
+                with self.subTest(action=prefix, reference=reference):
+                    self.assertNotEqual(contract.fingerprint(document), contract.fingerprint(changed))
+                    self.assert_frozen_rejects(changed)
+        for raw in (b"<pin>", b"U" + b"\0" * 8, b"P" + struct.pack(">Q", 5) + b"<pin>",
+                    b"U" + struct.pack(">Q", 1) + b"P\0U\xff"):
+            with self.subTest(raw=raw):
+                self.assert_frozen_rejects(document + raw)
+
+    def test_canonical_frames_preserve_tags_lengths_empty_segments_and_tail(self):
+        """Independent binary records distinguish raw bytes from matched prefixes."""
+        for payload in (b"", b"P", b"\0U\xff<pin>", b"a" * 255, b"b" * 256):
+            expected = hashlib.sha256(struct.pack(">cQ", b"U", len(payload)) + payload).hexdigest()
+            with self.subTest(length=len(payload)):
+                self.assertEqual(contract.fingerprint(payload), expected)
+        prefix = b"        uses: step-security/harden-runner@"
+        line = prefix + b"a" * 40 + b" # v2.22.3\n"
+        expected = b"U" + b"\0" * 8
+        expected += struct.pack(">cQ", b"P", len(prefix)) + prefix
+        expected += b"U" + struct.pack(">Q", 1) + b"\n"
+        self.assertEqual(contract.fingerprint(line), hashlib.sha256(expected).hexdigest())
+        empty_tail = struct.pack(">cQ", b"U", 0)
+        empty_tail += struct.pack(">cQ", b"P", len(prefix)) + prefix
+        empty_tail += struct.pack(">cQ", b"U", 0)
+        self.assertEqual(contract.fingerprint(line.rstrip(b"\n")), hashlib.sha256(empty_tail).hexdigest())
 
 
 if __name__ == "__main__":
