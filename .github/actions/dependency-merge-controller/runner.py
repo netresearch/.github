@@ -21,6 +21,8 @@ from changed_paths import (ANCHOR_FIELDS, anchor, closing_query, comparison, con
 
 MAX_BYTES = 4 * 1024 * 1024
 WORKFLOW_DIRECTORY = ".github/workflows/"
+RENOVATE_BOT = "renovate[bot]"
+DEPENDABOT_BOT = "dependabot[bot]"
 HISTORY_TYPES = "ADDED_TO_MERGE_QUEUE_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT,AUTO_MERGE_ENABLED_EVENT,AUTO_MERGE_DISABLED_EVENT"
 INITIAL_TARGET_ACTIONS = {"opened", "synchronize", "reopened"}
 METADATA_ACTIONS = {"unlabeled", "ready_for_review", "edited", "auto_merge_enabled"}
@@ -48,8 +50,8 @@ def timestamp(value):
 
 def graphql_bot_author(author):
     """Normalize only GitHub's typed, exact aliases for the two approved bots."""
-    aliases = {"renovate": "renovate[bot]", "renovate[bot]": "renovate[bot]",
-               "dependabot": "dependabot[bot]", "dependabot[bot]": "dependabot[bot]"}
+    aliases = {"renovate": RENOVATE_BOT, RENOVATE_BOT: RENOVATE_BOT,
+               "dependabot": DEPENDABOT_BOT, DEPENDABOT_BOT: DEPENDABOT_BOT}
     if not isinstance(author, dict) or author.get("__typename") != "Bot":
         raise ApiError("PR author must be a typed recognized Bot")
     login = author.get("login")
