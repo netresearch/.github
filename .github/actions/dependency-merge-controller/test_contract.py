@@ -8,23 +8,36 @@ import unittest
 # A pinned action reference, `uses: owner/repo@<40-hex sha> # vX.Y.Z`. Renovate
 # rewrites these lines on every action release, which is not a change to the
 # legacy gate this test freezes.
-ACTION_PIN = re.compile(rb"^(\s*(?:- )?uses: [\w.-]+/[\w./-]+@)[0-9a-f]{40}(?: #[^\n]*)?$", re.MULTILINE)
+ACTION_PIN = re.compile(rb"^([ \t]*(?:- )?uses: [\w.-]+/[\w./-]+@)[0-9a-f]{40}(?: # v\d+(?:\.\d+){0,2})?$", re.MULTILINE)
+
+
+def hash_frame(hasher, tag, payload):
+    """Hash one typed record whose fixed-width length protects literal input bytes."""
+    hasher.update(tag + len(payload).to_bytes(8, "big") + payload)
 
 
 def fingerprint(text):
-    return hashlib.sha256(ACTION_PIN.sub(rb"\1<pin>", text)).hexdigest()
+    """Exclude pins through framed prefixes while preserving every unmatched byte."""
+    hasher = hashlib.sha256()
+    cursor = 0
+    for match in ACTION_PIN.finditer(text):
+        hash_frame(hasher, b"U", text[cursor:match.start()])
+        hash_frame(hasher, b"P", match.group(1))
+        cursor = match.end()
+    hash_frame(hasher, b"U", text[cursor:])
+    return hasher.hexdigest()
 
 
 class ContractTest(unittest.TestCase):
     # Pins auto-merge-deps.yml, so a change to it is a deliberate one. The
-    # fingerprint was last updated for the superseded-run filter of #561;
+    # gate content was last updated for the superseded-run filter of #561;
     # action pin bumps are left out of it. The caller permission contract is
     # checked by test-permissions.sh.
     def test_legacy_reusable_is_unchanged(self):
         root = Path(__file__).resolve().parents[3]
         legacy = root / ".github/workflows/auto-merge-deps.yml"
         self.assertEqual(fingerprint(legacy.read_bytes()),
-                         "f91477280c81632e3f98d7dde461a4768a822d9e2b6d694bc03b6e96ce572110")
+                         "59554b5b523fc9feef98c91551cb512b7d85e71c95775420ba0384c202309d6f")
 
     def test_fingerprint_ignores_only_action_pins(self):
         line = b"        uses: step-security/harden-runner@" + b"a" * 40 + b" # v2.22.2\n"
