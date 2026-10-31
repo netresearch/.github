@@ -56,7 +56,7 @@ class Server:
         self.checks += [self.check(90, "Community"), self.check(91, "Labels")]
         self.raw = {"id": "PR_42", "number": 42, "state": "OPEN", "isDraft": False,
                     "headRefOid": SHA, "baseRefOid": "b" * 40, "baseRefName": "main",
-                    "headRefName": "renovate/phpunit", "author": {"login": "renovate[bot]"},
+                    "headRefName": "renovate/phpunit", "author": {"login": "renovate", "__typename": "Bot"},
                     "headRepository": {"nameWithOwner": REPO},
                     "baseRepository": {"nameWithOwner": REPO}, "mergeable": "MERGEABLE",
                     "reviewDecision": "APPROVED", "isInMergeQueue": False,

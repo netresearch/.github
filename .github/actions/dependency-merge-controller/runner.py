@@ -12,7 +12,8 @@ import urllib.parse
 import urllib.request
 import zipfile
 
-from policy import BOTS, Blocked, check_intent, decide, declared_checks, digest, initial_intent, validate_policy
+from policy import (BOTS, Blocked, check_intent, completion_wakeups, decide,
+                    declared_checks, digest, initial_intent, validate_policy)
 from api_target import ApiError, positive_id, target_url
 from job_binding import bind_check, json_id, run_revision
 from changed_paths import (ANCHOR_FIELDS, anchor, closing_query, comparison, conditional_selection,
@@ -43,6 +44,18 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def timestamp(value):
     return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def graphql_bot_author(author):
+    """Normalize only GitHub's typed, exact aliases for the two approved bots."""
+    aliases = {"renovate": "renovate[bot]", "renovate[bot]": "renovate[bot]",
+               "dependabot": "dependabot[bot]", "dependabot[bot]": "dependabot[bot]"}
+    if not isinstance(author, dict) or author.get("__typename") != "Bot":
+        raise ApiError("PR author must be a typed recognized Bot")
+    login = author.get("login")
+    if not isinstance(login, str) or login not in aliases:
+        raise ApiError("PR author is not a recognized Bot identity")
+    return aliases[login]
 
 
 def parse_execution(phase, raw_observe):
@@ -80,7 +93,9 @@ def evaluate_and_enqueue(api, context, policy, intent):
     """Require two fresh ready snapshots before one expected-head enqueue."""
     snapshot = api.snapshot(context["number"])
     api.last_snapshot = snapshot
-    result = decide(context, snapshot, policy, intent)
+    inspect_queued = (policy.get("version") == 2 and getattr(api, "observe_only", False) is True
+                      and context.get("observe_only") is True)
+    result = decide(context, snapshot, policy, intent, inspect_queued=inspect_queued)
     if result[0] != "ready":
         return observer_result(api, result)
     fresh = api.snapshot(context["number"])
@@ -89,10 +104,12 @@ def evaluate_and_enqueue(api, context, policy, intent):
         return "blocked", "Head or base changed before enqueue; a new event must re-evaluate"
     if policy.get("version") == 2 and fresh.get("applicability") != snapshot.get("applicability"):
         return "blocked", "Applicability anchors or evidence changed before enqueue"
-    result = decide(context, fresh, policy, intent)
+    result = decide(context, fresh, policy, intent, inspect_queued=inspect_queued)
     if result[0] != "ready":
         return observer_result(api, result)
     if getattr(api, "observe_only", False):
+        if inspect_queued and fresh["pr"]["queued"]:
+            return "observed-ready-existing", "Two fresh policy snapshots are ready; existing queue observed, no mutation attempted"
         return "observed-ready", "Two fresh policy snapshots are ready; no mutation attempted"
     api.enqueue(fresh["pr"]["id"], fresh["pr"]["head"])
     confirmed = api.snapshot(context["number"])
@@ -321,7 +338,7 @@ class GitHub:
                        "reviewThreads": ("", "isResolved")}
         initial = " ".join(self.connection_field(name, *fields) for name, fields in connections.items())
         raw = self.pr_query(number, """id number state isDraft headRefOid baseRefOid baseRefName headRefName
-            author{login} headRepository{nameWithOwner} baseRepository{nameWithOwner}
+            author{login __typename} headRepository{nameWithOwner} baseRepository{nameWithOwner}
             mergeable reviewDecision isInMergeQueue potentialMergeCommit{oid}
             labels(first:100){nodes{name}pageInfo{hasNextPage}} """ + initial
             + (" " + ANCHOR_FIELDS if conditional else ""))
@@ -329,7 +346,7 @@ class GitHub:
             raise ApiError("Initial GraphQL inventory is incomplete")
         pr = {"id": raw["id"], "number": raw["number"], "state": raw["state"], "draft": raw["isDraft"],
               "head": raw["headRefOid"], "base": raw["baseRefOid"], "base_ref": raw["baseRefName"],
-              "head_ref": raw["headRefName"], "author": raw["author"]["login"],
+              "head_ref": raw["headRefName"], "author": graphql_bot_author(raw.get("author")),
               "repository": raw["baseRepository"]["nameWithOwner"],
               "source_repository": (raw["headRepository"] or {}).get("nameWithOwner"),
               "mergeable": raw["mergeable"], "review_decision": raw["reviewDecision"],
@@ -539,13 +556,27 @@ class GitHub:
             {"id": pr_id, "head": head}, write=True)
 
 
+def wakeup_declarations(context, policy):
+    """Reject recursive and weaker-origin hints before using any completion."""
+    rows = completion_wakeups(policy)
+    own = {context.get("caller_path"), context["intent_path"]}
+    if any(WORKFLOW_DIRECTORY + row["workflow"] in own for row in rows):
+        raise Blocked("Completion wakeups cannot identify the evaluator or intent workflow")
+    return rows
+
+
 def allowed_completion(run, context, policy):
-    """Allow only the trusted origin or explicitly declared producer events."""
+    """Allow trusted origin, declared producers or exact successful bot hints."""
+    wakeups = wakeup_declarations(context, policy)
     if run["path"] == context["intent_path"]:
         return (run["event"] == "pull_request_target" and run["actor"]["login"] in BOTS
                 and run["conclusion"] == "success")
-    return any(run["path"] == WORKFLOW_DIRECTORY + check["workflow"]
-               and run["event"] in check["events"] for check in declared_checks(policy))
+    if any(run["path"] == WORKFLOW_DIRECTORY + check["workflow"]
+           and run["event"] in check["events"] for check in declared_checks(policy)):
+        return True
+    return (run["conclusion"] == "success" and run["actor"]["login"] in BOTS
+            and any(run["path"] == WORKFLOW_DIRECTORY + row["workflow"]
+                    and run["event"] in row["events"] for row in wakeups))
 
 
 def configured_workflow_paths():
@@ -593,6 +624,7 @@ def context_from_event(api, event, policy):
                "now": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                "update_type": os.environ.get("UPDATE_TYPE", ""),
                "ecosystem": os.environ.get("ECOSYSTEM", "")}
+    wakeup_declarations(context, policy)
     if event_name in {"pull_request_target", "pull_request_review"}:
         if event_name == "pull_request_review" and event.get("action") not in {"submitted", "dismissed"}:
             raise Blocked("Unsupported review event")
@@ -676,6 +708,8 @@ def write_receipt(api, context, policy, phase, intent, state, reason):
         receipt["conditional_checks"] = policy.get("conditional_checks")
         receipt["applicability"] = snapshot.get("applicability")
         receipt["applicability_digest"] = digest(snapshot["applicability"]) if "applicability" in snapshot else None
+        if api.observe_only:
+            receipt["queue_present"] = pr.get("queued")
     text = json.dumps(receipt, sort_keys=True, indent=2) + "\n"
     # One explicit phase executes per isolated job. Keep the filename constant:
     # CLI/context data belongs inside JSON, never in the filesystem path.

@@ -24,7 +24,9 @@ inputs:
     required: true
 outputs:
   state:
-    description: prepared, waiting, blocked, observed-ready, observed-existing, or confirmed queued.
+    description: >-
+      prepared, waiting, blocked, observed-ready, observed-ready-existing,
+      observed-existing, or confirmed queued.
     value: ${{ steps.phase.outputs.state }}
 runs:
   using: composite
