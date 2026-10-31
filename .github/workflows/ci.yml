@@ -50,6 +50,31 @@ jobs:
       - name: Check gate of auto-merge-deps.yml against recorded check lists
         run: python3 -m unittest discover -s scripts -p 'test_auto_merge_deps_checks.py' -v
 
+  token-probe:
+    name: TEMPORARY token probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Read workflow-run identity with the caller's scopes only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          q=$(yq '.jobs.auto-merge.steps[] | select(.name == "Enable auto-merge") | .env.CHECKS_QUERY' .github/workflows/auto-merge-deps.yml)
+          sel=$(yq '.jobs.auto-merge.steps[] | select(.name == "Enable auto-merge") | .env.CHECKS_SELECT' .github/workflows/auto-merge-deps.yml)
+          for target in netresearch/.github:560 netresearch/t3x-nr-vault:478; do
+            repo=${target%:*}; number=${target#*:}
+            pages=$(gh api graphql --paginate --slurp -F owner="${repo%%/*}" -F repo="${repo#*/}" -F number="$number" -f query="$q")
+            printf '%s' "$pages" | jq -c --arg t "$target" '[.[].data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup.contexts.nodes[] | select(.__typename == "CheckRun")] | {target: $t, checkRuns: length, withRun: [.[] | select(.checkSuite.workflowRun.databaseId != null)] | length, withWorkflow: [.[] | select(.checkSuite.workflowRun.workflow.databaseId != null)] | length}'
+            printf '%s' "$pages" | jq -c "$sel"
+          done
+
   markdown:
     name: Lint Markdown
     uses: ./.github/workflows/lint-markdown.yml
