@@ -23,7 +23,10 @@ OLD_DOC_PATH = "Documentation/old.rst"
 
 
 class PathServer(Server):
+    """Supply bounded immutable path evidence at the real adapter boundary."""
+
     def __init__(self, paths=None, *, diverged=False):
+        """Build a same-repository v2 cohort with distinct live/associated bases."""
         super().__init__()
         self.policy.update(version=2, base_ref="main", conditional_checks=[{
             "name": DOC_CHECK, "app_id": 15368,
@@ -47,6 +50,7 @@ class PathServer(Server):
         self.closing_errors = []
 
     def open(self, request, **kwargs):
+        """Answer only the new compare/blob reads alongside the existing fake."""
         parsed = urllib.parse.urlsplit(request.full_url)
         resource = parsed.path.removeprefix(f"/repos/{REPO}/")
         if resource.startswith("compare/"):
@@ -60,6 +64,7 @@ class PathServer(Server):
         return super().open(request, **kwargs)
 
     def producer(self, **changes):
+        """Add a real matching server run and its bound current Actions job."""
         run = run_record(200, DOC_WORKFLOW, **changes)
         self.runs[200] = run
         self.listed.append(run)
@@ -68,6 +73,7 @@ class PathServer(Server):
 
 
 def decision(server):
+    """Collect through HTTP, create trusted intent and run the real policy."""
     context, _ = fixtures()
     api = server.client()
     with server.transport():
@@ -77,7 +83,10 @@ def decision(server):
 
 
 class ApplicabilityTest(unittest.TestCase):
+    """Falsify missing evidence, waived jobs, provenance drift and API overruns."""
+
     def test_nonmatching_complete_diff_needs_no_absent_producer(self):
+        """An unrelated complete diff has no conditional workflow obligation."""
         result, api, snapshot = decision(PathServer())
         self.assertEqual(result[0], "ready")
         self.assertEqual(api.api_calls, 20)
@@ -85,6 +94,7 @@ class ApplicabilityTest(unittest.TestCase):
         self.assertEqual(snapshot["pr"]["pr_base_oid"], ASSOCIATED)
 
     def test_matching_missing_producer_waits_then_real_job_succeeds(self):
+        """Matching paths must wait until the real current producer succeeds."""
         server = PathServer(["Documentation/Api/example.rst"])
         self.assertEqual(decision(server)[0][0], "waiting")
         server.producer()
@@ -94,18 +104,21 @@ class ApplicabilityTest(unittest.TestCase):
         self.assertTrue(allowed_completion(server.runs[200], {"intent_path": "intent.yml"}, server.policy))
 
     def test_diverged_bot_diff_uses_second_immutable_comparison(self):
+        """A normal behind-base bot branch uses one additional immutable read."""
         result, api, snapshot = decision(PathServer(diverged=True))
         self.assertEqual(result[0], "ready")
         self.assertEqual(api.api_calls, 21)
         self.assertEqual(snapshot["applicability"]["merge_base"], MERGE_BASE)
 
     def test_native_rule_cannot_be_only_conditional(self):
+        """Native obligations remain unconditional even on nonmatching paths."""
         server = PathServer()
         server.rules[1]["parameters"]["required_status_checks"].append(
             {"context": DOC_CHECK, "integration_id": 15368})
         self.assertEqual(decision(server)[0][0], "blocked")
 
     def test_compare_endpoint_allows_only_exact_repository_immutable_get(self):
+        """Ref aliases, queries, foreign repositories and writes cannot reach I/O."""
         api = PathServer().client()
         route = f"/repos/{REPO}/compare/{BASE}...{SHA}"
         self.assertTrue(api.api_url(route).endswith(route))
@@ -118,6 +131,7 @@ class ApplicabilityTest(unittest.TestCase):
             api.api_url(route, "POST")
 
     def test_invalid_complete_file_and_commit_evidence_blocks(self):
+        """Partial, renamed, malformed or incorrectly bound evidence cannot pass."""
         mutations = [
             lambda s: s.compare.pop("files"),
             lambda s: s.compare.update(files=[]),
@@ -143,6 +157,7 @@ class ApplicabilityTest(unittest.TestCase):
                 server.client().snapshot(42)
 
     def test_drift_is_rejected_even_for_nonmatching_paths(self):
+        """Unrelated changed paths cannot hide drift in a declared workflow."""
         for alias in ("b0", "h0"):
             for value in (None, {"__typename": "Tree", "oid": BLOB}, {"__typename": "Blob", "oid": BASE}):
                 server = PathServer()
@@ -151,6 +166,7 @@ class ApplicabilityTest(unittest.TestCase):
                     server.client().snapshot(42)
 
     def test_closing_current_base_and_associated_anchor_races_block(self):
+        """Movement during collection invalidates the entire path snapshot."""
         for mutate in (lambda p: p["baseRef"]["target"].update(oid=MERGE_BASE),
                        lambda p: p.update(baseRefOid=MERGE_BASE), lambda p: p.update(changedFiles=2),
                        lambda p: p.update(headRefOid=BASE), lambda p: p.update(baseRefName="other"),
@@ -162,6 +178,7 @@ class ApplicabilityTest(unittest.TestCase):
                 server.client().snapshot(42)
 
     def test_live_base_ref_never_falls_back_to_associated_oid(self):
+        """Missing live refs cannot borrow the PR-associated base identity."""
         for value in (None, {}, {"name": "main", "target": {"oid": BASE}}):
             server = PathServer()
             server.raw["baseRef"] = value
@@ -169,6 +186,7 @@ class ApplicabilityTest(unittest.TestCase):
                 server.client().snapshot(42)
 
     def test_applicable_newer_pending_or_unsuccessful_run_is_not_hidden(self):
+        """Older green jobs cannot satisfy a newer unfinished or failed run."""
         for status, conclusion, expected in (("queued", None, "waiting"),
                 ("completed", "failure", "blocked"), ("completed", "skipped", "blocked"),
                 ("completed", "cancelled", "blocked")):
@@ -179,6 +197,7 @@ class ApplicabilityTest(unittest.TestCase):
             self.assertEqual(decision(server)[0][0], expected)
 
     def test_invalid_versioned_schema_never_drops_obligations(self):
+        """Bad declarations fail instead of disabling conditional requirements."""
         for mutate in (lambda p: p.update(version=1), lambda p: p.update(base_ref=""),
                        lambda p: p.update(conditional_checks=[]),
                        lambda p: p["conditional_checks"][0].update(events=["merge_group"]),
@@ -192,6 +211,7 @@ class ApplicabilityTest(unittest.TestCase):
                 validate_policy(policy)
 
     def test_two_ready_observer_snapshots_recompute_and_never_write(self):
+        """Observation pays for both complete snapshots and attempts no mutation."""
         server = PathServer(diverged=True)
         api = server.client()
         context, _ = fixtures()
@@ -204,6 +224,7 @@ class ApplicabilityTest(unittest.TestCase):
         self.assertEqual(api.mutation_attempts, 0)
 
     def test_full_small_boundary_inventories_and_literal_nonmatches(self):
+        """Supported maxima pass while caps and filename look-alikes do not."""
         server = PathServer([f"src/file-{index}.php" for index in range(299)])
         commits = [{"sha": f"{index:040x}"} for index in range(248)] + [{"sha": SHA}]
         server.compare.update(commits=commits, total_commits=249, ahead_by=249)
@@ -220,6 +241,7 @@ class ApplicabilityTest(unittest.TestCase):
             oversized.client().snapshot(42)
 
     def test_diverged_second_comparison_cannot_disagree_or_be_pending_data(self):
+        """The merge-base comparison must independently confirm the same diff."""
         for mutate in (lambda s: s.ancestor["files"][0].update(filename=DOC_PATH),
                        lambda s: s.ancestor.update(commits=[]), lambda s: s.ancestor.update(status="diverged"),
                        lambda s: s.ancestor["base_commit"].update(sha=BASE)):
@@ -229,12 +251,14 @@ class ApplicabilityTest(unittest.TestCase):
                 server.client().snapshot(42)
 
     def test_removed_files_and_null_previous_name_still_activate_producer(self):
+        """Ordinary added, changed and removed paths all carry obligations."""
         for status in ("added", "modified", "removed"):
             server = PathServer([OLD_DOC_PATH])
             server.compare["files"][0].update(status=status, previous_filename=None)
             self.assertEqual(decision(server)[0][0], "waiting")
 
     def test_multiple_real_checks_from_one_workflow_are_each_mandatory(self):
+        """Workflow success alone cannot replace another missing required job."""
         server = PathServer([DOC_PATH])
         server.policy["conditional_checks"].append(server.policy["conditional_checks"][0] | {"name": "docs / Second job"})
         server.producer()
@@ -244,6 +268,7 @@ class ApplicabilityTest(unittest.TestCase):
         self.assertEqual(decision(server)[0][0], "ready")
 
     def test_conditional_late_fallback_and_inapplicable_visible_negatives_survive(self):
+        """Late required runs and visible additional failures retain their veto."""
         server = PathServer([DOC_PATH])
         server.producer(status="in_progress", conclusion=None)
         server.listed = [run for run in server.listed if run["id"] != 200]
@@ -254,6 +279,7 @@ class ApplicabilityTest(unittest.TestCase):
             self.assertEqual(decision(server)[0][0], expected)
 
     def test_missing_or_rebound_normalized_proof_never_means_inapplicable(self):
+        """Incomplete normalized evidence cannot waive a producer in pure policy."""
         server = PathServer()
         _, _, snapshot = decision(server)
         context, _ = fixtures()
@@ -269,6 +295,7 @@ class ApplicabilityTest(unittest.TestCase):
             self.assertEqual(decide(context, broken, server.policy, intent)[0], "blocked")
 
     def test_ref_identity_retarget_between_ready_snapshots_prevents_enqueue(self):
+        """A same-tip change to a distinct anchor still prevents mutation."""
         server = PathServer()
         api = server.client()
         context, _ = fixtures()
@@ -277,6 +304,7 @@ class ApplicabilityTest(unittest.TestCase):
         original, reads = api.snapshot, []
 
         def snapshot(number):
+            """Expose a coherent changed associated anchor only on the later read."""
             value = original(number)
             if reads:
                 value["applicability"]["anchor"]["pr_base_oid"] = MERGE_BASE
@@ -291,6 +319,7 @@ class ApplicabilityTest(unittest.TestCase):
         self.assertEqual(api.mutation_attempts, 0)
 
     def test_four_workflows_six_checks_share_exactly_one_eight_blob_read(self):
+        """All current declaration shapes share one correctly bound blob query."""
         server = PathServer()
         for workflow, name, exact, prefix in (
             ("decision-sidecar.yml", "decision-sidecar / Python 3.14 (ubuntu-latest)", [], ["Build/decision/"]),
@@ -315,6 +344,7 @@ class ApplicabilityTest(unittest.TestCase):
         self.assertEqual(len(snapshot["applicability"]["inapplicable_checks"]), 6)
 
     def test_wrong_conditional_provenance_and_closing_graphql_errors_block(self):
+        """Wrong producers and partial provider errors cannot qualify readiness."""
         for mutate in (lambda s: s.checks[-1]["app"].update(id=12),
                        lambda s: s.runs[200].update(event="workflow_dispatch"),
                        lambda s: s.runs[200].update(path=".github/workflows/other.yml")):
@@ -328,6 +358,7 @@ class ApplicabilityTest(unittest.TestCase):
             server.client().snapshot(42)
 
     def test_v2_receipt_binds_actual_paths_and_api_cost_without_mutations(self):
+        """Receipts expose the actual proof digest, anchors and request counts."""
         server = PathServer(diverged=True)
         _, api, snapshot = decision(server)
         api.last_snapshot = snapshot

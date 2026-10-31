@@ -25,10 +25,12 @@ def digest(policy):
 
 
 def declared_checks(policy):
+    """List every declared producer, including currently inapplicable ones."""
     return policy["required_checks"] + (policy["conditional_checks"] if policy.get("version") == 2 else [])
 
 
 def validate_version(policy):
+    """Dispatch explicit policy versions without silently dropping v2 duties."""
     if policy.get("version") not in {1, 2} or not policy.get("required_checks"):
         raise Blocked("A nonempty version-1 or version-2 required-check inventory is required")
     if policy["version"] == 1 and {"conditional_checks", "base_ref"}.intersection(policy):
@@ -41,6 +43,7 @@ def validate_version(policy):
 
 
 def validate_policy(policy):
+    """Validate canonical identities, approval minima and advisory separation."""
     validate_version(policy)
     names = set()
     for check in declared_checks(policy):
@@ -219,6 +222,7 @@ def require_statuses(statuses, advisory):
 
 
 def evaluate_checks(context, snapshot, policy):
+    """Require all applicable jobs plus the unchanged additional-check guards."""
     requirements = (effective_checks(snapshot, policy, digest(policy))
                     if policy["version"] == 2 else policy["required_checks"])
     expected = {check["name"]: check for check in requirements}

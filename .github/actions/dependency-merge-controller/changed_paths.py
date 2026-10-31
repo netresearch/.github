@@ -13,18 +13,21 @@ ANCHOR_KEYS = {"repository", "number", "head", "head_ref", "base", "base_ref",
 
 
 def sha(value):
+    """Require a complete lowercase Git identity without mutable ref aliases."""
     if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}", value):
         raise ValueError("Missing or malformed immutable Git identity")
     return value
 
 
 def count(value, minimum, maximum):
+    """Reject missing, boolean, out-of-range or capped provider counts."""
     if type(value) is not int or not minimum <= value <= maximum:
         raise ValueError("Changed-path evidence count is missing, invalid or capped")
     return value
 
 
 def path(value, prefix=False):
+    """Accept literal ASCII paths without decoding or normalization."""
     if not isinstance(value, str) or (prefix and not value.endswith("/")):
         raise ValueError("Expected a literal repository-relative path")
     clean = value[:-1] if prefix else value
@@ -35,6 +38,7 @@ def path(value, prefix=False):
 
 
 def validate_rule(paths):
+    """Validate both positive literal path sets before any provider reads."""
     if not isinstance(paths, dict) or set(paths) != {"exact", "prefix"}:
         raise ValueError("Conditional paths require exact and prefix lists")
     for kind in ("exact", "prefix"):
@@ -50,6 +54,7 @@ def validate_rule(paths):
 
 
 def conditional_definition(entry):
+    """Bind one PR job to a reviewed workflow blob and literal trigger rule."""
     if (not isinstance(entry, dict)
             or set(entry) != {"name", "app_id", "workflow", "events", "paths", "workflow_blob_oid"}
             or not entry["name"] or entry["events"] != ["pull_request"]):
@@ -60,6 +65,7 @@ def conditional_definition(entry):
 
 
 def validate_conditions(policy):
+    """Require coherent v2 declarations and one shared rule per workflow."""
     git_ref(policy["base_ref"])
     entries = policy["conditional_checks"]
     if (not isinstance(entries, list) or not entries
@@ -75,10 +81,12 @@ def validate_conditions(policy):
 
 
 def workflow_pins(policy):
+    """Deduplicate caller blob pins for the single batched closing query."""
     return {entry["workflow"]: entry["workflow_blob_oid"] for entry in policy["conditional_checks"]}
 
 
 def anchor(raw, repository, base_ref):
+    """Capture the live branch tip separately from PR-associated base metadata."""
     ref = raw["baseRef"]
     if (not isinstance(ref, dict) or ref["name"] != raw["baseRefName"]
             or ref["name"] != base_ref or ref["prefix"] != "refs/heads/"
@@ -96,6 +104,7 @@ def anchor(raw, repository, base_ref):
 
 
 def comparison_history(raw, base, head):
+    """Accept only internally consistent ahead or diverged comparisons."""
     if sha(raw["base_commit"]["sha"]) != base:
         raise ValueError("Comparison base does not match the immutable requested base")
     merge_base = sha(raw["merge_base_commit"]["sha"])
@@ -108,6 +117,7 @@ def comparison_history(raw, base, head):
 
 
 def comparison_commits(raw, head):
+    """Require complete bounded head-side history ending at the requested head."""
     total = count(raw["total_commits"], 1, 249)
     if count(raw["ahead_by"], 1, 249) != total or not isinstance(raw["commits"], list):
         raise ValueError("Comparison commit inventory is incomplete")
@@ -118,6 +128,7 @@ def comparison_commits(raw, head):
 
 
 def comparison_files(rows, changed_files):
+    """Reject partial, duplicate, renamed or unsupported changed-file rows."""
     if not isinstance(rows, list) or count(len(rows), 1, 299) != changed_files:
         raise ValueError("Comparison file inventory does not match the complete PR count")
     files = []
@@ -132,6 +143,7 @@ def comparison_files(rows, changed_files):
 
 
 def comparison(raw, base, head, changed_files):
+    """Normalize one complete immutable comparison for path selection."""
     if not isinstance(raw, dict) or raw.get("too_large") or raw.get("truncated"):
         raise ValueError("Comparison is missing or explicitly truncated")
     status, merge_base = comparison_history(raw, base, head)
@@ -141,6 +153,7 @@ def comparison(raw, base, head, changed_files):
 
 
 def closing_query(repository, number, captured, policy):
+    """Batch final PR anchors and immutable caller OIDs without reading content."""
     owner, repo = repository.split("/")
     variables = {"owner": owner, "repo": repo, "number": number}
     declarations, aliases = [], []
@@ -157,6 +170,7 @@ def closing_query(repository, number, captured, policy):
 
 
 def verify_closing(data, captured, policy):
+    """Reject moved anchors or caller-byte drift at either pinned revision."""
     repository = data["repository"]
     if (repository["nameWithOwner"] != captured["repository"]
             or anchor(repository["pullRequest"], captured["repository"], policy["base_ref"]) != captured):
@@ -169,12 +183,14 @@ def verify_closing(data, captured, policy):
 
 
 def conditional_selection(paths, policy):
+    """Choose conditional PR jobs from literal trusted changed filenames."""
     return [entry for entry in policy["conditional_checks"]
             if any(value in entry["paths"]["exact"] or value.startswith(tuple(entry["paths"]["prefix"]))
                    for value in paths)]
 
 
 def effective_checks(snapshot, policy, policy_digest):
+    """Bind complete path evidence to this revision/policy before choosing jobs."""
     proof = snapshot["applicability"]
     pr = snapshot["pr"]
     if (snapshot["complete"].get("changed_files") is not True

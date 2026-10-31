@@ -76,6 +76,7 @@ def verify_intent_record(document, artifact, run, context):
 
 
 def evaluate_and_enqueue(api, context, policy, intent):
+    """Require two fresh ready snapshots before one expected-head enqueue."""
     snapshot = api.snapshot(context["number"])
     api.last_snapshot = snapshot
     result = decide(context, snapshot, policy, intent)
@@ -304,6 +305,7 @@ class GitHub:
         return self.runs[run_id]
 
     def snapshot(self, number):
+        """Collect one fresh complete PR inventory with versioned path evidence."""
         conditional = self.policy.get("version") == 2
         if conditional:
             validate_policy(self.policy)
@@ -353,6 +355,7 @@ class GitHub:
         return snapshot
 
     def start_applicability(self, raw, pr):
+        """Read immutable v2 comparisons while retaining v1's exact API budget."""
         if self.policy.get("version") != 2:
             return None
         try:
@@ -361,6 +364,7 @@ class GitHub:
             raise ApiError("Changed-path evidence is incomplete or invalid: " + str(error)) from error
 
     def finish_applicability(self, number, proof):
+        """Close v2 evidence with one live-anchor and immutable-blob read."""
         if proof is None:
             return
         try:
@@ -370,6 +374,7 @@ class GitHub:
             raise ApiError("Closing applicability evidence did not verify: " + str(error)) from error
 
     def changed_paths(self, raw, pr):
+        """Bind complete changed paths to the live base, head and reviewed policy."""
         captured = anchor(raw, self.repository, self.policy["base_ref"])
         pr.update(captured)
         base, head = captured["base"], captured["head"]
@@ -392,6 +397,7 @@ class GitHub:
                 "workflow_blobs": workflow_pins(self.policy), "policy_digest": digest(self.policy)}
 
     def workflow_records(self, sha):
+        """Retain all declared producers from one bounded SHA-specific run list."""
         workflows = []
         expected = {".github/workflows/" + item["workflow"] for item in declared_checks(self.policy)}
         for raw in self.collection(f"/repos/{self.repository}/actions/runs?head_sha={sha}",
@@ -473,6 +479,7 @@ class GitHub:
             raise ApiError("Check timestamp evidence is malformed") from error
 
     def verification_records(self, pr):
+        """Bind current checks and late producers to coherent server run/jobs."""
         checks, statuses, workflows = [], [], []
         # Both SHA locations are explicit and bound to this freshly read PR.
         for sha in sorted({pr["head"], pr["test_merge"]} - {None}):
@@ -532,6 +539,7 @@ class GitHub:
 
 
 def allowed_completion(run, context, policy):
+    """Allow only the trusted origin or explicitly declared producer events."""
     if run["path"] == context["intent_path"]:
         return (run["event"] == "pull_request_target" and run["actor"]["login"] in BOTS
                 and run["conclusion"] == "success")
@@ -651,6 +659,7 @@ def prepare_intent(api, context, policy):
 
 
 def write_receipt(api, context, policy, phase, intent, state, reason):
+    """Record the observed decision, immutable evidence and actual API demand."""
     snapshot = getattr(api, "last_snapshot", {})
     pr = snapshot.get("pr", {})
     receipt = {"phase": phase, "observe_only": api.observe_only, "event": context.get("event"),
