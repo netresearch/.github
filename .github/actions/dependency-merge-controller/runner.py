@@ -26,6 +26,7 @@ DEPENDABOT_BOT = "dependabot[bot]"
 HISTORY_TYPES = "ADDED_TO_MERGE_QUEUE_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT,AUTO_MERGE_ENABLED_EVENT,AUTO_MERGE_DISABLED_EVENT"
 INITIAL_TARGET_ACTIONS = {"opened", "synchronize", "reopened"}
 METADATA_ACTIONS = {"unlabeled", "ready_for_review", "edited", "auto_merge_enabled"}
+RATE_LIMIT_FIELDS = ("limit", "remaining", "used", "reset")
 
 
 def workflow_path(value):
@@ -46,6 +47,36 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def timestamp(value):
     return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def rate_limit_number(value):
+    """Keep fitting ASCII decimal headers numeric and every unknown value null."""
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]+", value):
+        return None
+    digits = value.lstrip("0") or "0"
+    if len(digits) > 19 or (len(digits) == 19 and digits > "9223372036854775807"):
+        return None
+    return int(digits)
+
+
+def rate_limit_sample(headers, credential_kind, api_call):
+    """Project only five safe headers, never arbitrary resources or credentials."""
+    allowed = {"x-ratelimit-resource", *("x-ratelimit-" + field for field in RATE_LIMIT_FIELDS)}
+    try:
+        selected = {name.lower(): value for name, value in headers.items()
+                    if isinstance(name, str) and name.lower() in allowed}
+    except (AttributeError, TypeError, ValueError):
+        selected = {}
+    resource = selected.get("x-ratelimit-resource")
+    if resource not in ("core", "graphql"):
+        resource = None
+    return {"credential_kind": credential_kind, "resource": resource, "api_call": api_call,
+            **{field: rate_limit_number(selected.get("x-ratelimit-" + field)) for field in RATE_LIMIT_FIELDS}}
+
+
+def rate_limit_rows(samples):
+    """Emit at most six last samples with stable ordering including null resource."""
+    return sorted(samples.values(), key=lambda row: (row["credential_kind"], row["resource"] or ""))
 
 
 def graphql_bot_author(author):
@@ -148,6 +179,7 @@ class GitHub:
         self.phase = phase
         self.api_calls = 0
         self.mutation_attempts = 0
+        self.api_rate_limits = {}
 
     def api_url(self, path, method="GET"):
         return target_url(self.base, self.repository, path, method)
@@ -165,9 +197,11 @@ class GitHub:
         request = urllib.request.Request(url, data=encoded, headers=headers, method=method)
         try:
             with urllib.request.build_opener(NoRedirect).open(request, timeout=20) as response:
+                self.record_rate_limits(response.headers, write)
                 body = response.read(MAX_BYTES + 1)
                 response_headers = dict(response.headers)
         except urllib.error.HTTPError as error:
+            self.record_rate_limits(error.headers, write)
             if binary and error.code == 302:
                 location = error.headers.get("Location", "")
                 if urllib.parse.urlparse(location).scheme != "https":
@@ -183,6 +217,12 @@ class GitHub:
         if len(body) > MAX_BYTES:
             raise ApiError("GitHub response exceeds the bounded response size")
         return (body if binary else json.loads(body)), response_headers
+
+    def record_rate_limits(self, headers, write):
+        """Retain one v2 response per existing credential-role/resource pair."""
+        if self.policy.get("version") == 2:
+            sample = rate_limit_sample(headers, "write" if write else "read", self.api_calls)
+            self.api_rate_limits[(sample["credential_kind"], sample["resource"])] = sample
 
     def guard_operation(self, path, method, data, write):
         read_query = (path == "/graphql" and method == "POST" and isinstance(data, dict)
@@ -707,6 +747,7 @@ def write_receipt(api, context, policy, phase, intent, state, reason):
                "mutation_attempts": getattr(api, "mutation_attempts", 0),
                "api_calls": getattr(api, "api_calls", 0)}
     if policy.get("version") == 2:
+        receipt["api_rate_limits"] = rate_limit_rows(getattr(api, "api_rate_limits", {}))
         receipt["conditional_checks"] = policy.get("conditional_checks")
         receipt["applicability"] = snapshot.get("applicability")
         receipt["applicability_digest"] = digest(snapshot["applicability"]) if "applicability" in snapshot else None

@@ -325,6 +325,25 @@ origin run/artifact, policy digest, required inventory, decision and API/mutatio
 attempt counts. Observer receipts are retained as artifacts for seven days.
 An observed ready predicate alone does not establish a native artifact handoff;
 the receipt must also show the actual trusted completed origin and artifact.
+
+Version 2 receipts also include `api_rate_limits`, at most six last-response
+samples: read/write credential role by core/GraphQL/unknown resource. Each row
+contains the existing API attempt ordinal and safe numeric limit, remaining,
+used and reset headers. Unknown or malformed values are null; genuine zero
+remains zero. Header names are case-insensitive, and unknown resource strings,
+other headers, URLs, credentials and bodies are never emitted. New responses
+replace the same role/resource sample, including missing values and reset windows.
+State persists across freshness snapshots; it is not a time series or minimum.
+
+These roles identify the existing request's write flag, not separate credentials
+or quota buckets. A prepare approval uses the read role; an enqueue uses write.
+Both may consume the same actual allowance. Concurrent consumers can change
+used/remaining, so sample differences are not this controller's GraphQL points.
+The measurements prove neither capacity nor savings. Original GitHub success,
+HTTP-error and artifact302 headers are sampled; signed-storage headers are
+ignored and receive no GitHub token. No request, query, retry, sleep, decision or
+permission is added. Version 1 receipts remain unchanged and collect no samples.
+
 A new reusable must exist on `@main` before migration. Count the initial producer
 and later evaluator allocations, completion/review evaluations and temporary
 observer work separately in organization-wide measurements.
