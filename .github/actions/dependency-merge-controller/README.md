@@ -367,9 +367,9 @@ available safe header samples remain intact.
 
 Only configured receipts add `api_attempt_budget` with `limit`, `used` and
 `exhausted`. Usage equals `api_calls`; exhausted becomes true only after an
-additional request was denied, not merely after successful request64.
+additional request was denied, not merely after successful request 64.
 This bounds joint authenticated API attempts, not GraphQL points or available
-quota. Two separately guarded single-use invocations at64 permit at most128
+quota. Two separately guarded single-use invocations at 64 permit at most 128
 such attempts; ordinary callback fanout is not bounded by this policy alone.
 Signed-storage traffic, artifact-uploader/metadata actions and setup/hardening
 remain separately disclosed outside the Python counter. Real inventories may
