@@ -12,7 +12,7 @@ import unittest
 
 import yaml
 
-from drift_compare import WorkflowLoader
+from drift_compare import WorkflowLoader, action_identity
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECKS = ".github/workflows/checks.yml"
@@ -35,7 +35,7 @@ def with_reviewed_pin(document):
     reviewed = copy.deepcopy(document)
     for job in reviewed["jobs"].values():
         for step in job.get("steps", []):
-            if step.get("uses", "").startswith("step-security/harden-runner@"):
+            if action_identity(step.get("uses")) == "step-security/harden-runner":
                 step["uses"] = REVIEWED_PIN
     return reviewed
 

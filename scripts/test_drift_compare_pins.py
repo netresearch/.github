@@ -272,7 +272,7 @@ jobs:
         self.assertNotIn(f"~ {WORKFLOW}", pinned.stdout)
         self.assertEqual(pinned.stderr, "")
 
-    def test_one_file_of_each_category_is_counted_separately(self):
+    def test_each_file_is_listed_under_its_own_marker(self):
         other = ".github/workflows/other.yml"
         result = run_compare(workflow(), workflow(step=f"{ACTION}@{NEW}"),
                                   extra_template_files={other: (workflow(), "# prose\n" + workflow())})

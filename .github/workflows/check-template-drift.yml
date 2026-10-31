@@ -1,7 +1,7 @@
 # Reusable "template drift check" — compares a consuming repo's .github/
-# tree against the canonical template in this repo. Fails CI when any
-# governed file diverges, unless explicitly listed in the consumer's
-# .github/template.yaml `intentional-drift:` field.
+# tree against the canonical template in this repo. Fails CI when a
+# governed file diverges beyond the exceptions below, unless explicitly
+# listed in the consumer's .github/template.yaml `intentional-drift:` field.
 #
 # Caller pattern (in the consuming repo, from the template):
 #

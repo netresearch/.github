@@ -48,7 +48,6 @@ everything else is hash-pinned.
 | **zizmor** | Enforcement (audit) | `.github/zizmor.yml` `unpinned-uses` policy — authoritative. |
 | **Renovate** | Dependency updates | Not pinned by default; repos opt into the `:pinning` sub-preset, which pins third-party actions and exempts `netresearch/**`. |
 | **SonarCloud** | Secondary audit | Rule `githubactions:S7637` flags external actions without a SHA. |
-| **Template drift check** | Keeps call sites equal | `scripts/drift_compare.py` tolerates a different full SHA of the same action with a notice; a tag on either side stays drift. It does not check that a SHA is current. |
 | **OpenSSF Scorecard** | Score signal | `Pinned-Dependencies` check; org-owned ref-pins lower the sub-score by design. |
 | **CodeQL** | Secondary audit, not configurable through the shared reusable workflow | Rule `actions/unpinned-tag` flags org-owned `@main` too; the shared `codeql.yml` exposes no ownership-policy or model-pack input. Findings on `netresearch/*` are dismissed as `won't fix`, citing this ADR. |
 
@@ -166,6 +165,9 @@ third-party action is a genuine finding.
 
 - One policy, six tools, no drift: ownership decides ref-pin vs. hash-pin, and
   zizmor is the enforcement of record.
+- The template drift check tolerates a different full SHA of the same action
+  with a notice, and a tag on either side stays drift. It does not check that a
+  SHA is current or that it belongs to the repository named before the `@`.
 - A repo that wants Renovate action-pinning extends the `:pinning` sub-preset,
   which carries the `netresearch/**` exemption. Extending
   `helpers:pinGitHubActionDigests` directly re-pins org-owned workflows (the
