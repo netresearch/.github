@@ -15,6 +15,13 @@ change in behaviour. Prose that has to be authoritative belongs in the reusable
 it documents, where it exists once. Non-YAML files stay byte-governed, and a
 file that does not parse is treated as drift rather than waved through.
 
+A workflow file whose only remaining difference is the commit SHA a `uses:` is
+pinned to is reported as a pin notice and does not fail either: Renovate moves
+the template and each consumer on separate days, and neither order should turn
+an unrelated pull request red. The tolerance covers only a full SHA on both
+sides of the same action at the same job or step. Tags, branches, short SHAs and
+every other field stay drift, and so does a pin difference next to any of them.
+
 Intentional-drift is read from <consumer-dir>/.github/template.yaml's
 `intentional-drift:` list (each entry either a string path or a mapping with a
 `path:` key).
@@ -70,6 +77,11 @@ GO_CONCURRENCY_VARIANTS = {
         "0c301b1f2eb746f49d921e1a3f0d9141f6820191a91cf5bf7cd4cb59cc3e5595",
     }),
 }
+
+# `owner/repo[/path]@<full commit SHA>`, the only `uses:` form a pin can tolerate.
+PINNED_USES = re.compile(
+    r"([A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._/-]+)?)@[0-9a-f]{40}"
+)
 
 
 class WorkflowLoader(yaml.SafeLoader):
@@ -168,6 +180,55 @@ def semantic_fingerprint(document: object) -> str | None:
         return None
 
 
+def action_identity(value: object) -> str | None:
+    """The part of a full-SHA `uses:` value before the `@`, else None."""
+    match = PINNED_USES.fullmatch(value) if isinstance(value, str) else None
+    return match[1] if match else None
+
+
+def adopt_pin(holder: dict, canonical: dict) -> dict:
+    """Return holder with the template's `uses:` if only the pinned SHA differs."""
+    identity = action_identity(holder.get("uses"))
+    if identity is None or identity != action_identity(canonical.get("uses")):
+        return holder
+    return {**holder, "uses": canonical["uses"]}
+
+
+def adopt_job_pins(job: dict, canonical: dict) -> dict:
+    """Apply adopt_pin to a job and to the steps at the same list positions."""
+    aligned = adopt_pin(job, canonical)
+    steps, canonical_steps = job.get("steps"), canonical.get("steps")
+    if not isinstance(steps, list) or not isinstance(canonical_steps, list):
+        return aligned
+    if len(steps) != len(canonical_steps):
+        return aligned
+    return {**aligned, "steps": [
+        adopt_pin(step, other) if isinstance(step, dict) and isinstance(other, dict) else step
+        for step, other in zip(steps, canonical_steps)
+    ]}
+
+
+def pin_only_difference(consumer: object, template: object) -> bool:
+    """True when adopting the template's pins makes the two documents equal.
+
+    The tolerated pins are replaced by the template's own values rather than by
+    a placeholder on both sides, so no string in either file can collide with a
+    marker. Mappings are copied rather than edited: YAML aliases can share one
+    mapping between a step and an `env:`, which must keep its own value.
+    """
+    if not isinstance(consumer, dict) or not isinstance(template, dict):
+        return False
+    jobs, canonical_jobs = consumer.get("jobs"), template.get("jobs")
+    if not isinstance(jobs, dict) or not isinstance(canonical_jobs, dict):
+        return False
+    aligned = {
+        name: adopt_job_pins(job, canonical_jobs[name])
+        if isinstance(job, dict) and isinstance(canonical_jobs.get(name), dict) else job
+        for name, job in jobs.items()
+    }
+    return {**consumer, "jobs": aligned} == template
+
+
 def checks_concurrency_transition(template_root: Path, rel: str,
                                  template: object, consumer: object) -> bool:
     """Permit exactly A↔B at the one reviewed TYPO3 Checks path."""
@@ -190,7 +251,12 @@ def go_concurrency_transition(template_root: Path, rel: str,
 
 def document_difference(consumer_path: Path, tpl_file: Path, template_root: Path,
                         rel: str) -> str:
-    """Distinguish cosmetic equality, the exact transition and ordinary drift."""
+    """Distinguish cosmetic equality, the transitions, pins and ordinary drift.
+
+    The transition fingerprints always hash the documents as written, pins
+    included, and are consulted first. Their A and B documents differ in
+    concurrency, so no pair can be both a transition and a pin-only difference.
+    """
     ok_consumer, doc_consumer = parsed(consumer_path)
     ok_template, doc_template = parsed(tpl_file)
     if not ok_consumer or not ok_template:
@@ -201,6 +267,8 @@ def document_difference(consumer_path: Path, tpl_file: Path, template_root: Path
         return "transition"
     if go_concurrency_transition(template_root, rel, doc_template, doc_consumer):
         return "transition"
+    if rel.startswith(".github/workflows/") and pin_only_difference(doc_consumer, doc_template):
+        return "pinned"
     return "differing"
 
 
@@ -211,7 +279,9 @@ def classify(consumer_root: Path, template_root: Path, intentional: set[str]):
     cosmetic: list[str] = []
     escaped: list[str] = []
     transition: list[str] = []
-    documents = {"cosmetic": cosmetic, "differing": differing, "transition": transition}
+    pinned: list[str] = []
+    documents = {"cosmetic": cosmetic, "differing": differing, "transition": transition,
+                 "pinned": pinned}
 
     governed = sorted(p for p in (template_root / ".github").rglob("*") if p.is_file())
     for tpl_file in governed:
@@ -238,7 +308,7 @@ def classify(consumer_root: Path, template_root: Path, intentional: set[str]):
         category = document_difference(consumer_path, tpl_file, template_root, rel)
         documents[category].append(rel)
 
-    return missing, differing, cosmetic, escaped, transition
+    return missing, differing, cosmetic, escaped, transition, pinned
 
 
 def report_transitions(transition: list[str]) -> None:
@@ -286,7 +356,7 @@ def main(argv: list[str]) -> int:
     else:
         print("No intentional-drift entries.")
 
-    missing, differing, cosmetic, escaped, transition = classify(
+    missing, differing, cosmetic, escaped, transition, pinned = classify(
         consumer_root, template_root, intentional
     )
 
@@ -301,6 +371,15 @@ def main(argv: list[str]) -> int:
 
     if transition:
         report_transitions(transition)
+
+    if pinned:
+        annotate(
+            "notice",
+            f"{len(pinned)} workflow file(s) differ only in the commit SHA an "
+            "action is pinned to — not drift.",
+        )
+        for rel in pinned:
+            print(f"  ≈ {rel}")
 
     if escaped:
         annotate(

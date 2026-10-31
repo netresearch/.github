@@ -10,8 +10,9 @@
 # Thin wrapper around scripts/drift_compare.py, which the reusable
 # .github/workflows/check-template-drift.yml also calls — one implementation,
 # so a local verdict and the CI verdict cannot disagree. See that file for the
-# comparison rules (YAML compared as parsed documents, non-YAML byte-for-byte)
-# and for how intentional-drift is read.
+# comparison rules (YAML compared as parsed documents, non-YAML byte-for-byte,
+# a difference in the pinned commit SHA alone tolerated with a notice) and for
+# how intentional-drift is read.
 
 set -euo pipefail
 

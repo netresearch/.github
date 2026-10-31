@@ -165,6 +165,9 @@ third-party action is a genuine finding.
 
 - One policy, six tools, no drift: ownership decides ref-pin vs. hash-pin, and
   zizmor is the enforcement of record.
+- The template drift check tolerates a different full SHA of the same action
+  with a notice, and a tag on either side stays drift. It does not check that a
+  SHA is current or that it belongs to the repository named before the `@`.
 - A repo that wants Renovate action-pinning extends the `:pinning` sub-preset,
   which carries the `netresearch/**` exemption. Extending
   `helpers:pinGitHubActionDigests` directly re-pins org-owned workflows (the

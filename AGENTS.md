@@ -16,7 +16,10 @@ template is detected and reconciled by dedicated tooling:
 - **Enforce:** each consumer runs `check-template-drift.yml` on its pull
   requests and pushes; it fails when a governed file differs from the template.
   YAML files are compared as parsed documents (`scripts/drift_compare.py`), so a
-  change that only touches comments is reported as cosmetic, not as drift.
+  change that only touches comments is reported as cosmetic, not as drift. A
+  workflow file that differs only in the full commit SHA of the same action, in
+  a job-level or step-level `uses:`, gets its own notice and does not fail
+  either. Tags, branches, short SHAs and any further difference still fail.
 - **Detect:** `.github/workflows/drift-scan.yml` runs weekly (Mon 06:00 UTC) and
   on `workflow_dispatch` (with an optional `template:` input that limits the
   scan to one template's consumers). It auto-opens

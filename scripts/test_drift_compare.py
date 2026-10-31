@@ -12,7 +12,7 @@ import unittest
 
 import yaml
 
-from drift_compare import WorkflowLoader
+from drift_compare import WorkflowLoader, action_identity
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECKS = ".github/workflows/checks.yml"
@@ -21,6 +21,9 @@ CANCEL = "${{ github.event_name == 'pull_request' }}"
 NOTICE = "Approved Checks PR-concurrency transition"
 HASH_A = "65c451549abd2ebd6fcdb367d47b855e25b2d48b8315149276caf33af2a01656"
 HASH_B = "9255cc2adf021436f7f52875e0d8e654d1e7aad8dad4dacfb1638f4ab1e18a22"
+# The harden-runner pin of both reviewed documents. Renovate may move the template
+# past it, so the documents are rebuilt with this pin rather than the current one.
+REVIEWED_PIN = "step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2"
 
 
 def fingerprint(document):
@@ -28,12 +31,21 @@ def fingerprint(document):
     return hashlib.sha256(data.encode()).hexdigest()
 
 
+def with_reviewed_pin(document):
+    reviewed = copy.deepcopy(document)
+    for job in reviewed["jobs"].values():
+        for step in job.get("steps", []):
+            if action_identity(step.get("uses")) == "step-security/harden-runner":
+                step["uses"] = REVIEWED_PIN
+    return reviewed
+
+
 class TransitionTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         current = yaml.load((ROOT / "templates/typo3-extension" / CHECKS).read_text(), Loader=WorkflowLoader)
         cls.current = current
-        cls.a = copy.deepcopy(current)
+        cls.a = with_reviewed_pin(current)
         cls.a.pop("concurrency", None)
         cls.b = copy.deepcopy(cls.a)
         cls.b["concurrency"] = {"group": GROUP, "cancel-in-progress": CANCEL}
@@ -70,7 +82,8 @@ class TransitionTest(unittest.TestCase):
         self.assertNotIn(NOTICE, result.stdout)
 
     def test_frozen_whole_document_fingerprints(self):
-        self.assertIn(fingerprint(self.current), {HASH_A, HASH_B})
+        # Any canonical change except a harden-runner pin bump still fails here.
+        self.assertIn(fingerprint(with_reviewed_pin(self.current)), {HASH_A, HASH_B})
         self.assertEqual(fingerprint(self.a), HASH_A)
         self.assertEqual(fingerprint(self.b), HASH_B)
 
