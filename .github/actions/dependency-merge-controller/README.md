@@ -352,7 +352,14 @@ Run offline fixtures with:
 
 ```sh
 python3 -m unittest discover -s .github/actions/dependency-merge-controller -p 'test_*.py' -v
+bash .github/actions/dependency-merge-controller/test-permissions.sh
+python3 -m unittest discover -s scripts -p 'test_auto_merge_deps_checks.py' -v
 ```
+
+Repository CI runs all three programs in the existing
+`Dependency controller policy fixtures` job on pull requests, main pushes and
+main merge groups. The merge-group job validates the combined queue tree.
+The other four lint jobs continue to run on pull requests and main pushes.
 
 The tests use API/mutation stubs, including fresh-pending-to-ready progress,
 spoofed/expired intent, newest pending runs, missing or wrong producers,

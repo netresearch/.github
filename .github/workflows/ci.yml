@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  merge_group:
+    types: [checks_requested]
+    branches: [main]
 
 permissions:
   contents: read
@@ -12,6 +15,7 @@ permissions:
 jobs:
   workflows:
     name: Lint Workflows
+    if: github.event_name != 'merge_group'
     uses: ./.github/workflows/lint-workflows.yml
 
   dependency-controller:
@@ -33,33 +37,22 @@ jobs:
       - name: Reusable caller permission fixtures
         run: bash .github/actions/dependency-merge-controller/test-permissions.sh
 
-  auto-merge-gate:
-    name: Auto-merge gate fixtures
-    runs-on: ubuntu-latest
-    timeout-minutes: 3
-    permissions:
-      contents: read
-    steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
-        with:
-          egress-policy: audit
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
       - name: Check gate of auto-merge-deps.yml against recorded check lists
         run: python3 -m unittest discover -s scripts -p 'test_auto_merge_deps_checks.py' -v
 
   markdown:
     name: Lint Markdown
+    if: github.event_name != 'merge_group'
     uses: ./.github/workflows/lint-markdown.yml
 
   yaml:
     name: Lint YAML
+    if: github.event_name != 'merge_group'
     uses: ./.github/workflows/lint-yaml.yml
 
   zizmor:
     name: zizmor
+    if: github.event_name != 'merge_group'
     permissions:
       contents: read
       security-events: write
