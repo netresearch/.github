@@ -61,7 +61,7 @@ Plus `.github/dependabot.yml`, `.github/labeler.yml`, `.github/template.yaml` in
 **New:**
 - `ghcr-retention.yml` — ported from ofelia's `cleanup-containers.yml`. Inputs: `package-name`, `release-tag-patterns`, `edge-tag-patterns`, `edge-max-age-days`, `dry-run`.
 - `go-mutation-testing.yml` — ported from ofelia's `mutation.yml`. Inputs: `go-version-file`, `config-path` (default `.gremlins.yaml`), `timeout-minutes`, `diff-only`.
-- `check-template-drift.yml` — compares consumer's `.github/` to `templates/<template>/.github/` on `main`, minus `intentional-drift:` paths in the consumer's `.github/template.yaml`. Exits 1 on any diff that changes the parsed document, except a difference in the pinned commit SHA of the same action, which is reported as a notice.
+- `check-template-drift.yml` — compares consumer's `.github/` to `templates/<template>/.github/` on `main`, minus `intentional-drift:` paths in the consumer's `.github/template.yaml`. Exits 1 on any diff that changes the parsed document, except a difference in the pinned commit SHA of the same action that is reachable from the action's own branches or tags, which is reported as a notice.
 
 ### Drift enforcement
 

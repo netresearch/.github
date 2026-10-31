@@ -167,7 +167,11 @@ third-party action is a genuine finding.
   zizmor is the enforcement of record.
 - The template drift check tolerates a different full SHA of the same action
   with a notice, and a tag on either side stays drift. It does not check that a
-  SHA is current or that it belongs to the repository named before the `@`.
+  SHA is current. It does check that the SHA belongs to the repository named
+  before the `@`, online, against that repository's branches and tags: resolving
+  the SHA would prove nothing, since GitHub serves a fork's commit through the
+  parent. A commit in none of them fails, and a pin that could not be checked is
+  tolerated with a warning.
   Consumers requiring the template's exact pin can opt into
   [strict pin drift](../../scripts/strict-pin-drift.md) with `strict-pins: true`
   in their existing `.github/template.yaml` metadata.

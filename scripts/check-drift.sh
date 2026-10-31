@@ -4,8 +4,8 @@
 # Usage:
 #   check-drift.sh <consumer-dir> <template-dir>
 #
-# Exits 1 on drift, 0 otherwise. Prints missing/differing file lists and
-# unified diffs to stderr.
+# Exits 1 on drift, 0 otherwise (see drift_compare.py for 2 and 3). Prints
+# missing/differing file lists and unified diffs to stderr.
 #
 # Thin wrapper around scripts/drift_compare.py, which the reusable
 # .github/workflows/check-template-drift.yml also calls — one implementation,
@@ -13,6 +13,11 @@
 # comparison rules (YAML compared as parsed documents, non-YAML byte-for-byte,
 # a difference in the pinned commit SHA alone tolerated with a notice) and for
 # how intentional-drift is read.
+#
+# A differing pin is verified against the action's own branches and tags only
+# with a token in GITHUB_TOKEN or GH_TOKEN. Without one nothing is fetched, each
+# such pin gets a "was not verified" warning and the exit code stays 0, so a local
+# pass says nothing about whether the commit belongs to the action.
 
 set -euo pipefail
 

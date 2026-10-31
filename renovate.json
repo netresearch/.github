@@ -4,7 +4,7 @@
     "local>netresearch/renovate-config"
   ],
   "github-actions": {
-    "description": "Also manage action pins inside the workflow templates: consumers vendor these files, and the drift check reports a difference in the pinned SHA alone only as a notice (issue #353). Managing the template here makes it move in the same cycle as the consumers.",
+    "description": "Also manage action pins inside the workflow templates: consumers vendor these files, and the drift check reports a difference in the pinned SHA alone, verified against the action's own branches and tags, only as a notice (issue #353). Managing the template here makes it move in the same cycle as the consumers.",
     "fileMatch": [
       "^templates/.+/\\.github/workflows/.+\\.ya?ml$"
     ]

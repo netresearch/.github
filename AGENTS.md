@@ -20,6 +20,14 @@ template is detected and reconciled by dedicated tooling:
   workflow file that differs only in the full commit SHA of the same action, in
   a job-level or step-level `uses:`, gets its own notice and does not fail
   either. Tags, branches, short SHAs and any further difference still fail.
+  That SHA is checked online (`scripts/pin_reachability.py`) with the job's
+  token, because GitHub serves a fork's commit through the parent repository: a
+  commit in no branch or tag of the action's repository fails the check, and a
+  pin that could not be checked gets a `was not verified` warning instead of the
+  notice. The check is a treeless clone of the action and a listing of its
+  commits; do not replace it with the compare API or a lookup of the SHA, for the
+  reasons in that file. `scripts/check-drift.sh` checks only with `GITHUB_TOKEN`
+  or `GH_TOKEN` set; without one it fetches nothing and warns the same way.
 - **Detect:** `.github/workflows/drift-scan.yml` runs weekly (Mon 06:00 UTC) and
   on `workflow_dispatch` (with an optional `template:` input that limits the
   scan to one template's consumers). It auto-opens
