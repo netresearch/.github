@@ -108,6 +108,10 @@ jobs:
         env:
           CONSUMER_DIR: ${{ github.workspace }}/consumer
           TEMPLATE_DIR: ${{ github.workspace }}/templates-src/templates/${{ matrix.template }}
+          # Verifies a pin that differs from the template. Exit 3 means a pin could
+          # not be checked: that is no reason to open a drift issue or to close one.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRIFT_UNVERIFIED_EXIT: "1"
         run: |
           set +e
           OUTPUT=$(bash "$GITHUB_WORKSPACE/templates-src/scripts/check-drift.sh" "$CONSUMER_DIR" "$TEMPLATE_DIR" 2>&1)
@@ -119,10 +123,14 @@ jobs:
             echo "$OUTPUT"
             echo "DRIFT_EOF"
           } >> "$GITHUB_OUTPUT"
+          # Exit 3 touches no issue, so this log is the only place its warning shows.
+          if [ "$STATUS" = 3 ]; then
+            echo "$OUTPUT"
+          fi
           exit 0
 
       - name: Open or update drift issue
-        if: steps.drift.outputs.status != '0'
+        if: steps.drift.outputs.status != '0' && steps.drift.outputs.status != '3'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TARGET_REPO: ${{ matrix.repo }}

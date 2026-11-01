@@ -22,6 +22,13 @@ OLD = "dc2769abcc0fcfbadfc1df54081c1608579ef6b2"
 NEW = "46b06cea07f9e64621fdf066ba77ac6915163d43"
 ACTION = "step-security/harden-runner"
 REUSABLE = "acme/workflows/.github/workflows/build.yml"
+FAKE_GIT = FIXTURES / "fake-git"
+
+
+def reachable_everything():
+    """The tests here are about the comparison: every pin they use is on a branch."""
+    return {"PATH": f"{FAKE_GIT}{os.pathsep}{os.environ['PATH']}", "GITHUB_TOKEN": "fixture",
+            "GH_TOKEN": "", "FAKE_GIT_COMMITS": f"{OLD} {NEW}"}
 
 
 def workflow(step=f"{ACTION}@{OLD}", job=f"{REUSABLE}@{OLD}", with_uses=f"{ACTION}@{OLD}",
@@ -49,7 +56,8 @@ def fixture(name):
 
 
 def run_compare(template, consumer, *, path=WORKFLOW, template_name="skill",
-                wrapper=False, actions=False, extra_template_files=None, escape=False):
+                wrapper=False, actions=False, extra_template_files=None, escape=False,
+                environment=None):
     """Run the real CLI; a None consumer leaves that file missing."""
     with tempfile.TemporaryDirectory() as directory:
         base = Path(directory)
@@ -67,10 +75,11 @@ def run_compare(template, consumer, *, path=WORKFLOW, template_name="skill",
             (consumer_root / path).symlink_to(outside)
         command = (["bash", str(ROOT / "scripts/check-drift.sh")] if wrapper else
                    [sys.executable, str(ROOT / "scripts/drift_compare.py")])
-        environment = os.environ | {"PYTHONDONTWRITEBYTECODE": "1",
-                                    "GITHUB_ACTIONS": "true" if actions else ""}
+        variables = os.environ | {"PYTHONDONTWRITEBYTECODE": "1",
+                                  "GITHUB_ACTIONS": "true" if actions else ""}
+        variables |= reachable_everything() if environment is None else environment
         return subprocess.run(command + [str(consumer_root), str(template_root)],
-                              capture_output=True, text=True, check=False, env=environment)
+                              capture_output=True, text=True, check=False, env=variables)
 
 
 class PinToleranceTest(unittest.TestCase):

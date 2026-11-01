@@ -5,7 +5,8 @@ Usage:
     drift_compare.py <consumer-dir> <template-dir>
 
 Exit codes: 0 no drift, 1 drift, 2 the template or metadata could not be read,
-or a governed path resolved outside the directory it was compared in.
+or a governed path resolved outside the directory it was compared in, 3 no drift
+but a pin was not verified, only when DRIFT_UNVERIFIED_EXIT is set.
 
 YAML files are compared as parsed documents rather than as bytes. A file that
 differs only in comments, key order or whitespace runs exactly the same, so it
@@ -23,6 +24,14 @@ sides of the same action at the same job or step. Tags, branches, short SHAs and
 every other field stay drift, and so does a pin difference next to any of them.
 Consumers can set `strict-pins: true` in their .github/template.yaml to make
 pin-only differences fail too. The default remains tolerant.
+
+GitHub serves a commit of any fork through every repository of the fork network,
+so each tolerated pin is verified online against the action's own branches and
+tags (pin_reachability.py). A pin in none of them counts as differing. A pin that
+could not be checked, for instance without a token in GITHUB_TOKEN or GH_TOKEN,
+is tolerated with a warning that says so, never with the notice of a verified one.
+It exits 0 unless DRIFT_UNVERIFIED_EXIT is set: then 3, for a caller that has to
+tell a clean result from an unchecked one by the exit code alone.
 
 Intentional-drift is read from <consumer-dir>/.github/template.yaml's
 `intentional-drift:` list (each entry either a string path or a mapping with a
@@ -44,6 +53,8 @@ import sys
 from pathlib import Path
 
 import yaml
+
+from pin_reachability import PinChecker, Reachability
 
 IN_ACTIONS = bool(os.environ.get("GITHUB_ACTIONS"))
 STRICT_PINS = "strict-pins"
@@ -280,6 +291,21 @@ def pin_only_difference(consumer: object, template: object) -> bool:
     return {**consumer, "jobs": aligned} == template
 
 
+def changed_pins(consumer: dict, template: dict) -> list[str]:
+    """The consumer's `uses:` values differing from a document pin_only_difference accepted."""
+    changed = []
+    for name, job in consumer["jobs"].items():
+        canonical = template["jobs"][name]
+        if not isinstance(job, dict):
+            continue
+        pairs = [(job, canonical)]
+        if isinstance(job.get("steps"), list):
+            pairs += zip(job["steps"], canonical["steps"])
+        changed += [holder["uses"] for holder, other in pairs
+                    if isinstance(holder, dict) and holder.get("uses") != other.get("uses")]
+    return changed
+
+
 def checks_concurrency_transition(template_root: Path, rel: str,
                                  template: object, consumer: object) -> bool:
     """Permit exactly A↔B at the one reviewed TYPO3 Checks path."""
@@ -374,6 +400,34 @@ def report_transitions(transition: list[str]) -> None:
         print(f"  ↔ {rel}")
 
 
+def verify_pins(pinned: list[str], consumer_root: Path, template_root: Path):
+    """Sort tolerated files into verified, unverified and unreachable, reporting each pin."""
+    checker = PinChecker.from_environment()
+    verified: list[str] = []
+    unverified: list[str] = []
+    unreachable: list[str] = []
+    for rel in pinned:
+        states = set()
+        pins = changed_pins(parsed(consumer_root / rel)[1], parsed(template_root / rel)[1])
+        for uses in dict.fromkeys(pins):
+            repository = "/".join(action_identity(uses).split("/")[:2])
+            state, reason = checker.check(repository, uses.rsplit("@", 1)[1])
+            states.add(state)
+            if state is Reachability.UNVERIFIED:
+                annotate("warning", f"{rel}: pin {uses} was not verified against {repository}: "
+                                    f"{reason}. It is tolerated without that check.")
+            elif state is Reachability.UNREACHABLE:
+                annotate("error", f"{rel}: pin {uses} is not a commit of {repository}: {reason}. "
+                                  "It may be an impostor commit from the fork network.")
+        if Reachability.UNREACHABLE in states:
+            unreachable.append(rel)
+        elif Reachability.UNVERIFIED in states:
+            unverified.append(rel)
+        else:
+            verified.append(rel)
+    return verified, unverified, unreachable
+
+
 def main(argv: list[str]) -> int:
     """Compare governed files, report their classifications and return the verdict."""
     if len(argv) != 3:
@@ -427,14 +481,21 @@ def main(argv: list[str]) -> int:
     if transition:
         report_transitions(transition)
 
-    if pinned:
+    verified, unverified, unreachable = verify_pins(pinned, consumer_root, template_root)
+    differing += unreachable
+
+    if verified:
         annotate(
             "notice",
-            f"{len(pinned)} workflow file(s) differ only in the commit SHA an "
-            "action is pinned to — not drift.",
+            f"{len(verified)} workflow file(s) differ only in the commit SHA an "
+            "action is pinned to, verified as reachable from the action's own "
+            "branches or tags — not drift.",
         )
-        for rel in pinned:
+        for rel in verified:
             print(f"  ≈ {rel}")
+
+    for rel in unverified:
+        print(f"  ? {rel}")
 
     if escaped:
         annotate(
@@ -446,6 +507,10 @@ def main(argv: list[str]) -> int:
         return 2
 
     if not missing and not differing:
+        if unverified:
+            annotate("warning", f"No other drift, but {len(unverified)} workflow file(s) "
+                                "hold a pin that was not verified.")
+            return 3 if os.environ.get("DRIFT_UNVERIFIED_EXIT") else 0
         annotate("notice", "No drift detected.")
         return 0
 

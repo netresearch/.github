@@ -25,6 +25,13 @@
 #     fail unrelated pull requests. Any other `uses:` difference is drift.
 #     Consumers can opt into pin-difference failures with the exact YAML boolean
 #     `strict-pins: true` in their .github/template.yaml metadata.
+#   - That SHA is verified online with the job's token, which needs no scope
+#     beyond `contents: read` for a public action: a commit in no branch or tag
+#     of the action's own repository, such as one that exists only in a fork,
+#     fails the check. GitHub serves fork commits through the parent repository,
+#     so resolving the SHA would prove nothing: the check clones the action's
+#     commits and looks for the SHA among them. When that fails the file is
+#     tolerated with a warning naming the pin, not a notice.
 #   - Consumer's `.github/template.yaml` is metadata; its content is
 #     expected to differ per-repo (different intentional-drift list) and
 #     is never in the diff comparison.
@@ -100,6 +107,7 @@ jobs:
           TEMPLATE_NAME: ${{ inputs.template }}
           TEMPLATES_REPO: ${{ inputs.templates-repo }}
           TEMPLATES_REF: ${{ inputs.templates-ref }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 

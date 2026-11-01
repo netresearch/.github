@@ -132,8 +132,10 @@ fails CI when a governed file diverges, unless the path is listed under
 `intentional-drift:` in the consumer's `.github/template.yaml`. Roll a fix or a
 new reusable permission out by editing the template, then `scripts/sync-template.sh`
 / `scripts/sync-all-consumers.sh`; drift-check flags every consumer that hasn't
-caught up, except where the only difference is the pinned SHA of an action,
-which it reports as a notice.
+caught up, except where the only difference is the pinned SHA of an action and
+that SHA is reachable from the action's own branches or tags, which it reports
+as a notice. That check needs no scope beyond `contents: read` for a public
+action.
 
 ## 6. Change-management runbook (adding/changing a reusable permission)
 

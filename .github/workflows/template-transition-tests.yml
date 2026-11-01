@@ -5,6 +5,9 @@ on:
     paths:
       - scripts/drift_compare.py
       - scripts/check-drift.sh
+      - scripts/pin_reachability.py
+      - .github/workflows/check-template-drift.yml
+      - .github/workflows/drift-scan.yml
       - scripts/test_drift_compare.py
       - scripts/test_go_tool_build_cache.py
       - .github/actions/go-tool-build-cache/**
@@ -16,6 +19,7 @@ on:
       - scripts/test_drift_compare_go.py
       - scripts/test_drift_compare_pins.py
       - scripts/test_drift_compare_strict.py
+      - scripts/test_drift_compare_reachability.py
       - scripts/fixtures/drift-pin-tolerance/**
       - scripts/requirements-drift-tests.txt
       - templates/typo3-extension/.github/workflows/checks.yml
@@ -27,6 +31,9 @@ on:
     paths:
       - scripts/drift_compare.py
       - scripts/check-drift.sh
+      - scripts/pin_reachability.py
+      - .github/workflows/check-template-drift.yml
+      - .github/workflows/drift-scan.yml
       - scripts/test_drift_compare.py
       - scripts/test_go_tool_build_cache.py
       - .github/actions/go-tool-build-cache/**
@@ -38,6 +45,7 @@ on:
       - scripts/test_drift_compare_go.py
       - scripts/test_drift_compare_pins.py
       - scripts/test_drift_compare_strict.py
+      - scripts/test_drift_compare_reachability.py
       - scripts/fixtures/drift-pin-tolerance/**
       - scripts/requirements-drift-tests.txt
       - templates/typo3-extension/.github/workflows/checks.yml
@@ -71,6 +79,12 @@ jobs:
           PYTHONPATH: ${{ runner.temp }}/drift-fixtures-python
           PYTHONDONTWRITEBYTECODE: '1'
         run: python3 -m unittest discover -s scripts -p 'test_drift_compare*.py' -v
+      - name: Tell a real fork-network commit from a real pin with the job token
+        env:
+          PYTHONPATH: ${{ runner.temp }}/drift-fixtures-python
+          PYTHONDONTWRITEBYTECODE: '1'
+          DRIFT_LIVE_TOKEN: ${{ github.token }}
+        run: python3 -m unittest discover -s scripts -p 'test_drift_compare_reachability.py' -k Live -v
       - name: Check pinned Go tool cache boundaries without hosted cache access
         env:
           PYTHONPATH: ${{ runner.temp }}/drift-fixtures-python

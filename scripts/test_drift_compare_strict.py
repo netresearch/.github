@@ -6,13 +6,15 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import yaml
 
 from drift_compare import GO_CONCURRENCY_VARIANTS
 import test_drift_compare as checks_fixtures
 import test_drift_compare_go as go_fixtures
-from test_drift_compare_pins import ACTION, REUSABLE, OLD, NEW, PIN_NOTICE, workflow
+from test_drift_compare_pins import ACTION, REUSABLE, OLD, NEW, PIN_NOTICE, reachable_everything
+from test_drift_compare_pins import workflow
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ".github/workflows/demo.yml"
@@ -46,12 +48,21 @@ def compare(template, consumer, metadata="strict-pins: true\n", *, metadata_kind
                    [sys.executable, str(ROOT / "scripts/drift_compare.py")])
         environment = os.environ | {"PYTHONDONTWRITEBYTECODE": "1",
                                     "GITHUB_ACTIONS": "true" if actions else ""}
+        environment |= reachable_everything()
         return subprocess.run(command + [str(consumer_root), str(template_root)],
                               capture_output=True, text=True, check=False, env=environment)
 
 
 class StrictPinTest(unittest.TestCase):
     """An explicit true flag restores pin drift without changing the default."""
+
+    def test_strict_mode_refuses_the_pin_without_fetching_anything(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "git.log"
+            with mock.patch.dict(os.environ, {"FAKE_GIT_LOG": str(log)}):
+                result = compare(workflow(), workflow(step=f"{ACTION}@{NEW}"))
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertFalse(log.exists())
 
     def test_explicit_true_blocks_arbitrary_full_sha_at_both_locations(self):
         """Even a syntactically valid all-zero SHA must be ordinary drift."""
