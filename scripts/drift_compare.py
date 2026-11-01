@@ -21,6 +21,8 @@ the template and each consumer on separate days, and neither order should turn
 an unrelated pull request red. The tolerance covers only a full SHA on both
 sides of the same action at the same job or step. Tags, branches, short SHAs and
 every other field stay drift, and so does a pin difference next to any of them.
+Consumers can set `strict-pins: true` in their .github/template.yaml to make
+pin-only differences fail too. The default remains tolerant.
 
 Intentional-drift is read from <consumer-dir>/.github/template.yaml's
 `intentional-drift:` list (each entry either a string path or a mapping with a
@@ -44,6 +46,7 @@ from pathlib import Path
 import yaml
 
 IN_ACTIONS = bool(os.environ.get("GITHUB_ACTIONS"))
+STRICT_PINS = "strict-pins"
 
 # Complete reviewed Checks documents, before and after PR-only cancellation.
 # Do not extend this set to future templates: retire this transition after
@@ -108,6 +111,22 @@ WorkflowLoader.add_implicit_resolver(
 )
 
 
+class MetadataLoader(WorkflowLoader):
+    """Reject ambiguous strict-pin declarations without changing workflow loading."""
+
+    def construct_document(self, node):
+        """Count the root flag after merges, including aliased key declarations."""
+        if isinstance(node, yaml.MappingNode):
+            self.flatten_mapping(node)
+            flags = sum(key.tag == "tag:yaml.org,2002:str" and key.value == STRICT_PINS
+                        for key, _value in node.value)
+            if flags > 1:
+                raise yaml.constructor.ConstructorError(
+                    None, None, "duplicate strict-pins declaration", node.start_mark
+                )
+        return super().construct_document(node)
+
+
 def annotate(level: str, message: str) -> None:
     """Emit a workflow annotation in CI, plain text elsewhere."""
     stream = sys.stderr if level == "error" else sys.stdout
@@ -130,17 +149,41 @@ def within(root: Path, candidate: Path) -> bool:
     return True
 
 
-def read_intentional(consumer_root: Path) -> set[str]:
-    """Paths the consumer has declared as deliberate exceptions."""
+def read_metadata(consumer_root: Path) -> dict:
+    """Read contained consumer metadata once, rejecting an invalid explicit flag."""
     meta = consumer_root / ".github" / "template.yaml"
-    if not within(consumer_root, meta) or not meta.is_file():
-        return set()
     try:
-        doc = yaml.load(meta.read_text(encoding="utf-8"), Loader=WorkflowLoader) or {}
-    except (yaml.YAMLError, OSError, UnicodeDecodeError) as exc:
+        if not metadata_present(consumer_root, meta):
+            return {}
+        doc = yaml.load(meta.read_text(encoding="utf-8"), Loader=MetadataLoader)
+        if doc is None:
+            return {}
+        if not isinstance(doc, dict):
+            raise ValueError("metadata must be a mapping")
+        if STRICT_PINS in doc and type(doc[STRICT_PINS]) is not bool:
+            raise ValueError("strict-pins must be a YAML boolean")
+        return doc
+    except (yaml.YAMLError, OSError, ValueError, KeyError, RecursionError) as exc:
         annotate("error", f"failed to parse template.yaml: {exc}")
         sys.exit(2)
 
+
+def metadata_present(consumer_root: Path, meta: Path) -> bool:
+    """Distinguish ordinary absence from unreadable or escaping metadata paths."""
+    try:
+        meta.lstat()
+    except FileNotFoundError:
+        if meta.parent.is_symlink() and not within(consumer_root, meta.parent):
+            raise ValueError("metadata directory must resolve inside the consumer")
+        return False
+    if not within(consumer_root, meta) or not meta.is_file():
+        raise ValueError("metadata must be a file inside the consumer")
+    return True
+
+
+def read_intentional(consumer_root: Path, metadata: dict | None = None) -> set[str]:
+    """Paths the consumer has declared as deliberate exceptions."""
+    doc = read_metadata(consumer_root) if metadata is None else metadata
     entries = doc.get("intentional-drift") or []
     if not isinstance(entries, list):
         # A scalar would otherwise be iterated character by character, turning
@@ -158,6 +201,14 @@ def read_intentional(consumer_root: Path) -> set[str]:
         elif isinstance(item, str):
             paths.add(item)
     return paths
+
+
+def strict_pin_mode(metadata: dict) -> bool:
+    """Report an explicit strict selection while keeping the absent mode silent."""
+    strict_pins = metadata.get(STRICT_PINS, False)
+    if strict_pins:
+        annotate("notice", "Strict pin comparison enabled (strict-pins: true).")
+    return strict_pins
 
 
 def parsed(path: Path) -> tuple[bool, object]:
@@ -250,7 +301,7 @@ def go_concurrency_transition(template_root: Path, rel: str,
 
 
 def document_difference(consumer_path: Path, tpl_file: Path, template_root: Path,
-                        rel: str) -> str:
+                        rel: str, strict_pins: bool = False) -> str:
     """Distinguish cosmetic equality, the transitions, pins and ordinary drift.
 
     The transition fingerprints always hash the documents as written, pins
@@ -267,12 +318,14 @@ def document_difference(consumer_path: Path, tpl_file: Path, template_root: Path
         return "transition"
     if go_concurrency_transition(template_root, rel, doc_template, doc_consumer):
         return "transition"
-    if rel.startswith(".github/workflows/") and pin_only_difference(doc_consumer, doc_template):
+    if (not strict_pins and rel.startswith(".github/workflows/")
+            and pin_only_difference(doc_consumer, doc_template)):
         return "pinned"
     return "differing"
 
 
-def classify(consumer_root: Path, template_root: Path, intentional: set[str]):
+def classify(consumer_root: Path, template_root: Path, intentional: set[str],
+             strict_pins: bool = False):
     """Classify governed files, preserving the exact transition as its own result."""
     missing: list[str] = []
     differing: list[str] = []
@@ -305,7 +358,7 @@ def classify(consumer_root: Path, template_root: Path, intentional: set[str]):
         if consumer_path.read_bytes() == tpl_file.read_bytes():
             continue
 
-        category = document_difference(consumer_path, tpl_file, template_root, rel)
+        category = document_difference(consumer_path, tpl_file, template_root, rel, strict_pins)
         documents[category].append(rel)
 
     return missing, differing, cosmetic, escaped, transition, pinned
@@ -348,7 +401,9 @@ def main(argv: list[str]) -> int:
         )
         return 2
 
-    intentional = read_intentional(consumer_root)
+    metadata = read_metadata(consumer_root)
+    intentional = read_intentional(consumer_root, metadata)
+    strict_pins = strict_pin_mode(metadata)
     if intentional:
         print(f"Intentional-drift paths ({len(intentional)}):")
         for path in sorted(intentional):
@@ -357,7 +412,7 @@ def main(argv: list[str]) -> int:
         print("No intentional-drift entries.")
 
     missing, differing, cosmetic, escaped, transition, pinned = classify(
-        consumer_root, template_root, intentional
+        consumer_root, template_root, intentional, strict_pins
     )
 
     if cosmetic:

@@ -15,6 +15,7 @@ on:
       - .github/workflows/release-go-app.yml
       - scripts/test_drift_compare_go.py
       - scripts/test_drift_compare_pins.py
+      - scripts/test_drift_compare_strict.py
       - scripts/fixtures/drift-pin-tolerance/**
       - scripts/requirements-drift-tests.txt
       - templates/typo3-extension/.github/workflows/checks.yml
@@ -36,6 +37,7 @@ on:
       - .github/workflows/release-go-app.yml
       - scripts/test_drift_compare_go.py
       - scripts/test_drift_compare_pins.py
+      - scripts/test_drift_compare_strict.py
       - scripts/fixtures/drift-pin-tolerance/**
       - scripts/requirements-drift-tests.txt
       - templates/typo3-extension/.github/workflows/checks.yml

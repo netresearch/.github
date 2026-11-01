@@ -40,6 +40,17 @@ jobs:
       - name: Check gate of auto-merge-deps.yml against recorded check lists
         run: python3 -m unittest discover -s scripts -p 'test_auto_merge_deps_checks.py' -v
 
+      - name: Install the hash-pinned YAML test runtime
+        run: >-
+          python3 -m pip install --disable-pip-version-check --only-binary=:all:
+          --require-hashes --target "$RUNNER_TEMP/drift-fixtures-python"
+          -r scripts/requirements-drift-tests.txt
+      - name: Check default and strict template drift contracts
+        env:
+          PYTHONPATH: ${{ runner.temp }}/drift-fixtures-python
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 -m unittest discover -s scripts -p 'test_drift_compare*.py' -v
+
   markdown:
     name: Lint Markdown
     if: github.event_name != 'merge_group'
