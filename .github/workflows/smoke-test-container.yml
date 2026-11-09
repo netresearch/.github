@@ -132,7 +132,9 @@ jobs:
           CST_SHA256: "fa35e89512a8978585f76cf41397956d2e3a30c62c2ad3fb857b1597074d14ca"
         run: |
           set -euo pipefail
-          curl -fsSL -o /tmp/cst \
+          # Retry rides out transient GitHub release-asset errors (HTTP 504).
+          curl -fsSL --proto '=https' --proto-redir '=https' --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 \
+            -o /tmp/cst \
             "https://github.com/GoogleContainerTools/container-structure-test/releases/download/${CST_VERSION}/container-structure-test-linux-amd64"
           echo "${CST_SHA256}  /tmp/cst" | sha256sum -c -
           sudo install /tmp/cst /usr/local/bin/container-structure-test
