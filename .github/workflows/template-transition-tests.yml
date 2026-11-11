@@ -9,6 +9,7 @@ on:
       - .github/workflows/check-template-drift.yml
       - .github/workflows/drift-scan.yml
       - scripts/test_drift_compare.py
+      - scripts/test_checks_template.py
       - scripts/test_go_tool_build_cache.py
       - .github/actions/go-tool-build-cache/**
       - .github/workflows/go-check.yml
@@ -35,6 +36,7 @@ on:
       - .github/workflows/check-template-drift.yml
       - .github/workflows/drift-scan.yml
       - scripts/test_drift_compare.py
+      - scripts/test_checks_template.py
       - scripts/test_go_tool_build_cache.py
       - .github/actions/go-tool-build-cache/**
       - .github/workflows/go-check.yml
@@ -79,6 +81,11 @@ jobs:
           PYTHONPATH: ${{ runner.temp }}/drift-fixtures-python
           PYTHONDONTWRITEBYTECODE: '1'
         run: python3 -m unittest discover -s scripts -p 'test_drift_compare*.py' -v
+      - name: Check the TYPO3 Checks cancellation and gate verdict
+        env:
+          PYTHONPATH: ${{ runner.temp }}/drift-fixtures-python
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 -m unittest discover -s scripts -p 'test_checks_template.py' -v
       - name: Tell a real fork-network commit from a real pin with the job token
         env:
           PYTHONPATH: ${{ runner.temp }}/drift-fixtures-python

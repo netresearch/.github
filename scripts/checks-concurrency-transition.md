@@ -59,3 +59,21 @@ wrapper and canonical Checks changes. It changes no shared lint interface and
 adds no runner to consumer workflows. Its PyYAML test dependency is version-
 and hash-pinned; the fleet comparator's existing runtime is unchanged. Count
 that one allocation in the organization repository's rollout workload.
+
+## Third document: cancellation only on `synchronize`
+
+Document B cancelled every pull request run in the group. `ready_for_review`
+and `reopened` arrive on the same head SHA as the run they cancel, and the
+cancelled run's `gate` job still runs under `always()` and fails on its
+`cancelled` needs. Each run keeps its own check-run, so the newer run's green
+`All security checks` does not replace the red one: the commit's check rollup
+stays FAILURE with both listed, and the pull request stayed blocked until the
+old run was re-run (t3x-nr-vault run 42936523040, t3x-nr-llm run 42927203718).
+
+The canonical document now cancels only on `synchronize`, the one event that
+moves the head SHA. Its fingerprint is `HASH_C` in `test_drift_compare.py`. It
+gets no transition: a consumer on A or B is drift until synced, which is
+intended, because B is the version with the defect. `test_checks_template.py`
+pins the narrowed cancellation and runs the gate step on success, failure,
+cancelled and skipped inputs, so the fix cannot drift into a gate that passes
+on `cancelled`.
