@@ -70,10 +70,30 @@ cancelled run's `gate` job still runs under `always()` and fails on its
 stays FAILURE with both listed, and the pull request stayed blocked until the
 old run was re-run (t3x-nr-vault run 42936523040, t3x-nr-llm run 42927203718).
 
-The canonical document now cancels only on `synchronize`, the one event that
-moves the head SHA. Its fingerprint is `HASH_C` in `test_drift_compare.py`. It
+Document C cancels only on `synchronize`. Its fingerprint is `HASH_C` in
+`test_drift_compare.py`. It
 gets no transition: a consumer on A or B is drift until synced, which is
 intended, because B is the version with the defect. `test_checks_template.py`
 pins the narrowed cancellation and runs the gate step on success, failure,
 cancelled and skipped inputs, so the fix cannot drift into a gate that passes
 on `cancelled`.
+
+## Fourth document: no concurrency group, a `supersede` job
+
+Document C still let runs for the same head SHA cancel or replace each other
+(#592): a late `synchronize` run cancelled a `ready_for_review` run on the same
+SHA, a re-run of a `synchronize` run cancelled again because a re-run carries
+its original event, a re-run of a draft run replaced the one pending
+`ready_for_review` run the group could hold. A concurrency expression sees
+only the triggering event, not the pull request's current head, so no group
+rule separates these cases; a `reopened` run after a push to the closed pull
+request, for example, can carry the old head while the new head arrives as a
+separate `synchronize` (seen once in a test repository).
+
+The canonical document drops the group. A `supersede` job reads the pull
+request's live head and, only when it equals the run's own head, cancels the
+queued and running Checks runs of the same branch for other head SHAs that
+were created before its own run. Its
+fingerprint is `HASH_D`; C is rebuilt in the tests from D without the job and
+with C's concurrency block, and must reproduce `HASH_C`. D gets no transition:
+a consumer on A, B or C is drift until synced.

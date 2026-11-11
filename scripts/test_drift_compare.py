@@ -21,11 +21,16 @@ CANCEL = "${{ github.event_name == 'pull_request' }}"
 NOTICE = "Approved Checks PR-concurrency transition"
 HASH_A = "65c451549abd2ebd6fcdb367d47b855e25b2d48b8315149276caf33af2a01656"
 HASH_B = "9255cc2adf021436f7f52875e0d8e654d1e7aad8dad4dacfb1638f4ab1e18a22"
-# The current canonical document: B with cancellation narrowed to `synchronize`,
+# The canonical document of #591: B with cancellation narrowed to `synchronize`,
 # so a same-SHA run (ready_for_review, reopened) no longer cancels its
 # predecessor. It is a third reviewed document and gets no transition: a
 # consumer on A or B is drift until synced.
 HASH_C = "b74bb827dc3b90a9fd6b985067c601559734348316367f821c1e98830943c71c"
+CANCEL_C = "${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}"
+# The current canonical document: no concurrency group, and a `supersede` job
+# that cancels only runs for earlier head commits (#592). A fourth reviewed
+# document without a transition: a consumer on A, B or C is drift until synced.
+HASH_D = "0fc91287b291000e6b39807d83b918c16e2b96767e9822bceb2505a9e65aab53"
 # The harden-runner pin of both reviewed documents. Renovate may move the template
 # past it, so the documents are rebuilt with this pin rather than the current one.
 REVIEWED_PIN = "step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2"
@@ -52,8 +57,11 @@ class TransitionTest(unittest.TestCase):
         cls.current = current
         cls.a = with_reviewed_pin(current)
         cls.a.pop("concurrency", None)
+        cls.a["jobs"].pop("supersede")
         cls.b = copy.deepcopy(cls.a)
         cls.b["concurrency"] = {"group": GROUP, "cancel-in-progress": CANCEL}
+        cls.c = copy.deepcopy(cls.a)
+        cls.c["concurrency"] = {"group": GROUP, "cancel-in-progress": CANCEL_C}
 
     def compare(self, template, consumer, *, template_name="typo3-extension", path=CHECKS,
                 wrapper=False, actions=False, consumer_text=None, escape=None):
@@ -88,9 +96,10 @@ class TransitionTest(unittest.TestCase):
 
     def test_frozen_whole_document_fingerprints(self):
         # Any canonical change except a harden-runner pin bump still fails here.
-        self.assertEqual(fingerprint(with_reviewed_pin(self.current)), HASH_C)
+        self.assertEqual(fingerprint(with_reviewed_pin(self.current)), HASH_D)
         self.assertEqual(fingerprint(self.a), HASH_A)
         self.assertEqual(fingerprint(self.b), HASH_B)
+        self.assertEqual(fingerprint(self.c), HASH_C)
 
     def test_identical_a_and_b_keep_normal_behavior(self):
         for document in (self.a, self.b):
@@ -179,9 +188,9 @@ class TransitionTest(unittest.TestCase):
         self.assertEqual(self.compare(future, future).returncode, 0)
 
     def test_current_canonical_does_not_accept_either_transition_document(self):
-        # Every consumer still carries B, the version whose same-SHA cancellation
-        # left a failed required check; it must show as drift, not as a transition.
-        for old in (self.a, self.b):
+        # B and C both let a run for the head SHA be cancelled or replaced, which
+        # left a failed required check; they must show as drift, not as a transition.
+        for old in (self.a, self.b, self.c):
             with self.subTest(consumer=fingerprint(old)):
                 self.assert_drift(self.current, old)
         self.assertEqual(self.compare(self.current, self.current).returncode, 0)
