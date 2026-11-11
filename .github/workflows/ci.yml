@@ -50,6 +50,11 @@ jobs:
           PYTHONPATH: ${{ runner.temp }}/drift-fixtures-python
           PYTHONDONTWRITEBYTECODE: '1'
         run: python3 -m unittest discover -s scripts -p 'test_drift_compare*.py' -v
+      - name: Check the TYPO3 Checks cancellation and gate verdict
+        env:
+          PYTHONPATH: ${{ runner.temp }}/drift-fixtures-python
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 -m unittest discover -s scripts -p 'test_checks_template.py' -v
 
   markdown:
     name: Lint Markdown
