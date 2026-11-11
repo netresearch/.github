@@ -27,10 +27,24 @@ HASH_B = "9255cc2adf021436f7f52875e0d8e654d1e7aad8dad4dacfb1638f4ab1e18a22"
 # consumer on A or B is drift until synced.
 HASH_C = "b74bb827dc3b90a9fd6b985067c601559734348316367f821c1e98830943c71c"
 CANCEL_C = "${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}"
-# The current canonical document: no concurrency group, and a `supersede` job
+# The canonical document of #593: no concurrency group, and a `supersede` job
 # that cancels only runs for earlier head commits (#592). A fourth reviewed
 # document without a transition: a consumer on A, B or C is drift until synced.
 HASH_D = "0fc91287b291000e6b39807d83b918c16e2b96767e9822bceb2505a9e65aab53"
+# The current canonical document: D with the pull request head read again before
+# every cancel (#594). A fifth reviewed document without a transition. D is E
+# without this block in the `supersede` step.
+HASH_E = "3587f1f7a6fdac70aad2db5ee486379a136e3b9fe7a2c46af76492108d4891ae"
+REREAD = """\
+  if ! now=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .head.sha); then
+    echo "::warning::Could not re-read the pull request head; stopped before run $id."
+    break
+  fi
+  if [ "$now" != "$HEAD_SHA" ]; then
+    echo "::notice::The pull request head is now $now; stopped before run $id."
+    break
+  fi
+"""
 # The harden-runner pin of both reviewed documents. Renovate may move the template
 # past it, so the documents are rebuilt with this pin rather than the current one.
 REVIEWED_PIN = "step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2"
@@ -55,6 +69,10 @@ class TransitionTest(unittest.TestCase):
     def setUpClass(cls):
         current = yaml.load((ROOT / "templates/typo3-extension" / CHECKS).read_text(), Loader=WorkflowLoader)
         cls.current = current
+        cls.d = with_reviewed_pin(current)
+        step = next(step for step in cls.d["jobs"]["supersede"]["steps"] if "run" in step)
+        assert step["run"].count(REREAD) == 1, step["run"]
+        step["run"] = step["run"].replace(REREAD, "")
         cls.a = with_reviewed_pin(current)
         cls.a.pop("concurrency", None)
         cls.a["jobs"].pop("supersede")
@@ -96,7 +114,8 @@ class TransitionTest(unittest.TestCase):
 
     def test_frozen_whole_document_fingerprints(self):
         # Any canonical change except a harden-runner pin bump still fails here.
-        self.assertEqual(fingerprint(with_reviewed_pin(self.current)), HASH_D)
+        self.assertEqual(fingerprint(with_reviewed_pin(self.current)), HASH_E)
+        self.assertEqual(fingerprint(self.d), HASH_D)
         self.assertEqual(fingerprint(self.a), HASH_A)
         self.assertEqual(fingerprint(self.b), HASH_B)
         self.assertEqual(fingerprint(self.c), HASH_C)
