@@ -200,13 +200,48 @@ jobs:
           APPROVE_MESSAGE: ${{ inputs.auto-approve-message }}
         with:
           script: |
-            const controlsPath = process.env.CONTROLS_PATH;
-            const message = process.env.APPROVE_MESSAGE.replace(/\\n/g, "\n").replace(/\{controls\}/g, `/${controlsPath}`);
-            await github.rest.pulls.createReview({
+            // The approval covers the commit this run checked, and nothing
+            // else. Without `commit_id` the review lands on the pull request's
+            // latest commit, which a run still active after a push (or after a
+            // close, push and reopen) has not checked. A run whose head has
+            // moved on approves nothing; the run for the new head decides.
+            const eventHead = context.payload.pull_request.head.sha;
+            const { data: pr } = await github.rest.pulls.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
               pull_number: context.issue.number,
-              event: 'APPROVE',
-              body: message,
             });
+            if (pr.head.sha !== eventHead) {
+              core.notice(`Not approved: this run checked ${eventHead}, the pull request head is now ${pr.head.sha}.`);
+              return;
+            }
+            const controlsPath = process.env.CONTROLS_PATH;
+            const message = process.env.APPROVE_MESSAGE.replace(/\\n/g, "\n").replace(/\{controls\}/g, `/${controlsPath}`);
+            // A push can still land between the read above and this call.
+            // With "dismiss stale approvals" on, GitHub then refuses a review
+            // for the old commit with 422 ("This pull request has been updated
+            // since you started reviewing"); that is the skip, not a failure.
+            // Without that setting the review is created on the old commit,
+            // which the repository then treats like any approval that
+            // survives a push.
+            try {
+              await github.rest.pulls.createReview({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.issue.number,
+                commit_id: eventHead,
+                event: 'APPROVE',
+                body: message,
+              });
+            } catch (error) {
+              if (error.status !== 422) throw error;
+              const { data: now } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.issue.number,
+              });
+              if (now.head.sha === eventHead) throw error;
+              core.notice(`Not approved: the pull request head moved to ${now.head.sha} while this run approved ${eventHead}.`);
+              return;
+            }
             console.log('PR auto-approved');
