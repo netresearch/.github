@@ -79,6 +79,10 @@ on:
         description: "Shell command to run before gremlins, for projects whose Go code depends on generated sources (e.g. 'templ generate')."
         type: string
         default: ""
+      test-memory-limit-mb:
+        description: "Address-space limit in MiB for each test binary gremlins runs. A mutant that allocates without bound then fails with 'out of memory' and counts as killed, instead of exhausting the runner. 0 disables the limit."
+        type: number
+        default: 3072
 
 # CALLER REQUIREMENTS
 # ===================
@@ -151,6 +155,39 @@ jobs:
           # Strict mode: surface caller script errors instead of silently
           # continuing into a run whose packages cannot compile.
           bash -euo pipefail -c "$PRE_BUILD_CMD"
+
+      - name: Limit test binary memory
+        env:
+          LIMIT_MB: ${{ inputs.test-memory-limit-mb }}
+        run: |
+          # A mutant can turn a bounded loop into an unbounded one that grows
+          # a slice: in go-cron, `i++` -> `i--` in a loop that appends reached
+          # 4.5 GB in 38 seconds. gremlins stops a mutant only after its
+          # timeout (timeout-coefficient times the normal test time), and runs
+          # one test binary per worker, so a few of these exhaust the 16 GB
+          # of a hosted runner first. The runner then dies with "The runner
+          # has received a shutdown signal" and exit 143, and the job reports
+          # no score. go-cron PR 480 failed three times this way.
+          #
+          # `go test -exec` runs each test binary through this wrapper, which
+          # caps its address space. Such a mutant then fails with "out of
+          # memory" and gremlins counts it as killed. The cap applies to the
+          # test binaries only, not to the go command or the compiler.
+          case "$LIMIT_MB" in
+            ''|*[!0-9]*) echo "::error::test-memory-limit-mb must be a whole number, got '$LIMIT_MB'"; exit 1 ;;
+            *) ;;
+          esac
+          if [ "$LIMIT_MB" -eq 0 ]; then
+            echo "test-memory-limit-mb is 0: test binaries run without a memory limit."
+            exit 0
+          fi
+          WRAPPER="$RUNNER_TEMP/go-test-memcap"
+          cat > "$WRAPPER" <<EOF
+          #!/bin/sh
+          exec prlimit --as=$((LIMIT_MB * 1024 * 1024)) -- "\$@"
+          EOF
+          chmod +x "$WRAPPER"
+          echo "GOFLAGS=${GOFLAGS:+$GOFLAGS }-exec=$WRAPPER" >> "$GITHUB_ENV"
 
       - name: Run mutation tests (full)
         if: ${{ !inputs.diff-only }}
