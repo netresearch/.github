@@ -52,8 +52,15 @@ if method == "POST" and m:
     with open(os.environ["CANCEL_LOG"], "a") as log: log.write(m.group(1) + "\n")
     sys.exit(1 if int(m.group(1)) in fx.get("cancel_fail", []) else 0)
 if re.fullmatch(r"repos/[^/]+/[^/]+/pulls/\d+", path):
-    if fx["live"] is None: sys.exit(1)
-    out({"head": {"sha": fx["live"]}}); sys.exit(0)
+    # `live` is the head every read returns, or a list with one head per read
+    # (the last one repeats): the head can move while the step runs.
+    live = fx["live"]
+    if isinstance(live, list):
+        with open(os.environ["HEAD_READS"], "a+") as reads:
+            reads.seek(0); count = len(reads.read()); reads.write(".")
+        live = live[min(count, len(live) - 1)]
+    if live is None: sys.exit(1)
+    out({"head": {"sha": live}}); sys.exit(0)
 if re.fullmatch(r"repos/[^/]+/[^/]+/actions/runs/\d+", path):
     out({"workflow_id": 7, "created_at": OWN_CREATED}); sys.exit(0)
 if path.endswith("/actions/workflows/7/runs"):
@@ -121,6 +128,7 @@ class SupersedeStepTest(unittest.TestCase):
             log = base / "cancelled"
             log.touch()
             env = {"PATH": f"{base}:{os.environ['PATH']}", "CANCEL_LOG": str(log),
+                   "HEAD_READS": str(base / "head-reads"),
                    "FIXTURE": json.dumps({"live": live, "runs": runs, **extra}),
                    "REPO": REPO, "PR_NUMBER": "12", "HEAD_SHA": HEAD, "HEAD_REF": "feature",
                    "RUN_ID": "100"}
@@ -150,6 +158,32 @@ class SupersedeStepTest(unittest.TestCase):
         cancelled, output = self.execute(OLD, [run(201, OLD), run(100, HEAD)])
         self.assertEqual(cancelled, [])
         self.assertIn("nothing cancelled", output)
+
+    def test_head_pushed_back_before_the_listing_cancels_nothing(self):
+        # #594: this run read its own head, then a force-push made OLD the head
+        # again before the listing. Run 201 (OLD, created earlier) is now a run
+        # for the head: cancelling it leaves a failed gate on the head. The same
+        # holds for an older run of OLD that was re-run (queued, its original
+        # `created_at`). Run 202 is the new `synchronize` run for OLD.
+        for status in ("in_progress", "queued"):
+            with self.subTest(status=status):
+                runs = [run(201, OLD, status), run(202, OLD, created="2026-11-11T10:00:07Z")]
+                cancelled, output = self.execute([HEAD, OLD], runs)
+                self.assertEqual(cancelled, [])
+                self.assertIn(f"::notice::The pull request head is now {OLD}", output)
+
+    def test_head_is_read_again_before_every_cancel(self):
+        # The head moves after the first cancel: the second run must survive.
+        # One read before the loop instead of one per cancel cancels both.
+        runs = [run(201, OLD), run(202, "c" * 40)]
+        cancelled, output = self.execute([HEAD, HEAD, OLD], runs)
+        self.assertEqual(cancelled, ["201"])
+        self.assertIn("stopped before run 202", output)
+
+    def test_failed_head_read_before_a_cancel_stops_cancelling(self):
+        cancelled, output = self.execute([HEAD, HEAD, None], [run(201, OLD), run(202, OLD)])
+        self.assertEqual(cancelled, ["201"])
+        self.assertIn("::warning::Could not re-read the pull request head", output)
 
     def test_errors_cancel_nothing_and_do_not_fail(self):
         for extra, live in (({}, None), ({"list_fails": True}, HEAD)):

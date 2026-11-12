@@ -97,3 +97,14 @@ were created before its own run. Its
 fingerprint is `HASH_D`; C is rebuilt in the tests from D without the job and
 with C's concurrency block, and must reproduce `HASH_C`. D gets no transition:
 a consumer on A, B or C is drift until synced.
+
+## Fifth document: the head read again before every cancel
+
+Document D read the pull request head once, before listing the runs. A
+force-push that made an earlier commit the head again after that read let D
+cancel a run for what was then the head, and that run's failed gate check-run
+stayed on the head (#594). Document E reads the head again before every cancel
+and stops as soon as it is no longer the run's own head, or cannot be read. Its
+fingerprint is `HASH_E`; D is rebuilt in the tests from E without that block
+and must reproduce `HASH_D`. E gets no transition: a consumer on A, B, C or D
+is drift until synced.
