@@ -911,7 +911,7 @@ jobs:
         # draft with draft: true, then publish it later from that
         # draft."). Both phases happen inside this single job — no
         # cross-job state, still atomic from the orchestrator's POV.
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           tag_name: ${{ needs.preflight.outputs.tag }}
           name: ${{ needs.preflight.outputs.tag }}
