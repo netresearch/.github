@@ -1,0 +1,163 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# Reusable "Bun dependency submission" — submits the packages resolved in
+# every `bun.lock` of the repository to GitHub's dependency graph through the
+# Dependency Submission API, so that Dependabot alerts cover them.
+#
+# WHY THIS EXISTS
+# ===============
+# GitHub's dependency graph parses `package-lock.json`, `yarn.lock` and
+# `pnpm-lock.yaml`, but not `bun.lock`. For a bun project it reads only
+# `package.json`, i.e. the direct dependencies as version ranges, so no
+# transitive package and no resolved version reaches Dependabot alerts.
+# Docs: https://docs.github.com/en/code-security/reference/supply-chain-security/dependency-graph-supported-package-ecosystems
+# Submitted dependencies receive Dependabot alerts like parsed ones:
+# https://docs.github.com/en/code-security/concepts/supply-chain-security/dependency-graph-data
+#
+# Do not add a second lock file (package-lock.json) next to bun.lock to feed
+# the graph: one package manager per project.
+#
+# HOW
+# ===
+# Syft (via anchore/sbom-action) reads the text `bun.lock`. The config below
+# limits it to the JavaScript lock cataloger, skips the lock files GitHub
+# already parses (so nothing is reported twice) and includes dev
+# dependencies (syft drops them by default; package-lock.json in the graph
+# carries them too). Before the snapshot is submitted, the job compares the
+# packages syft found against the registry packages listed in each bun.lock
+# and fails if any is missing, so an empty or partial scan never replaces
+# the graph's data. The binary `bun.lockb` is not readable; migrate with
+# `bun install --save-text-lockfile`.
+#
+# Known limit: syft's GitHub snapshot marks every package as `runtime`, also
+# dev dependencies, and does not reproduce bun's direct/indirect split.
+#
+# Caller pattern (run on every push to the default branch so the snapshot
+# always belongs to the current commit):
+#
+#   on:
+#     push:
+#       branches: [main]
+#     workflow_dispatch:
+#
+#   permissions: {}
+#
+#   jobs:
+#     bun-dependency-submission:
+#       uses: netresearch/.github/.github/workflows/bun-dependency-submission.yml@main
+#       permissions:
+#         contents: write
+#
+# CALLER REQUIREMENTS
+# ===================
+# The calling job MUST grant `contents: write` (the Dependency Submission API
+# requires it), or the run fails with `startup_failure`.
+
+name: Bun dependency submission (reusable)
+
+on:
+  workflow_call: {}
+
+permissions: {}
+
+jobs:
+  submit:
+    name: Submit bun.lock dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # POST /repos/{owner}/{repo}/dependency-graph/snapshots
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Find bun lock files
+        run: |
+          binary="$(git ls-files -- 'bun.lockb' '**/bun.lockb')"
+          if [ -n "$binary" ]; then
+            echo "::error::Binary bun.lockb cannot be read: ${binary//$'\n'/, }. Migrate with 'bun install --save-text-lockfile'."
+            exit 1
+          fi
+          locks="$(git ls-files -- 'bun.lock' '**/bun.lock')"
+          if [ -z "$locks" ]; then
+            echo "::error::No bun.lock in this repository; nothing to submit."
+            exit 1
+          fi
+          echo "$locks" > "$RUNNER_TEMP/bun-locks.txt"
+          echo "bun.lock files: ${locks//$'\n'/, }"
+
+      - name: Write syft config
+        run: |
+          cat > "$RUNNER_TEMP/syft-bun.yaml" <<'EOF'
+          default-catalogers:
+            - javascript-lock-cataloger
+          exclude:
+            - "./**/node_modules/**"
+            - "./**/package-lock.json"
+            - "./**/npm-shrinkwrap.json"
+            - "./**/yarn.lock"
+            - "./**/pnpm-lock.yaml"
+          javascript:
+            include-dev-dependencies: true
+          EOF
+
+      - name: Scan bun.lock files
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          path: .
+          format: syft-json
+          output-file: ${{ runner.temp }}/bun-sbom.syft.json
+          config: ${{ runner.temp }}/syft-bun.yaml
+          dependency-snapshot: false
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Verify the scan covers every locked package
+        run: |
+          python3 - "$RUNNER_TEMP/bun-locks.txt" "$RUNNER_TEMP/bun-sbom.syft.json" <<'PY'
+          import json, re, sys
+
+          locks = open(sys.argv[1]).read().split()
+          artifacts = json.load(open(sys.argv[2]))["artifacts"]
+          failed = False
+          for lock in locks:
+              # bun.lock is JSON with trailing commas.
+              text = re.sub(r",(\s*[}\]])", r"\1", open(lock).read())
+              expected = set()
+              for entry in json.loads(text).get("packages", {}).values():
+                  name, _, version = entry[0].rpartition("@")
+                  if re.match(r"\d+\.\d+\.\d+", version):
+                      expected.add((name, version))
+              found = {
+                  (a["name"], a["version"])
+                  for a in artifacts
+                  if a.get("type") == "npm"
+                  and any(l.get("path", "").lstrip("/") == lock for l in a.get("locations", []))
+              }
+              missing = expected - found
+              print(f"{lock}: {len(expected)} registry packages locked, {len(found)} found by syft")
+              if not expected or missing:
+                  failed = True
+                  sample = ", ".join(f"{n}@{v}" for n, v in sorted(missing)[:10])
+                  print(f"::error file={lock}::{len(missing)} of {len(expected)} locked packages missing from the scan: {sample}")
+          sys.exit(1 if failed else 0)
+          PY
+
+      - name: Submit dependency snapshot
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          path: .
+          format: syft-json
+          output-file: ${{ runner.temp }}/bun-sbom-submitted.syft.json
+          config: ${{ runner.temp }}/syft-bun.yaml
+          dependency-snapshot: true
+          upload-artifact: false
+          upload-release-assets: false

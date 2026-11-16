@@ -57,6 +57,7 @@ truth; this table is the index.)
 | `pr-quality.yml` | `contents: read`, `pull-requests: write` |
 | `greetings.yml` / `lock.yml` / `stale.yml` | `issues: write`, `pull-requests: write` |
 | `auto-merge-deps.yml` | `contents: write`, `pull-requests: write` |
+| `bun-dependency-submission.yml` | `contents: write` |
 | `go-check.yml` | `contents: read`, `security-events: write` |
 | `go-mutation-testing.yml` | `contents: read`, `pull-requests: write` |
 | `build-container.yml` | `contents: read`, `packages: write`, `security-events: write`, `id-token: write`, `attestations: write` |
