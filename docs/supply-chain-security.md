@@ -57,6 +57,7 @@ netresearch/.github (org-wide)
 ├── betterleaks.yml          ← reusable (secret scanning)
 ├── zizmor.yml               ← reusable (GitHub Actions workflow SAST, report-only)
 ├── node-audit.yml           ← reusable (Node.js dependency audit)
+├── bun-dependency-submission.yml ← reusable (bun.lock → dependency graph / Dependabot alerts)
 ├── scorecard.yml            ← reusable (OpenSSF Scorecard)
 ├── greetings.yml            ← reusable
 ├── labeler.yml              ← reusable
