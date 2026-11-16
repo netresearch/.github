@@ -139,10 +139,10 @@ on:
 #         binary-name: my-app-linux-amd64
 #         goos: linux
 #         goarch: amd64
-permissions:
-  contents: read
-  id-token: write
-  attestations: write
+#
+# The scopes are declared on the `build` job only; the workflow level
+# stays default-deny, as in the other reusables.
+permissions: {}
 
 jobs:
   build:

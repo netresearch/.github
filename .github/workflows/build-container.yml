@@ -148,12 +148,10 @@ on:
 #         attestations: write   # required — even when sign/attest=false
 #       with:
 #         image-name: my-app
-permissions:
-  contents: read
-  packages: write
-  security-events: write
-  id-token: write
-  attestations: write
+#
+# The scopes are declared on the `build` job only; the workflow level
+# stays default-deny, as in the other reusables.
+permissions: {}
 
 jobs:
   build:
