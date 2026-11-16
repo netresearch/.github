@@ -68,6 +68,13 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write # POST /repos/{owner}/{repo}/dependency-graph/snapshots
+    # GitHub keeps the latest snapshot per correlator, whatever its commit.
+    # Serialise runs per ref so a run for an older commit cannot finish after,
+    # and overwrite, the snapshot of a newer one; a queued older run is
+    # replaced by the newer one.
+    concurrency:
+      group: bun-dependency-submission-${{ github.ref }}
+      cancel-in-progress: false
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
@@ -81,18 +88,18 @@ jobs:
 
       - name: Find bun lock files
         run: |
-          binary="$(git ls-files -- 'bun.lockb' '**/bun.lockb')"
+          # -z: NUL-separated and unquoted, so paths with spaces survive.
+          binary="$(git ls-files -z -- 'bun.lockb' '**/bun.lockb' | tr '\0' ' ')"
           if [ -n "$binary" ]; then
-            echo "::error::Binary bun.lockb cannot be read: ${binary//$'\n'/, }. Migrate with 'bun install --save-text-lockfile'."
+            echo "::error::Binary bun.lockb cannot be read: ${binary}. Migrate with 'bun install --save-text-lockfile'."
             exit 1
           fi
-          locks="$(git ls-files -- 'bun.lock' '**/bun.lock')"
-          if [ -z "$locks" ]; then
+          git ls-files -z -- 'bun.lock' '**/bun.lock' > "$RUNNER_TEMP/bun-locks.txt"
+          if [ ! -s "$RUNNER_TEMP/bun-locks.txt" ]; then
             echo "::error::No bun.lock in this repository; nothing to submit."
             exit 1
           fi
-          echo "$locks" > "$RUNNER_TEMP/bun-locks.txt"
-          echo "bun.lock files: ${locks//$'\n'/, }"
+          echo "bun.lock files: $(tr '\0' ' ' < "$RUNNER_TEMP/bun-locks.txt")"
 
       - name: Write syft config
         run: |
@@ -125,15 +132,22 @@ jobs:
           python3 - "$RUNNER_TEMP/bun-locks.txt" "$RUNNER_TEMP/bun-sbom.syft.json" <<'PY'
           import json, re, sys
 
-          locks = open(sys.argv[1]).read().split()
+          locks = [p for p in open(sys.argv[1]).read().split("\0") if p]
           artifacts = json.load(open(sys.argv[2]))["artifacts"]
           failed = False
           for lock in locks:
-              # bun.lock is JSON with trailing commas.
+              # bun.lock is JSON with trailing commas; bun writes no comments.
               text = re.sub(r",(\s*[}\]])", r"\1", open(lock).read())
+              packages = json.loads(text).get("packages")
+              if not isinstance(packages, dict):
+                  failed = True
+                  print(f"::error file={lock}::no 'packages' object; not a bun.lock this job can verify")
+                  continue
               expected = set()
-              for entry in json.loads(text).get("packages", {}).values():
+              for entry in packages.values():
                   name, _, version = entry[0].rpartition("@")
+                  # Registry packages only; workspace:, link:, file:, git
+                  # and github: entries carry no version to alert on.
                   if re.match(r"\d+\.\d+\.\d+", version):
                       expected.add((name, version))
               found = {
@@ -144,7 +158,7 @@ jobs:
               }
               missing = expected - found
               print(f"{lock}: {len(expected)} registry packages locked, {len(found)} found by syft")
-              if not expected or missing:
+              if missing:
                   failed = True
                   sample = ", ".join(f"{n}@{v}" for n, v in sorted(missing)[:10])
                   print(f"::error file={lock}::{len(missing)} of {len(expected)} locked packages missing from the scan: {sample}")
