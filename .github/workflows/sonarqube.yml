@@ -112,6 +112,8 @@ jobs:
       - name: SonarQube Scan
         uses: SonarSource/sonarqube-scan-action@59202af334b4ba7b5db01b701b8e79f8b3bef0f4 # v8.5
         env:
+          # CVE-2026-114938 affects the Java scanner process on capable x86-64 runners.
+          JDK_JAVA_OPTIONS: ${{ env.JDK_JAVA_OPTIONS }} -XX:-UseBASE64Intrinsics
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           # Default to SonarCloud when the caller does not pass a host override.
           # An unset secret resolves to "" which would otherwise override the
