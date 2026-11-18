@@ -111,15 +111,12 @@ jobs:
 
       - name: Preserve runner JVM options for the scanner
         id: scanner-java
-        shell: bash
-        run: |
-          # A runner may supply its own truststore or other JVM settings.
-          delimiter="JVM_OPTIONS_${RANDOM}${RANDOM}${RANDOM}${RANDOM}"
-          {
-            printf 'options<<%s\n' "$delimiter"
-            printf '%s%s\n' "${JDK_JAVA_OPTIONS:+$JDK_JAVA_OPTIONS }" '-XX:-UseBASE64Intrinsics'
-            printf '%s\n' "$delimiter"
-          } >> "$GITHUB_OUTPUT"
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const existing = process.env.JDK_JAVA_OPTIONS || '';
+            const mitigation = '-XX:+UnlockDiagnosticVMOptions -XX:-UseBASE64Intrinsics';
+            core.setOutput('options', [existing, mitigation].filter(Boolean).join(' '));
 
       - name: SonarQube Scan
         uses: SonarSource/sonarqube-scan-action@59202af334b4ba7b5db01b701b8e79f8b3bef0f4 # v8.5
