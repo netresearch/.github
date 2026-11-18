@@ -109,11 +109,23 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Preserve runner JVM options for the scanner
+        id: scanner-java
+        shell: bash
+        run: |
+          # A runner may supply its own truststore or other JVM settings.
+          delimiter="JVM_OPTIONS_${RANDOM}${RANDOM}${RANDOM}${RANDOM}"
+          {
+            printf 'options<<%s\n' "$delimiter"
+            printf '%s%s\n' "${JDK_JAVA_OPTIONS:+$JDK_JAVA_OPTIONS }" '-XX:-UseBASE64Intrinsics'
+            printf '%s\n' "$delimiter"
+          } >> "$GITHUB_OUTPUT"
+
       - name: SonarQube Scan
         uses: SonarSource/sonarqube-scan-action@59202af334b4ba7b5db01b701b8e79f8b3bef0f4 # v8.5
         env:
           # CVE-2026-114938 affects the Java scanner process on capable x86-64 runners.
-          JDK_JAVA_OPTIONS: ${{ env.JDK_JAVA_OPTIONS }} -XX:-UseBASE64Intrinsics
+          JDK_JAVA_OPTIONS: ${{ steps.scanner-java.outputs.options }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           # Default to SonarCloud when the caller does not pass a host override.
           # An unset secret resolves to "" which would otherwise override the
