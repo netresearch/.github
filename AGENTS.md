@@ -46,7 +46,13 @@ template is detected and reconciled by dedicated tooling:
 - **Scope:** templates carry only what every consumer of that template needs.
   Dependency updates come from Renovate; the templates ship no
   `dependabot.yml`. A consumer that needs a file to differ from its template
-  lists the path under `intentional-drift`.
+  lists the path under `intentional-drift`. Before adding a file to a
+  template, check whether the tool that reads it can fetch it from a central
+  place at run time: the `zizmor.yml` reusable installs this repository's
+  `.github/zizmor.yml` in any consumer that has none, so that config left the
+  templates. A file the tool can fetch does not belong in every consumer, and
+  prose that has to be authoritative belongs in the reusable it documents,
+  where it exists once.
 
 ## Stuck Renovate pull requests
 
