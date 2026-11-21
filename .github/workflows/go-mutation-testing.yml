@@ -141,6 +141,69 @@ jobs:
         run: |
           go install "github.com/go-gremlins/gremlins/cmd/gremlins@${GREMLINS_VERSION}"
 
+      - name: Check the gremlins config keys
+        env:
+          CONFIG_PATH: ${{ inputs.config-path }}
+        run: |
+          # gremlins ignores keys it does not read, without a warning, and then
+          # runs with its defaults. In ofelia every setting sat at the top level
+          # of .gremlins.yaml for eleven months: mocks were mutated, the mutator
+          # list and the threshold never applied. The keys gremlins reads are
+          # taken from the installed version's "unleash --help", so the check
+          # follows gremlins-version. A missing file is the run step's concern.
+          [ -f "$CONFIG_PATH" ] || exit 0
+          python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+          python3 - "$CONFIG_PATH" <<'PY'
+          import re
+          import subprocess
+          import sys
+
+          import yaml
+
+          path = sys.argv[1]
+          help_text = subprocess.run(
+              ["gremlins", "unleash", "--help"], check=True, capture_output=True, text=True
+          ).stdout
+          flags = re.findall(r"^\s+(?:-\w, )?--([a-z0-9-]+)", help_text, re.M)
+          mutants = set(re.findall(r'--([a-z0-9-]+)\s+enable "', help_text))
+          unleash = {f for f in flags if f not in mutants} - {"help", "threshold-efficacy", "threshold-mcover"}
+          unleash.add("threshold")
+          if not mutants or "diff" not in unleash:
+              sys.exit("::error::could not read the configuration keys from 'gremlins unleash --help'")
+
+          with open(path, encoding="utf-8") as fh:
+              cfg = yaml.safe_load(fh) or {}
+          if not isinstance(cfg, dict):
+              sys.exit(f"::error file={path}::{path} must be a YAML mapping")
+
+          unknown = [f"{k}" for k in cfg if k not in {"silent", "unleash", "mutants"}]
+          for k, v in (cfg.get("unleash") or {}).items():
+              if k not in unleash:
+                  unknown.append(f"unleash.{k}")
+              elif k == "threshold":
+                  if not isinstance(v, dict):
+                      unknown.append("unleash.threshold (must hold efficacy and mutant-coverage)")
+                      continue
+                  unknown += [f"unleash.threshold.{t}" for t in v if t not in {"efficacy", "mutant-coverage"}]
+          for k, v in (cfg.get("mutants") or {}).items():
+              if k not in mutants:
+                  unknown.append(f"mutants.{k}")
+              elif not isinstance(v, dict):
+                  unknown.append(f"mutants.{k} (must hold enabled: true or false)")
+              else:
+                  unknown += [f"mutants.{k}.{s}" for s in v if s != "enabled"]
+
+          if unknown:
+              for key in unknown:
+                  print(f"::error file={path}::gremlins does not read '{key}'")
+              print("gremlins ignores unknown keys without a warning. Settings go under")
+              print("'unleash:' and mutators under 'mutants:'; see")
+              print("https://gremlins.dev/latest/usage/configuration/")
+              sys.exit(1)
+          print(f"{path}: every key is one gremlins reads")
+
+          PY
+
       - name: Set up Bun
         if: ${{ inputs.setup-bun }}
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
