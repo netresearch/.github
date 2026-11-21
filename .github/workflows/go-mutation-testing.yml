@@ -219,17 +219,24 @@ jobs:
           SCORE=$(grep -oP 'Test efficacy: \K[\d.]+' mutation-output.txt || echo "0")
           echo "MUTATION_SCORE=${SCORE}" >> "$GITHUB_ENV"
           # gremlins computes the score as killed / (killed + lived) and prints
-          # 0.00% when it ran no mutant at all: when no line it mutates holds an
-          # operator a mutator changes, or when no test covers those lines. That
-          # 0.00% is no measurement, so the summary and the PR comment say that
-          # no mutant ran instead of reporting a score below the threshold.
+          # 0.00% when no mutant was killed or survived: when no line it
+          # mutates holds an operator a mutator changes, when no test covers
+          # those lines, or when every mutant timed out. That 0.00% is no
+          # measurement, so the summary and the PR comment say so instead of
+          # reporting a score below the threshold.
           KILLED=$(grep -oP '^Killed: \K\d+(?=, Lived: )' mutation-output.txt | tail -n 1 || true)
           LIVED=$(grep -oP '^Killed: \d+, Lived: \K\d+' mutation-output.txt | tail -n 1 || true)
           NOT_COVERED=$(grep -oP '^Killed: \d+, Lived: \d+, Not covered: \K\d+' mutation-output.txt | tail -n 1 || true)
+          TIMED_OUT=$(grep -oP '^Timed out: \K\d+(?=, Not viable: )' mutation-output.txt | tail -n 1 || true)
+          NOT_VIABLE=$(grep -oP '^Timed out: \d+, Not viable: \K\d+' mutation-output.txt | tail -n 1 || true)
           if [ "$KILLED" = 0 ] && [ "$LIVED" = 0 ]; then
-            echo "MUTANTS_TESTED=0" >> "$GITHUB_ENV"
-            echo "MUTANTS_NOT_COVERED=${NOT_COVERED:-0}" >> "$GITHUB_ENV"
-            SCORE_LINE="**Mutation Score:** not measured, gremlins ran no mutant (not covered by any test: ${NOT_COVERED:-0})"
+            {
+              echo "MUTANTS_TESTED=0"
+              echo "MUTANTS_NOT_COVERED=${NOT_COVERED:-0}"
+              echo "MUTANTS_TIMED_OUT=${TIMED_OUT:-0}"
+              echo "MUTANTS_NOT_VIABLE=${NOT_VIABLE:-0}"
+            } >> "$GITHUB_ENV"
+            SCORE_LINE="**Mutation Score:** not measured, no mutant was killed or survived (not covered: ${NOT_COVERED:-0}, timed out: ${TIMED_OUT:-0}, not viable: ${NOT_VIABLE:-0})"
           else
             SCORE_LINE="**Mutation Score:** ${SCORE}%"
           fi
@@ -296,17 +303,24 @@ jobs:
           SCORE=$(grep -oP 'Test efficacy: \K[\d.]+' mutation-output.txt || echo "0")
           echo "MUTATION_SCORE=${SCORE}" >> "$GITHUB_ENV"
           # gremlins computes the score as killed / (killed + lived) and prints
-          # 0.00% when it ran no mutant at all: when no line it mutates holds an
-          # operator a mutator changes, or when no test covers those lines. That
-          # 0.00% is no measurement, so the summary and the PR comment say that
-          # no mutant ran instead of reporting a score below the threshold.
+          # 0.00% when no mutant was killed or survived: when no line it
+          # mutates holds an operator a mutator changes, when no test covers
+          # those lines, or when every mutant timed out. That 0.00% is no
+          # measurement, so the summary and the PR comment say so instead of
+          # reporting a score below the threshold.
           KILLED=$(grep -oP '^Killed: \K\d+(?=, Lived: )' mutation-output.txt | tail -n 1 || true)
           LIVED=$(grep -oP '^Killed: \d+, Lived: \K\d+' mutation-output.txt | tail -n 1 || true)
           NOT_COVERED=$(grep -oP '^Killed: \d+, Lived: \d+, Not covered: \K\d+' mutation-output.txt | tail -n 1 || true)
+          TIMED_OUT=$(grep -oP '^Timed out: \K\d+(?=, Not viable: )' mutation-output.txt | tail -n 1 || true)
+          NOT_VIABLE=$(grep -oP '^Timed out: \d+, Not viable: \K\d+' mutation-output.txt | tail -n 1 || true)
           if [ "$KILLED" = 0 ] && [ "$LIVED" = 0 ]; then
-            echo "MUTANTS_TESTED=0" >> "$GITHUB_ENV"
-            echo "MUTANTS_NOT_COVERED=${NOT_COVERED:-0}" >> "$GITHUB_ENV"
-            SCORE_LINE="**Mutation Score:** not measured, gremlins ran no mutant (not covered by any test: ${NOT_COVERED:-0})"
+            {
+              echo "MUTANTS_TESTED=0"
+              echo "MUTANTS_NOT_COVERED=${NOT_COVERED:-0}"
+              echo "MUTANTS_TIMED_OUT=${TIMED_OUT:-0}"
+              echo "MUTANTS_NOT_VIABLE=${NOT_VIABLE:-0}"
+            } >> "$GITHUB_ENV"
+            SCORE_LINE="**Mutation Score:** not measured, no mutant was killed or survived (not covered: ${NOT_COVERED:-0}, timed out: ${TIMED_OUT:-0}, not viable: ${NOT_VIABLE:-0})"
           else
             SCORE_LINE="**Mutation Score:** ${SCORE}%"
           fi
@@ -385,17 +399,25 @@ jobs:
           script: |
             const score = process.env.MUTATION_SCORE || '0';
             const threshold = parseFloat(process.env.SCORE_THRESHOLD || '60');
-            // MUTANTS_TESTED=0: gremlins ran no mutant, so its 0.00% is no
-            // score (see the run step) and the threshold does not apply.
+            // MUTANTS_TESTED=0: no mutant was killed or survived, so the
+            // 0.00% is no score (see the run step) and the threshold does not
+            // apply.
             const tested = process.env.MUTANTS_TESTED !== '0';
-            const notCovered = parseInt(process.env.MUTANTS_NOT_COVERED || '0', 10);
+            const count = (name) => parseInt(process.env[name] || '0', 10);
+            const notCovered = count('MUTANTS_NOT_COVERED');
+            const timedOut = count('MUTANTS_TIMED_OUT');
+            const notViable = count('MUTANTS_NOT_VIABLE');
 
             let emoji, scoreLine, note;
             if (!tested) {
-              emoji = notCovered > 0 ? ':warning:' : ':information_source:';
-              scoreLine = '**Mutation Score:** not measured, gremlins ran no mutant';
-              note = notCovered > 0
-                ? `> :warning: ${notCovered} mutants on the changed lines are not covered by any test, so none of them ran.`
+              const parts = [];
+              if (notCovered > 0) parts.push(`${notCovered} not covered by any test`);
+              if (timedOut > 0) parts.push(`${timedOut} timed out`);
+              if (notViable > 0) parts.push(`${notViable} not viable`);
+              emoji = parts.length > 0 ? ':warning:' : ':information_source:';
+              scoreLine = '**Mutation Score:** not measured, no mutant was killed or survived';
+              note = parts.length > 0
+                ? `> :warning: Mutants on the changed lines: ${parts.join(', ')}.`
                 : '> No changed line holds an operator that a mutator changes, so there was no mutant to run.';
             } else {
               emoji = parseFloat(score) >= threshold ? ':white_check_mark:' : ':warning:';
