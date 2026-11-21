@@ -162,12 +162,16 @@ jobs:
           help_text = subprocess.run(
               ["gremlins", "unleash", "--help"], check=True, capture_output=True, text=True
           ).stdout
-          flags = re.findall(r"^\s+(?:-\w, )?--([a-z0-9-]+)", help_text, re.M)
-          mutants = set(re.findall(r'--([a-z0-9-]+)\s+enable "', help_text))
-          unleash = {f for f in flags if f not in mutants} - {"help", "threshold-efficacy", "threshold-mcover"}
-          unleash.add("threshold")
-          if not mutants or "diff" not in unleash:
+          # Only the command's own flags: "Global Flags:" (--config, --silent) are root
+          # options, not keys under "unleash:".
+          local = help_text.split("Global Flags:")[0].split("Flags:", 1)[-1]
+          flags = set(re.findall(r"^\s+(?:-\w, )?--([a-z0-9-]+)", local, re.M)) - {"help"}
+          mutants = set(re.findall(r'--([a-z0-9-]+)\s+enable "', local))
+          if not mutants or "diff" not in flags:
               sys.exit("::error::could not read the configuration keys from 'gremlins unleash --help'")
+          allowed = {"silent", "unleash.threshold.efficacy", "unleash.threshold.mutant-coverage"}
+          allowed |= {f"unleash.{f}" for f in flags - mutants - {"threshold-efficacy", "threshold-mcover"}}
+          allowed |= {f"mutants.{m}.enabled" for m in mutants}
 
           # yq ships with the GitHub-hosted Ubuntu runners; Python has no YAML parser.
           cfg = json.loads(
@@ -176,23 +180,19 @@ jobs:
           if not isinstance(cfg, dict):
               sys.exit(f"::error file={path}::{path} must be a YAML mapping")
 
-          unknown = [f"{k}" for k in cfg if k not in {"silent", "unleash", "mutants"}]
-          for k, v in (cfg.get("unleash") or {}).items():
-              if k not in unleash:
-                  unknown.append(f"unleash.{k}")
-              elif k == "threshold":
-                  if not isinstance(v, dict):
-                      unknown.append("unleash.threshold (must hold efficacy and mutant-coverage)")
-                      continue
-                  unknown += [f"unleash.threshold.{t}" for t in v if t not in {"efficacy", "mutant-coverage"}]
-          for k, v in (cfg.get("mutants") or {}).items():
-              if k not in mutants:
-                  unknown.append(f"mutants.{k}")
-              elif not isinstance(v, dict):
-                  unknown.append(f"mutants.{k} (must hold enabled: true or false)")
-              else:
-                  unknown += [f"mutants.{k}.{s}" for s in v if s != "enabled"]
 
+          def leaves(node, prefix=()):
+              # gremlins reads its config through Viper: keys are case-insensitive and
+              # a dotted key ("threshold.efficacy:") is the same path as the nested one.
+              for key, value in node.items():
+                  here = prefix + tuple(str(key).lower().split("."))
+                  if isinstance(value, dict):
+                      yield from leaves(value, here)
+                  elif value is not None:
+                      yield ".".join(here)
+
+
+          unknown = sorted({p for p in leaves(cfg) if p not in allowed})
           if unknown:
               for key in unknown:
                   print(f"::error file={path}::gremlins does not read '{key}'")
