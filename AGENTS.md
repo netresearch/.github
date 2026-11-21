@@ -67,6 +67,19 @@ is stuck. `scripts/renovate-stuck.py --dry-run` prints the planned actions
 without writing. `GITHUB_TOKEN` reads public repositories only, so the one
 private repository is not scanned.
 
+
+## Failing scheduled workflows
+
+A scheduled run has no pull request and no author, so a red one notifies no
+one. `.github/workflows/scheduled-failing.yml` runs daily (06:45 UTC) and on
+`workflow_dispatch` (with an optional `runs:` input, default 2). It runs
+`scripts/scheduled-failing.py`, which opens one `Scheduled runs failing:
+<owner/repo>` issue per repository in which the last `runs` scheduled runs of
+a workflow, within 30 days, all ended in failure, cancelled, timed_out or
+startup_failure. It updates the issue on later runs and closes it once no
+workflow in the repository is failing. `scripts/scheduled-failing.py
+--dry-run` prints the planned actions without writing. `GITHUB_TOKEN` reads
+public repositories only.
 ## Reusable workflows
 
 The reusable workflows under `.github/workflows/*.yml` are consumed across the org. Reference convention:

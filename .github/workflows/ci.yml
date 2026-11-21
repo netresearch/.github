@@ -39,6 +39,8 @@ jobs:
 
       - name: Check gate of auto-merge-deps.yml against recorded check lists
         run: python3 -m unittest discover -s scripts -p 'test_auto_merge_deps_checks.py' -v
+      - name: Check which scheduled workflows scheduled-failing reports
+        run: python3 -m unittest discover -s scripts -p 'test_scheduled_failing.py' -v
 
       - name: Install the hash-pinned YAML test runtime
         run: >-
