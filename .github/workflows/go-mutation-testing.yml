@@ -152,13 +152,11 @@ jobs:
           # taken from the installed version's "unleash --help", so the check
           # follows gremlins-version. A missing file is the run step's concern.
           [ -f "$CONFIG_PATH" ] || exit 0
-          python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
           python3 - "$CONFIG_PATH" <<'PY'
+          import json
           import re
           import subprocess
           import sys
-
-          import yaml
 
           path = sys.argv[1]
           help_text = subprocess.run(
@@ -171,8 +169,10 @@ jobs:
           if not mutants or "diff" not in unleash:
               sys.exit("::error::could not read the configuration keys from 'gremlins unleash --help'")
 
-          with open(path, encoding="utf-8") as fh:
-              cfg = yaml.safe_load(fh) or {}
+          # yq ships with the GitHub-hosted Ubuntu runners; Python has no YAML parser.
+          cfg = json.loads(
+              subprocess.run(["yq", "-o=json", ".", path], check=True, capture_output=True, text=True).stdout
+          ) or {}
           if not isinstance(cfg, dict):
               sys.exit(f"::error file={path}::{path} must be a YAML mapping")
 
