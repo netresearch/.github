@@ -141,6 +141,69 @@ jobs:
         run: |
           go install "github.com/go-gremlins/gremlins/cmd/gremlins@${GREMLINS_VERSION}"
 
+      - name: Check the gremlins config keys
+        env:
+          CONFIG_PATH: ${{ inputs.config-path }}
+        run: |
+          # gremlins ignores keys it does not read, without a warning, and then
+          # runs with its defaults. In ofelia every setting sat at the top level
+          # of .gremlins.yaml for eleven months: mocks were mutated, the mutator
+          # list and the threshold never applied. The keys gremlins reads are
+          # taken from the installed version's "unleash --help", so the check
+          # follows gremlins-version. A missing file is the run step's concern.
+          [ -f "$CONFIG_PATH" ] || exit 0
+          python3 - "$CONFIG_PATH" <<'PY'
+          import json
+          import re
+          import subprocess
+          import sys
+
+          path = sys.argv[1]
+          help_text = subprocess.run(
+              ["gremlins", "unleash", "--help"], check=True, capture_output=True, text=True
+          ).stdout
+          # Only the command's own flags: "Global Flags:" (--config, --silent) are root
+          # options, not keys under "unleash:".
+          local = help_text.split("Global Flags:")[0].split("Flags:", 1)[-1]
+          flags = set(re.findall(r"^\s+(?:-\w, )?--([a-z0-9-]+)", local, re.M)) - {"help"}
+          mutants = set(re.findall(r'--([a-z0-9-]+)\s+enable "', local))
+          if not mutants or "diff" not in flags:
+              sys.exit("::error::could not read the configuration keys from 'gremlins unleash --help'")
+          allowed = {"silent", "unleash.threshold.efficacy", "unleash.threshold.mutant-coverage"}
+          allowed |= {f"unleash.{f}" for f in flags - mutants - {"threshold-efficacy", "threshold-mcover"}}
+          allowed |= {f"mutants.{m}.enabled" for m in mutants}
+
+          # yq ships with the GitHub-hosted Ubuntu runners; Python has no YAML parser.
+          cfg = json.loads(
+              subprocess.run(["yq", "-o=json", ".", path], check=True, capture_output=True, text=True).stdout
+          ) or {}
+          if not isinstance(cfg, dict):
+              sys.exit(f"::error file={path}::{path} must be a YAML mapping")
+
+
+          def leaves(node, prefix=()):
+              # gremlins reads its config through Viper: keys are case-insensitive and
+              # a dotted key ("threshold.efficacy:") is the same path as the nested one.
+              for key, value in node.items():
+                  here = prefix + tuple(str(key).lower().split("."))
+                  if isinstance(value, dict):
+                      yield from leaves(value, here)
+                  elif value is not None:
+                      yield ".".join(here)
+
+
+          unknown = sorted({p for p in leaves(cfg) if p not in allowed})
+          if unknown:
+              for key in unknown:
+                  print(f"::error file={path}::gremlins does not read '{key}'")
+              print("gremlins ignores unknown keys without a warning. Settings go under")
+              print("'unleash:' and mutators under 'mutants:'; see")
+              print("https://gremlins.dev/latest/usage/configuration/")
+              sys.exit(1)
+          print(f"{path}: every key is one gremlins reads")
+
+          PY
+
       - name: Set up Bun
         if: ${{ inputs.setup-bun }}
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
