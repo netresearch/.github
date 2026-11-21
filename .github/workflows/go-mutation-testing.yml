@@ -229,7 +229,9 @@ jobs:
           NOT_COVERED=$(grep -oP '^Killed: \d+, Lived: \d+, Not covered: \K\d+' mutation-output.txt | tail -n 1 || true)
           TIMED_OUT=$(grep -oP '^Timed out: \K\d+(?=, Not viable: )' mutation-output.txt | tail -n 1 || true)
           NOT_VIABLE=$(grep -oP '^Timed out: \d+, Not viable: \K\d+' mutation-output.txt | tail -n 1 || true)
-          if [ "$KILLED" = 0 ] && [ "$LIVED" = 0 ]; then
+          # Without any mutant, gremlins prints "No results to report." and no
+          # counts (internal/report/report.go in v0.6.0).
+          if { [ "$KILLED" = 0 ] && [ "$LIVED" = 0 ]; } || grep -qx 'No results to report\.' mutation-output.txt; then
             {
               echo "MUTANTS_TESTED=0"
               echo "MUTANTS_NOT_COVERED=${NOT_COVERED:-0}"
@@ -313,7 +315,9 @@ jobs:
           NOT_COVERED=$(grep -oP '^Killed: \d+, Lived: \d+, Not covered: \K\d+' mutation-output.txt | tail -n 1 || true)
           TIMED_OUT=$(grep -oP '^Timed out: \K\d+(?=, Not viable: )' mutation-output.txt | tail -n 1 || true)
           NOT_VIABLE=$(grep -oP '^Timed out: \d+, Not viable: \K\d+' mutation-output.txt | tail -n 1 || true)
-          if [ "$KILLED" = 0 ] && [ "$LIVED" = 0 ]; then
+          # Without any mutant, gremlins prints "No results to report." and no
+          # counts (internal/report/report.go in v0.6.0).
+          if { [ "$KILLED" = 0 ] && [ "$LIVED" = 0 ]; } || grep -qx 'No results to report\.' mutation-output.txt; then
             {
               echo "MUTANTS_TESTED=0"
               echo "MUTANTS_NOT_COVERED=${NOT_COVERED:-0}"
