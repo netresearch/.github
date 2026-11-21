@@ -18,33 +18,28 @@ four schedules in a row (2026-10-25 to 2026-11-15) and reported no score,
 and nobody noticed. The issues land next to the drift and Renovate ones.
 
 Discovery is one REST call per public repository. Any failed call stops the
-run: a failed query must not read as "nothing is failing", which would close
-every open issue.
+run (issue_sweep.run): a failed query must not read as "nothing is failing",
+which would close every open issue.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import subprocess
-import sys
 from datetime import UTC, datetime, timedelta
+
+import issue_sweep
 
 # Deliberately not flags, as in renovate-stuck.py: a caller-supplied value
 # would travel into the gh argument list (S8705).
 ORG = "netresearch"
-ISSUE_REPO = f"{ORG}/.github"
 TITLE_PREFIX = "Scheduled runs failing: "
 LABEL = "scheduled-failing"
 RED = {"failure", "cancelled", "timed_out", "startup_failure"}
 
 
 def run(argv: list[str]) -> str:
-    p = subprocess.run(argv, capture_output=True, text=True, check=False)
-    if p.returncode != 0:
-        sys.stderr.write(p.stderr)
-        raise SystemExit(f"scheduled-failing: {' '.join(argv[:3])} failed")
-    return p.stdout
+    return issue_sweep.run(argv, "scheduled-failing")
 
 
 def public_repos() -> list[str]:
@@ -138,29 +133,6 @@ def issue_body(repo: str, workflows: list[dict], n_runs: int, now: datetime) -> 
     return "\n".join(lines)
 
 
-def gh_issue(*args: str) -> str:
-    return run(["gh", "issue", *args, "--repo", ISSUE_REPO])
-
-
-def open_issues() -> dict[str, int]:
-    out = gh_issue(
-        "list",
-        "--state",
-        "open",
-        "--search",
-        f'"{TITLE_PREFIX.strip()}" in:title',
-        "--limit",
-        "500",
-        "--json",
-        "number,title",
-    )
-    return {
-        i["title"][len(TITLE_PREFIX) :]: i["number"]
-        for i in json.loads(out)
-        if i["title"].startswith(TITLE_PREFIX)
-    }
-
-
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -183,35 +155,27 @@ def main() -> int:
         wfs = failing_workflows(scheduled_runs(repo), args.runs, args.days, now)
         if wfs:
             failing[repo] = wfs
-    existing = open_issues()
+    existing = issue_sweep.open_issues("scheduled-failing", TITLE_PREFIX)
     print(
         f"scheduled-failing: {len(repos)} repo(s) scanned, "
         f"{sum(len(v) for v in failing.values())} failing workflow(s) in "
         f"{len(failing)} repo(s), {len(existing)} open issue(s)"
     )
-    for repo, wfs in sorted(failing.items()):
-        body = issue_body(repo, wfs, args.runs, now)
-        title = TITLE_PREFIX + repo
-        if repo in existing:
-            print(f"update #{existing[repo]}: {title} ({len(wfs)} workflow(s))")
-            if not args.dry_run:
-                gh_issue("edit", str(existing[repo]), "--body", body)
-        else:
-            print(f"open: {title} ({len(wfs)} workflow(s))")
-            if not args.dry_run:
-                gh_issue("create", "--title", title, "--body", body, "--label", LABEL)
-    for repo, number in sorted(existing.items()):
-        if repo in failing:
-            continue
-        print(f"close #{number}: {TITLE_PREFIX}{repo}")
-        if not args.dry_run:
-            gh_issue(
-                "close",
-                str(number),
-                "--comment",
-                f"No scheduled workflow in `{repo}` is failing any more — closed by "
-                f"scheduled-failing on {now.strftime('%Y-%m-%dT%H:%M:%SZ')}.",
-            )
+    issue_sweep.sync(
+        "scheduled-failing",
+        TITLE_PREFIX,
+        LABEL,
+        {
+            repo: (issue_body(repo, wfs, args.runs, now), f"{len(wfs)} workflow(s)")
+            for repo, wfs in failing.items()
+        },
+        existing,
+        lambda repo: (
+            f"No scheduled workflow in `{repo}` is failing any more — closed by "
+            f"scheduled-failing on {now.strftime('%Y-%m-%dT%H:%M:%SZ')}."
+        ),
+        args.dry_run,
+    )
     return 0
 
 

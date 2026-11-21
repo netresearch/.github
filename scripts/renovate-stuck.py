@@ -28,9 +28,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
-import sys
 from datetime import UTC, datetime, timedelta
+
+import issue_sweep
 
 # The organisation this repository serves and the repository the issues are
 # filed in. Deliberately not flags, as in list-consumers.py: a caller-supplied
@@ -38,7 +38,6 @@ from datetime import UTC, datetime, timedelta
 # an argument-injection flow (S8705). A fork that needs another target edits
 # these lines.
 ORG = "netresearch"
-ISSUE_REPO = f"{ORG}/.github"
 TITLE_PREFIX = "Renovate stuck: "
 LABEL = "renovate-stuck"
 RED = {"FAILURE", "ERROR"}
@@ -77,11 +76,7 @@ query($q: String!, $after: String) {
 
 
 def run(argv: list[str]) -> str:
-    p = subprocess.run(argv, capture_output=True, text=True, check=False)
-    if p.returncode != 0:
-        sys.stderr.write(p.stderr)
-        raise SystemExit(f"renovate-stuck: {' '.join(argv[:3])} failed")
-    return p.stdout
+    return issue_sweep.run(argv, "renovate-stuck")
 
 
 def open_renovate_prs() -> list[dict]:
@@ -166,66 +161,6 @@ def issue_body(repo: str, prs: list[dict], days: int, now: datetime) -> str:
     return "\n".join(lines)
 
 
-def gh_issue(*args: str) -> str:
-    return run(["gh", "issue", *args, "--repo", ISSUE_REPO])
-
-
-def open_issues() -> dict[str, int]:
-    out = gh_issue(
-        "list",
-        "--state",
-        "open",
-        "--search",
-        f'"{TITLE_PREFIX.strip()}" in:title',
-        "--limit",
-        "500",
-        "--json",
-        "number,title",
-    )
-    return {
-        i["title"][len(TITLE_PREFIX) :]: i["number"]
-        for i in json.loads(out)
-        if i["title"].startswith(TITLE_PREFIX)
-    }
-
-
-def sync_stuck(
-    stuck: dict[str, list[dict]],
-    existing: dict[str, int],
-    days: int,
-    now: datetime,
-    dry_run: bool,
-) -> None:
-    for repo, repo_prs in sorted(stuck.items()):
-        body = issue_body(repo, repo_prs, days, now)
-        title = TITLE_PREFIX + repo
-        if repo in existing:
-            print(f"update #{existing[repo]}: {title} ({len(repo_prs)} PR)")
-            if not dry_run:
-                gh_issue("edit", str(existing[repo]), "--body", body)
-        else:
-            print(f"open: {title} ({len(repo_prs)} PR)")
-            if not dry_run:
-                gh_issue("create", "--title", title, "--body", body, "--label", LABEL)
-
-
-def close_resolved(
-    stuck: dict[str, list[dict]], existing: dict[str, int], now: datetime, dry_run: bool
-) -> None:
-    for repo, number in sorted(existing.items()):
-        if repo in stuck:
-            continue
-        print(f"close #{number}: {TITLE_PREFIX}{repo}")
-        if not dry_run:
-            gh_issue(
-                "close",
-                str(number),
-                "--comment",
-                f"No Renovate pull request in `{repo}` is stuck any more — closed by "
-                f"renovate-stuck on {now.strftime('%Y-%m-%dT%H:%M:%SZ')}.",
-            )
-
-
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -246,14 +181,27 @@ def main() -> int:
     now = datetime.now(UTC)
     prs = open_renovate_prs()
     stuck = stuck_by_repo(prs, args.days, now)
-    existing = open_issues()
+    existing = issue_sweep.open_issues("renovate-stuck", TITLE_PREFIX)
     print(
         f"renovate-stuck: {len(prs)} open Renovate pull request(s), "
         f"{sum(len(v) for v in stuck.values())} stuck in {len(stuck)} repo(s), "
         f"{len(existing)} open issue(s)"
     )
-    sync_stuck(stuck, existing, args.days, now, args.dry_run)
-    close_resolved(stuck, existing, now, args.dry_run)
+    issue_sweep.sync(
+        "renovate-stuck",
+        TITLE_PREFIX,
+        LABEL,
+        {
+            repo: (issue_body(repo, prs, args.days, now), f"{len(prs)} PR")
+            for repo, prs in stuck.items()
+        },
+        existing,
+        lambda repo: (
+            f"No Renovate pull request in `{repo}` is stuck any more — closed by "
+            f"renovate-stuck on {now.strftime('%Y-%m-%dT%H:%M:%SZ')}."
+        ),
+        args.dry_run,
+    )
     return 0
 
 

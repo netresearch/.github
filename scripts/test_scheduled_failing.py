@@ -97,5 +97,39 @@ class IssueBody(unittest.TestCase):
         self.assertIn("| a\\|b (", sf.issue_body("o/r", wfs, 2, NOW))
 
 
+class IssueSync(unittest.TestCase):
+    """issue_sweep.sync, shared with renovate-stuck.py, run in dry-run mode."""
+
+    def _sync(self, found, existing):
+        import contextlib
+        import io
+
+        import issue_sweep
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            issue_sweep.sync(
+                "t", "Prefix: ", "label", found, existing, lambda r: f"closed {r}", True
+            )
+        return out.getvalue().splitlines()
+
+    def test_opens_updates_and_closes(self):
+        lines = self._sync(
+            {"o/new": ("body", "1 x"), "o/kept": ("body", "2 x")},
+            {"o/kept": 7, "o/gone": 9},
+        )
+        self.assertEqual(
+            lines,
+            [
+                "update #7: Prefix: o/kept (2 x)",
+                "open: Prefix: o/new (1 x)",
+                "close #9: Prefix: o/gone",
+            ],
+        )
+
+    def test_nothing_found_closes_every_open_issue(self):
+        self.assertEqual(self._sync({}, {"o/a": 1}), ["close #1: Prefix: o/a"])
+
+
 if __name__ == "__main__":
     unittest.main()
