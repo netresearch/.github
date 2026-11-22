@@ -25,6 +25,7 @@
 #         contents: write
 #       with:
 #         make-latest: ${{ needs.build.outputs.is_newest }}
+#         title: "${{ github.ref_name }} — <what the release contains>"   # optional
 #         body: |
 #           ## Container image
 #           docker pull ghcr.io/owner/img:${{ github.ref_name }}
@@ -49,6 +50,11 @@ on:
         required: false
         type: string
         default: "true"
+      title:
+        description: "Release title. Empty = the tag name on create, and an existing release keeps its title."
+        required: false
+        type: string
+        default: ""
       tag-name:
         description: "Tag for the release. Empty = the pushed tag (GITHUB_REF_NAME)."
         required: false
@@ -84,12 +90,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_BODY: ${{ inputs.body }}
           TAG_INPUT: ${{ inputs.tag-name }}
+          TITLE_INPUT: ${{ inputs.title }}
           MAKE_LATEST: ${{ inputs.make-latest }}
           GENERATE_NOTES: ${{ inputs.generate-release-notes }}
           FILES: ${{ inputs.files }}
         run: |
           set -euo pipefail
           TAG="${TAG_INPUT:-$GITHUB_REF_NAME}"
+          TITLE="${TITLE_INPUT:-$TAG}"
 
           latest_flag="--latest"
           if [ "$MAKE_LATEST" != "true" ]; then
@@ -97,9 +105,14 @@ jobs:
           fi
 
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" "$latest_flag"
+            edit_args=( "$TAG" "$latest_flag" )
+            # Retitle an existing release only when the caller asks for it.
+            if [ -n "${TITLE_INPUT:-}" ]; then
+              edit_args+=( --title "$TITLE" )
+            fi
+            gh release edit "${edit_args[@]}"
           else
-            create_args=( "$TAG" --title "$TAG" "$latest_flag" )
+            create_args=( "$TAG" --title "$TITLE" "$latest_flag" )
             if [ "$GENERATE_NOTES" = "true" ]; then
               create_args+=( --generate-notes )
             else
