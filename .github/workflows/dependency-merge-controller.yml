@@ -110,7 +110,7 @@ jobs:
         if: inputs.phase == 'evaluate' && !inputs.observe-only && env.MERGE_APP_CONFIGURED == 'true'
         uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
-          app-id: ${{ secrets.merge-app-id }}
+          client-id: ${{ secrets.merge-app-id }}
           private-key: ${{ secrets.merge-app-private-key }}
           permission-contents: write
           permission-pull-requests: write

@@ -37,7 +37,10 @@ class ContractTest(unittest.TestCase):
         root = Path(__file__).resolve().parents[3]
         legacy = root / ".github/workflows/auto-merge-deps.yml"
         self.assertEqual(fingerprint(legacy.read_bytes()),
-                         "59554b5b523fc9feef98c91551cb512b7d85e71c95775420ba0384c202309d6f")
+                         "59554b5b523fc9feef98c91551cb512b7d85e71c95775420ba0384c202309d6f",
+                         msg=".github/workflows/auto-merge-deps.yml changed beyond an action pin or "
+                             "version bump. The file is frozen on purpose: revert the edit, or make it "
+                             "a deliberate contract change and update this fingerprint in the same PR.")
 
     def test_fingerprint_ignores_only_action_pins(self):
         line = b"        uses: step-security/harden-runner@" + b"a" * 40 + b" # v2.22.2\n"
