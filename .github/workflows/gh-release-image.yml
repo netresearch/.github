@@ -88,6 +88,9 @@ jobs:
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          # The job has no checkout, so gh cannot read the repository from a
+          # git remote.
+          GH_REPO: ${{ github.repository }}
           RELEASE_BODY: ${{ inputs.body }}
           TAG_INPUT: ${{ inputs.tag-name }}
           TITLE_INPUT: ${{ inputs.title }}
