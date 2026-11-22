@@ -99,6 +99,7 @@ jobs:
           TAG="${TAG_INPUT:-$GITHUB_REF_NAME}"
           TITLE="${TITLE_INPUT:-$TAG}"
 
+          body_written=false
           latest_flag="--latest"
           if [ "$MAKE_LATEST" != "true" ]; then
             latest_flag="--latest=false"
@@ -115,6 +116,12 @@ jobs:
             create_args=( "$TAG" --title "$TITLE" "$latest_flag" )
             if [ "$GENERATE_NOTES" = "true" ]; then
               create_args+=( --generate-notes )
+            elif [ -n "${RELEASE_BODY:-}" ]; then
+              # Create the release with its notes, so the notification sent on
+              # creation already carries them.
+              printf '%s\n' "$RELEASE_BODY" > "$RUNNER_TEMP/notes.md"
+              create_args+=( --notes-file "$RUNNER_TEMP/notes.md" )
+              body_written=true
             else
               create_args+=( --notes "" )
             fi
@@ -122,7 +129,7 @@ jobs:
           fi
 
           # Prepend the caller's body ahead of the (auto-generated) notes.
-          if [ -n "${RELEASE_BODY:-}" ]; then
+          if [ -n "${RELEASE_BODY:-}" ] && [ "$body_written" != true ]; then
             current="$(gh release view "$TAG" --json body --jq .body)"
             {
               printf '%s\n\n' "$RELEASE_BODY"
