@@ -103,7 +103,7 @@ jobs:
         # when strict=false. The "Summary" step below emits a warning in
         # that case so the finding is still visible.
         continue-on-error: ${{ !inputs.strict }}
-        uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff # v24.2.0
+        uses: DavidAnson/markdownlint-cli2-action@3ce8f712b5d8f31acd8e201be6d97e3d2bb23eb7 # v25.1.0
         with:
           globs: ${{ inputs.globs }}
 
