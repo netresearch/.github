@@ -1,0 +1,215 @@
+# Reusable "Commit message" workflow — verifies that the subject line of every
+# commit in a pull request follows Conventional Commits.
+#
+# WHY A WORKFLOW AND NOT ONLY A HOOK
+# ==================================
+# A local commit-msg hook (CaptainHook, lefthook, husky) checks only commits
+# made where the hook is installed. A commit from a worktree without the
+# hooks, from the web editor or from a bot reaches the pull request
+# unchecked. This reusable checks the commits that are about to land, the
+# same way the DCO reusable checks their sign-off.
+#
+# Caller pattern:
+#
+#   name: Commit message
+#   on:
+#     pull_request:
+#       types: [opened, synchronize, reopened]
+#     merge_group:          # required if the branch runs a merge queue
+#   permissions: {}
+#   jobs:
+#     commit-message:
+#       uses: netresearch/.github/.github/workflows/commit-message.yml@main
+#       permissions:
+#         contents: read
+#         pull-requests: read
+#
+# The merge_group trigger matters for the same reason as in dco.yml: a
+# required check that cannot report on a merge group fails the queue entry.
+#
+# WHAT IS CHECKED
+# ===============
+# The first line of every non-merge commit in the range must match
+# `subject-pattern`, an extended regular expression (grep -E). The default
+# allows the types feat, fix, docs, style, refactor, perf, test, build, ci,
+# chore and revert, an optional scope in parentheses, an optional `!` for a
+# breaking change, and a description of at least three characters. Merge
+# commits are skipped: GitHub or `git merge` writes their message.
+#
+# No login is exempt by default: Renovate writes Conventional Commits when its
+# configuration sets `semanticCommits`. A repository whose bot does not can
+# list it in `exempt-logins`.
+#
+# The commit list comes from the compare API with the event's base and head
+# SHAs, as in dco.yml. The job compares the number of commits it received
+# with the range's `total_commits` and fails on a difference or on an empty
+# range, so a failed or truncated API answer never reads as a pass.
+#
+# SECURITY: commit messages are attacker-controlled. They travel as base64
+# and are decoded into a variable only; the subject is matched with
+# `grep -E -- "$PATTERN"` from the environment and never interpolated into
+# a `run:` block or evaluated.
+
+name: Commit message (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: "Runner label."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      subject-pattern:
+        description: >-
+          Extended regular expression (grep -E) that the first line of every
+          non-merge commit must match. The default is Conventional Commits.
+        required: false
+        type: string
+        default: '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?!?: .{3,}'
+      exempt-logins:
+        description: >-
+          Comma-separated GitHub logins whose commits are not checked. Empty
+          by default, so every author is checked, bots included.
+        required: false
+        type: string
+        default: ""
+
+permissions: {}
+
+jobs:
+  commit-message:
+    name: Commit message
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
+        with:
+          egress-policy: audit
+
+      - name: Check the subject of every commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          PATTERN: ${{ inputs.subject-pattern }}
+          EXEMPT_LOGINS: ${{ inputs.exempt-logins }}
+        run: |
+          set -euo pipefail
+
+          case "$EVENT_NAME" in
+            merge_group)
+              if [ -z "${MG_BASE_SHA:-}" ] || [ -z "${MG_HEAD_SHA:-}" ]; then
+                echo "::error title=Commit message::merge_group event without base_sha/head_sha in the payload."
+                exit 1
+              fi
+              BASE_SHA="$MG_BASE_SHA"
+              HEAD_SHA="$MG_HEAD_SHA"
+              echo "Checking commit subjects on ${REPO} merge group ${MG_BASE_SHA:0:12}..${MG_HEAD_SHA:0:12}"
+              ;;
+            *)
+              if [ -z "${PR_NUMBER:-}" ] || [ "${PR_NUMBER}" = "null" ]; then
+                echo "::error title=Commit message::This reusable must be called from a pull_request or merge_group event; no PR number in the event payload."
+                exit 1
+              fi
+              if [ -z "${PR_BASE_SHA:-}" ] || [ -z "${PR_HEAD_SHA:-}" ]; then
+                echo "::error title=Commit message::pull_request event without base.sha/head.sha in the payload."
+                exit 1
+              fi
+              BASE_SHA="$PR_BASE_SHA"
+              HEAD_SHA="$PR_HEAD_SHA"
+              echo "Checking commit subjects of ${REPO}#${PR_NUMBER}"
+              ;;
+          esac
+          COMPARE_API="repos/${REPO}/compare/${BASE_SHA}...${HEAD_SHA}"
+
+          # The list goes to a file first, so a failed API call stops the job
+          # under set -e instead of yielding an empty loop that passes.
+          EXPECTED=$(gh api "${COMPARE_API}?per_page=1" --jq '.total_commits') || {
+            echo "::error title=Commit message::Cannot read the commit range ${BASE_SHA:0:12}...${HEAD_SHA:0:12} from the GitHub API."
+            exit 1
+          }
+          COMMIT_LIST=$(mktemp)
+          gh api --paginate "${COMPARE_API}?per_page=100" --jq '.commits[]
+            | [ .sha
+                  , (.parents | length | tostring)
+                  , (.author.login // "")
+                  , (.commit.message | @base64)
+                  ] | join("\u001f")' > "$COMMIT_LIST" || {
+            echo "::error title=Commit message::Cannot list the commits of ${BASE_SHA:0:12}...${HEAD_SHA:0:12} from the GitHub API."
+            exit 1
+          }
+          RECEIVED=$(wc -l < "$COMMIT_LIST")
+          if [ "$EXPECTED" -eq 0 ]; then
+            echo "::error title=Commit message::The range ${BASE_SHA:0:12}...${HEAD_SHA:0:12} contains no commits, so nothing could be checked."
+            exit 1
+          fi
+          if [ "$RECEIVED" -ne "$EXPECTED" ]; then
+            echo "::error title=Commit message::Received ${RECEIVED} of ${EXPECTED} commits from the compare API; refusing to report a partial check."
+            exit 1
+          fi
+          echo "Pattern: ${PATTERN}"
+          echo "Exempt logins: ${EXEMPT_LOGINS:-(none)}"
+          echo ""
+
+          # Exact-line lookups, so a login never partially matches another.
+          EXEMPT_FILE=$(mktemp)
+          printf '%s' "$EXEMPT_LOGINS" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' > "$EXEMPT_FILE" || true
+
+          FAILED=0
+          CHECKED=0
+          SKIPPED=0
+
+          # Fields are separated by the ASCII unit separator (0x1f): a tab is
+          # IFS whitespace, so an empty login would shift every later field.
+          while IFS=$'\037' read -r SHA PARENTS LOGIN MSG_B64; do
+            SHORT="${SHA:0:12}"
+
+            if [ "$PARENTS" -gt 1 ]; then
+              echo "  skip  ${SHORT}  merge commit"
+              SKIPPED=$((SKIPPED + 1))
+              continue
+            fi
+
+            if [ -n "$LOGIN" ] && grep -qxF "$LOGIN" "$EXEMPT_FILE"; then
+              echo "  skip  ${SHORT}  exempt login ${LOGIN}"
+              SKIPPED=$((SKIPPED + 1))
+              continue
+            fi
+
+            CHECKED=$((CHECKED + 1))
+            SUBJECT=$(printf '%s' "$MSG_B64" | base64 -d | head -n 1)
+
+            # A here-string, not a pipe: under pipefail a pipe into grep -q
+            # can report a match as a failure once the writer gets SIGPIPE.
+            if grep -qE -- "$PATTERN" <<< "$SUBJECT"; then
+              echo "  ok    ${SHORT}  ${SUBJECT}"
+            else
+              echo "  FAIL  ${SHORT}  ${SUBJECT}"
+              FAILED=$((FAILED + 1))
+            fi
+          done < "$COMMIT_LIST"
+
+          echo ""
+          echo "Summary: ${CHECKED} commit(s) checked, ${SKIPPED} skipped, ${FAILED} with a subject that does not match"
+
+          if [ "$FAILED" -gt 0 ]; then
+            {
+              echo "::error title=Commit message::${FAILED} commit subject(s) do not follow Conventional Commits: type(scope): description."
+              echo ""
+              echo "Types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert"
+              echo "Reword the commits:  git rebase -i <base-branch>, then git push --force-with-lease"
+            } >&2
+            exit 1
+          fi
+
+          echo "Every commit subject matches."
