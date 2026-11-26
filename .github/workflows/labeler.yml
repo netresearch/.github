@@ -47,3 +47,52 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           configuration-path: ${{ inputs.configuration-path }}
+
+      # Adds `bug` to a `fix:` pull request and `enhancement` to a `feat:` one,
+      # read from the Conventional Commits type of the title. actions/labeler
+      # reads changed paths and branch names only, never the title.
+      # The title is untrusted text under pull_request_target: the script reads
+      # it from the event payload and never through an expression.
+      # A dependency update (`fix(deps):` from Renovate) is no defect fix and
+      # gets no label. A label the repository does not have is not created.
+      # An API error leaves a warning and does not fail the job, so a
+      # permission problem shows as "Type label not applied" on the run.
+      - name: Label by Conventional Commits type
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            if (!pr) {
+              core.info('No pull request in the event payload; nothing to label.');
+              return;
+            }
+            const typeLabels = { fix: 'bug', feat: 'enhancement' };
+            const match = /^(\w+)(?:\(([^()]*)\))?!?: /.exec(pr.title);
+            const type = match ? match[1].toLowerCase() : null;
+            const scope = match && match[2] ? match[2].toLowerCase() : null;
+            const label = type ? typeLabels[type] : undefined;
+            if (!label) {
+              core.info(`Title type ${JSON.stringify(type)} maps to no label.`);
+              return;
+            }
+            if (scope === 'deps' || scope === 'deps-dev') {
+              core.info(`Dependency update (${type}(${scope})); no type label.`);
+              return;
+            }
+            const { owner, repo } = context.repo;
+            try {
+              await github.rest.issues.getLabel({ owner, repo, name: label });
+            } catch (error) {
+              if (error.status === 404) {
+                core.notice(`Label "${label}" does not exist in ${owner}/${repo}; not created.`);
+              } else {
+                core.warning(`Type label not applied: reading label "${label}" failed with HTTP ${error.status}: ${error.message}`);
+              }
+              return;
+            }
+            try {
+              await github.rest.issues.addLabels({ owner, repo, issue_number: pr.number, labels: [label] });
+              core.info(`Added "${label}" for type "${type}".`);
+            } catch (error) {
+              core.warning(`Type label not applied: adding "${label}" failed with HTTP ${error.status}: ${error.message}`);
+            }
