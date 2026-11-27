@@ -54,7 +54,8 @@
 # given configuration over its embedded default, which skips `chore(deps…)`,
 # `chore(pr)` and `chore(pull)` commits even when they are breaking, so the
 # configuration below sets `commit_parsers` and `protect_breaking_commits`
-# itself.
+# itself. A `.cliffignore` in the checkout is removed before git-cliff runs:
+# the pull request controls it and could list a breaking commit.
 #
 # `split-commits` defaults to false. With it on, git-cliff treats every line
 # of a commit message as a commit of its own: a `BREAKING CHANGE:` footer is
@@ -145,6 +146,13 @@ jobs:
           SPLIT_COMMITS: ${{ inputs.split-commits }}
         run: |
           set -euo pipefail
+          # git-cliff drops every commit listed in .cliffignore at the
+          # repository root. The pull request controls that file, so it could
+          # hide a breaking commit from the check.
+          if [[ -e .cliffignore || -L .cliffignore ]]; then
+            echo "::notice::Ignoring the repository's .cliffignore for the version check."
+            rm -f .cliffignore
+          fi
           # TOML basic strings need backslashes and quotes escaped.
           PATTERN=${TAG_PATTERN//\\/\\\\}
           PATTERN=${PATTERN//\"/\\\"}

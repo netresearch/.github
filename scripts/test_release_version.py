@@ -140,7 +140,7 @@ class CompareTest(unittest.TestCase):
 class GitCliffTest(unittest.TestCase):
     """The configuration the workflow writes, run by git-cliff on real commits."""
 
-    def bumped(self, messages, tags=("v0.5.0",), split="false", pattern=None):
+    def bumped(self, messages, tags=("v0.5.0",), split="false", pattern=None, ignore_last=False):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp, "repo")
             temp = Path(tmp, "temp")
@@ -153,12 +153,17 @@ class GitCliffTest(unittest.TestCase):
             for message in messages:
                 subprocess.run([*GIT, "-C", str(repo), "commit", "-q", "--allow-empty", "-m", message],
                                check=True)
+            if ignore_last:
+                head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True,
+                                      capture_output=True, text=True).stdout
+                Path(repo, ".cliffignore").write_text(head)
             default_pattern = yaml.load(WORKFLOW.read_text(), Loader=WorkflowLoader)[
                 "on"]["workflow_call"]["inputs"]["tag-pattern"]["default"]
             rc, log, _, _ = run_step("Write the git-cliff configuration", {
                 "RUNNER_TEMP": str(temp), "TAG_PATTERN": pattern or default_pattern,
-                "SPLIT_COMMITS": split})
+                "SPLIT_COMMITS": split}, cwd=repo)
             self.assertEqual(rc, 0, log)
+            self.assertFalse(Path(repo, ".cliffignore").exists())
             result = subprocess.run(
                 [GIT_CLIFF, f"--config={temp}/release-version-cliff.toml", "--bumped-version"],
                 cwd=repo, capture_output=True, text=True,
@@ -199,6 +204,11 @@ class GitCliffTest(unittest.TestCase):
         # Why split-commits defaults to false.
         self.assertEqual(self.bumped(["feat: a\n\nBREAKING CHANGE: removed x"], split="true"),
                          "v0.5.1")
+
+    def test_cliffignore_cannot_hide_a_breaking_commit(self):
+        # The pull request controls .cliffignore; the workflow removes it.
+        self.assertEqual(self.bumped(["fix: a", "feat!: drop the old API"], ignore_last=True),
+                         "v0.6.0")
 
     def test_end_to_end_mismatch_fails(self):
         computed = self.bumped(["fix: a", "feat!: drop the old API"])
