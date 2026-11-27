@@ -3,8 +3,8 @@ must equal the version git-cliff computes from the commits.
 
 The step scripts are read from the workflow file and run as GitHub runs them,
 so the tests cannot drift from the workflow. The git-cliff cases run the real
-binary (the version the workflow installs) on throwaway repositories, with the
-configuration the workflow writes.
+binary, installed the way the workflow installs it (the newest release), on
+throwaway repositories with the configuration the workflow writes.
 """
 
 import os
@@ -23,11 +23,40 @@ WORKFLOW = ROOT / ".github/workflows/release-version.yml"
 GIT_CLIFF = os.environ.get("GIT_CLIFF") or shutil.which("git-cliff")
 GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@example.org",
        "-c", "commit.gpgSign=false", "-c", "tag.gpgSign=false"]
+DETECT = "Detect a release pull request"
+CONFIG = "Write the git-cliff configuration"
+COMPARE = "Compare the versions"
+QUEUE_SHA = "c" * 40
+PR_SHA = "a" * 40
+
+# Stand-in for git-cliff in the comparison tests: prints FAKE_VERSION, or
+# fails with FAKE_RC and a message on stderr.
+FAKE_CLIFF = """#!/usr/bin/env bash
+if [[ "${FAKE_RC:-0}" != 0 ]]; then echo "ERROR fake git-cliff failure" >&2; exit "$FAKE_RC"; fi
+printf '%s\\n' "$FAKE_VERSION"
+"""
+
+# Stand-in for `gh api repos/<repo>/pulls/<n> --jq <expr>`; unknown calls fail.
+FAKE_GH = r"""#!/usr/bin/env python3
+import json, os, subprocess, sys
+args = sys.argv[1:]
+assert args[0] == "api" and args[2] == "--jq", args
+expected = f"repos/{os.environ['REPO']}/pulls/{os.environ['FAKE_PR']}"
+if args[1] != expected:
+    sys.exit(f"unexpected gh call: {args}")
+body = {"head": {"ref": os.environ["FAKE_HEAD_REF"]}, "title": os.environ["FAKE_TITLE"]}
+sys.stdout.write(subprocess.run(["jq", "-r", args[3]], input=json.dumps(body), text=True,
+                                capture_output=True, check=True).stdout)
+"""
 
 
 def steps():
     doc = yaml.load(WORKFLOW.read_text(), Loader=WorkflowLoader)
     return {s["name"]: s for s in doc["jobs"]["release-version"]["steps"]}
+
+
+def outputs_of(text):
+    return dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
 
 
 def run_step(name, env, cwd=None):
@@ -38,68 +67,116 @@ def run_step(name, env, cwd=None):
         out.touch()
         summary.touch()
         full_env = {"PATH": os.environ["PATH"], "GITHUB_OUTPUT": str(out),
-                    "GITHUB_STEP_SUMMARY": str(summary),
-                    "RUNNER_TEMP": env.pop("RUNNER_TEMP", tmp), **env}
+                    "GITHUB_STEP_SUMMARY": str(summary), "RUNNER_TEMP": tmp, **env}
         result = subprocess.run(
             ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", steps()[name]["run"]],
             env=full_env, cwd=cwd, capture_output=True, text=True)
         return (result.returncode, result.stdout + result.stderr,
-                out.read_text(), summary.read_text())
+                outputs_of(out.read_text()), summary.read_text())
 
 
-def compare(head_ref, title, computed, skip="", skip_version=""):
-    return run_step("Compare the versions", {
-        "HEAD_REF": head_ref, "PR_TITLE": title, "COMPUTED": computed, "SKIP_REASON": skip,
-        "SKIP_VERSION": skip_version})
+def detect(event, head_ref="", title="", sha=PR_SHA, mg_ref="", pr=None):
+    with tempfile.TemporaryDirectory() as tmp:
+        gh = Path(tmp, "gh")
+        gh.write_text(FAKE_GH)
+        gh.chmod(0o755)
+        env = {"PATH": f"{tmp}:{os.environ['PATH']}", "EVENT_NAME": event, "REPO": "netresearch/x",
+               "GH_TOKEN": "t", "PR_HEAD_REF": "", "PR_TITLE": "", "PR_HEAD_SHA": "",
+               "MG_HEAD_REF": mg_ref, "MG_HEAD_SHA": "", "FAKE_PR": "0",
+               "FAKE_HEAD_REF": "", "FAKE_TITLE": ""}
+        if event == "merge_group":
+            env.update(MG_HEAD_SHA=QUEUE_SHA, FAKE_PR=str(pr), FAKE_HEAD_REF=head_ref,
+                       FAKE_TITLE=title)
+        else:
+            env.update(PR_HEAD_REF=head_ref, PR_TITLE=title, PR_HEAD_SHA=sha)
+        return run_step(DETECT, env)
+
+
+def compare(head_ref, title, computed="", skip="", skip_version="", cliff_rc=0):
+    with tempfile.TemporaryDirectory() as tmp:
+        cliff = Path(tmp, "git-cliff")
+        cliff.write_text(FAKE_CLIFF)
+        cliff.chmod(0o755)
+        return run_step(COMPARE, {
+            "HEAD_REF": head_ref, "PR_TITLE": title, "SKIP_REASON": skip,
+            "SKIP_VERSION": skip_version, "GIT_CLIFF": str(cliff),
+            "FAKE_VERSION": computed, "FAKE_RC": str(cliff_rc)})
 
 
 class DetectTest(unittest.TestCase):
     def test_release_branch_is_checked(self):
-        rc, _, outputs, _ = run_step("Detect a release pull request",
-                                     {"EVENT_NAME": "pull_request", "HEAD_REF": "release/v0.56.0"})
+        rc, _, out, _ = detect("pull_request", "release/v0.56.0", "chore(release): 0.56.0")
         self.assertEqual(rc, 0)
-        self.assertIn("release=true", outputs)
+        self.assertEqual(out["release"], "true")
+        self.assertEqual(out["head-ref"], "release/v0.56.0")
+        self.assertEqual(out["title"], "chore(release): 0.56.0")
+        self.assertEqual(out["sha"], PR_SHA)
 
-    def test_other_branch_passes_with_notice(self):
-        rc, log, outputs, _ = run_step("Detect a release pull request",
-                                       {"EVENT_NAME": "pull_request", "HEAD_REF": "feat/x"})
+    def test_other_pull_request_passes_with_notice(self):
+        rc, log, out, _ = detect("pull_request", "feat/x", "feat: x")
         self.assertEqual(rc, 0)
-        self.assertIn("release=false", outputs)
-        self.assertIn("::notice::", log)
+        self.assertEqual(out["release"], "false")
+        self.assertIn("::notice::Not a release pull request", log)
 
-    def test_branch_without_v_is_not_a_release_branch(self):
-        _, _, outputs, _ = run_step("Detect a release pull request",
-                                    {"EVENT_NAME": "pull_request", "HEAD_REF": "release/0.56.0"})
-        self.assertIn("release=false", outputs)
+    def test_release_title_on_another_branch_is_a_release(self):
+        # Otherwise a release PR on a misnamed branch would pass unchecked.
+        for branch in ("feat/x", "release/0.56.0"):
+            with self.subTest(branch=branch):
+                _, _, out, _ = detect("pull_request", branch, "chore(release): 0.56.0")
+                self.assertEqual(out["release"], "true")
 
-    def test_merge_group_passes_with_notice(self):
-        # A required check must report on a merge group, or the queue ejects the entry.
-        rc, log, outputs, _ = run_step("Detect a release pull request",
-                                       {"EVENT_NAME": "merge_group", "HEAD_REF": ""})
+    def test_merge_group_reads_the_queued_pull_request(self):
+        rc, log, out, _ = detect(
+            "merge_group", "release/v0.56.1", "chore(release): 0.56.1",
+            mg_ref=f"refs/heads/gh-readonly-queue/main/pr-1477-{'b' * 40}", pr=1477)
         self.assertEqual(rc, 0, log)
-        self.assertIn("release=false", outputs)
-        self.assertIn("::notice::Merge group", log)
+        self.assertEqual(out["release"], "true")
+        self.assertEqual(out["head-ref"], "release/v0.56.1")
+        self.assertEqual(out["sha"], QUEUE_SHA)
 
-    def test_other_event_fails(self):
-        rc, log, _, _ = run_step("Detect a release pull request",
-                                 {"EVENT_NAME": "push", "HEAD_REF": ""})
+    def test_merge_group_of_another_pull_request_passes(self):
+        rc, log, out, _ = detect(
+            "merge_group", "feat/x", "feat: x",
+            mg_ref=f"refs/heads/gh-readonly-queue/main/pr-12-{'b' * 40}", pr=12)
+        self.assertEqual(rc, 0, log)
+        self.assertEqual(out["release"], "false")
+
+    def test_unreadable_merge_group_ref_fails(self):
+        rc, log, _, _ = detect("merge_group", mg_ref="refs/heads/main", pr=1)
         self.assertEqual(rc, 1)
-        self.assertIn("::error::", log)
+        self.assertIn("::error::Cannot read the pull request number", log)
+
+    def test_line_break_in_a_title_is_refused(self):
+        # Step outputs are written one per line; a break would add an output.
+        rc, log, _, _ = detect("merge_group", "release/v0.5.1", "chore(release): 0.5.1\nrelease=x",
+                               mg_ref=f"gh-readonly-queue/main/pr-7-{'b' * 40}", pr=7)
+        self.assertEqual(rc, 1)
+        self.assertIn("::error::The head branch or the title contains a line break.", log)
+
+    def test_other_events_fail(self):
+        for event in ("pull_request_target", "push", "workflow_dispatch"):
+            with self.subTest(event=event):
+                rc, log, _, _ = detect(event, "release/v0.56.0", "chore(release): 0.56.0")
+                self.assertEqual(rc, 1)
+                self.assertIn("::error::This workflow checks pull_request and merge_group events", log)
 
 
 class CompareTest(unittest.TestCase):
     def test_match_passes(self):
-        # The action's content output carries the tag prefix and a newline.
-        rc, log, _, summary = compare("release/v0.56.1", "chore(release): 0.56.1", "v0.56.1\n")
+        rc, log, _, summary = compare("release/v0.56.1", "chore(release): 0.56.1", "v0.56.1")
         self.assertEqual(rc, 0, log)
         self.assertIn("::notice::", log)
         self.assertIn("| git-cliff --bumped-version | v0.56.1 |", summary)
 
     def test_computed_differs_fails(self):
-        rc, log, _, _ = compare("release/v0.56.0", "chore(release): 0.56.0", "v0.55.2\n")
+        rc, log, _, _ = compare("release/v0.56.0", "chore(release): 0.56.0", "v0.55.2")
         self.assertEqual(rc, 1)
         self.assertIn("::error::This pull request releases 0.56.0, but the commits since the last"
                       " release call for 0.55.2.", log)
+        # Renaming a branch closes its pull request.
+        self.assertIn("open a new pull request from release/v0.55.2", log)
+        self.assertNotIn("rename", log)
+        self.assertIn("1.0.0 itself", log)
 
     def test_branch_and_title_differ_fails(self):
         rc, log, _, _ = compare("release/v0.56.0", "chore(release): 0.55.2", "v0.56.0")
@@ -115,14 +192,28 @@ class CompareTest(unittest.TestCase):
                 self.assertIn("::error::The title must be 'chore(release): 0.56.0'", log)
 
     def test_malformed_branch_fails(self):
-        rc, log, _, _ = compare("release/v0.56", "chore(release): 0.56", "v0.56.0")
-        self.assertEqual(rc, 1)
-        self.assertIn("::error::The head branch must be release/vX.Y.Z", log)
+        for branch in ("release/v0.56", "feat/x", "release/0.56.0"):
+            with self.subTest(branch=branch):
+                rc, log, _, _ = compare(branch, "chore(release): 0.56.0", "v0.56.0")
+                self.assertEqual(rc, 1)
+                self.assertIn("::error::The head branch must be release/vX.Y.Z", log)
 
     def test_no_computed_version_fails(self):
         rc, log, _, _ = compare("release/v0.56.0", "chore(release): 0.56.0", "")
         self.assertEqual(rc, 1)
         self.assertIn("::error::git-cliff returned no version", log)
+
+    def test_git_cliff_failure_fails_with_its_log(self):
+        rc, log, _, _ = compare("release/v0.56.0", "chore(release): 0.56.0", cliff_rc=1)
+        self.assertEqual(rc, 1)
+        self.assertIn("ERROR fake git-cliff failure", log)
+        self.assertIn("::error::git-cliff failed with exit code 1", log)
+
+    def test_git_cliff_failure_still_reaches_the_skip(self):
+        rc, log, _, _ = compare("release/v1.0.0", "chore(release): 1.0.0", cliff_rc=1,
+                                skip="owner approved 1.0.0", skip_version="1.0.0")
+        self.assertEqual(rc, 0, log)
+        self.assertIn("::warning::Version check skipped for 1.0.0", log)
 
     def test_skip_with_reason_passes_and_is_logged(self):
         rc, log, _, summary = compare("release/v0.56.0", "chore(release): 0.56.0", "v0.55.2",
@@ -172,36 +263,51 @@ class CompareTest(unittest.TestCase):
 class GitCliffTest(unittest.TestCase):
     """The configuration the workflow writes, run by git-cliff on real commits."""
 
-    def bumped(self, messages, tags=("v0.5.0",), split="false", pattern=None, ignore_last=False):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp, "repo")
-            temp = Path(tmp, "temp")
-            temp.mkdir()
-            subprocess.run([*GIT, "init", "-q", "-b", "main", str(repo)], check=True)
-            subprocess.run([*GIT, "-C", str(repo), "commit", "-q", "--allow-empty", "-m", "chore: init"],
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def repo(self, messages, tags=("v0.5.0",), head_tags=(), split="false", ignore_last=False):
+        """Create a repository and run the configuration step in it; return (repo, temp)."""
+        base = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        repo, temp = base / "repo", base / "temp"
+        temp.mkdir()
+        subprocess.run([*GIT, "init", "-q", "-b", "main", str(repo)], check=True)
+        subprocess.run([*GIT, "-C", str(repo), "commit", "-q", "--allow-empty", "-m", "chore: init"],
+                       check=True)
+        for tag in tags:
+            subprocess.run([*GIT, "-C", str(repo), "tag", tag], check=True)
+        for message in messages:
+            subprocess.run([*GIT, "-C", str(repo), "commit", "-q", "--allow-empty", "-m", message],
                            check=True)
-            for tag in tags:
-                subprocess.run([*GIT, "-C", str(repo), "tag", tag], check=True)
-            for message in messages:
-                subprocess.run([*GIT, "-C", str(repo), "commit", "-q", "--allow-empty", "-m", message],
-                               check=True)
-            if ignore_last:
-                head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True,
-                                      capture_output=True, text=True).stdout
-                Path(repo, ".cliffignore").write_text(head)
-            default_pattern = yaml.load(WORKFLOW.read_text(), Loader=WorkflowLoader)[
-                "on"]["workflow_call"]["inputs"]["tag-pattern"]["default"]
-            rc, log, _, _ = run_step("Write the git-cliff configuration", {
-                "RUNNER_TEMP": str(temp), "TAG_PATTERN": pattern or default_pattern,
-                "SPLIT_COMMITS": split}, cwd=repo)
-            self.assertEqual(rc, 0, log)
-            self.assertFalse(Path(repo, ".cliffignore").exists())
-            result = subprocess.run(
-                [GIT_CLIFF, f"--config={temp}/release-version-cliff.toml", "--bumped-version"],
-                cwd=repo, capture_output=True, text=True,
-                env={k: v for k, v in os.environ.items() if not k.startswith("GIT_CLIFF")})
-            self.assertEqual(result.returncode, 0, result.stderr)
-            return result.stdout.strip()
+        for tag in head_tags:
+            subprocess.run([*GIT, "-C", str(repo), "tag", tag], check=True)
+        if ignore_last:
+            head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True,
+                                  capture_output=True, text=True).stdout
+            Path(repo, ".cliffignore").write_text(head)
+        pattern = yaml.load(WORKFLOW.read_text(), Loader=WorkflowLoader)[
+            "on"]["workflow_call"]["inputs"]["tag-pattern"]["default"]
+        rc, log, _, _ = run_step(CONFIG, {"RUNNER_TEMP": str(temp), "TAG_PATTERN": pattern,
+                                          "SPLIT_COMMITS": split}, cwd=repo)
+        self.assertEqual(rc, 0, log)
+        self.assertFalse(Path(repo, ".cliffignore").exists())
+        return repo, temp
+
+    def bumped(self, messages, **kwargs):
+        repo, temp = self.repo(messages, **kwargs)
+        result = subprocess.run(
+            [GIT_CLIFF, f"--config={temp}/release-version-cliff.toml", "--bumped-version"],
+            cwd=repo, capture_output=True, text=True,
+            env={k: v for k, v in os.environ.items() if not k.startswith("GIT_CLIFF")})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def check(self, repo, temp, head_ref, title, **env):
+        """Run the comparison step with the real git-cliff in the repository."""
+        return run_step(COMPARE, {"RUNNER_TEMP": str(temp), "GIT_CLIFF": GIT_CLIFF,
+                                  "HEAD_REF": head_ref, "PR_TITLE": title, "SKIP_REASON": "",
+                                  "SKIP_VERSION": "", **env}, cwd=repo)
 
     def test_zero_x_rule(self):
         cases = {
@@ -230,7 +336,7 @@ class GitCliffTest(unittest.TestCase):
 
     def test_interface_tag_is_ignored(self):
         # A `v1` interface tag on the newest commit is no release.
-        self.assertEqual(self.bumped(["fix: a"], tags=("v0.5.0", "v1")), "v0.5.1")
+        self.assertEqual(self.bumped(["fix: a"], head_tags=("v1",)), "v0.5.1")
 
     def test_split_commits_drops_footers(self):
         # Why split-commits defaults to false.
@@ -242,9 +348,28 @@ class GitCliffTest(unittest.TestCase):
         self.assertEqual(self.bumped(["fix: a", "feat!: drop the old API"], ignore_last=True),
                          "v0.6.0")
 
+    def test_first_release_is_0_1_0(self):
+        # Without a tag git-cliff proposes 0.1.0, which the tag pattern rejected.
+        repo, temp = self.repo(["feat: first feature"], tags=())
+        rc, log, _, _ = self.check(repo, temp, "release/v0.1.0", "chore(release): 0.1.0")
+        self.assertEqual(rc, 0, log)
+        self.assertIn("::notice::Release version 0.1.0 matches the commits.", log)
+
     def test_end_to_end_mismatch_fails(self):
-        computed = self.bumped(["fix: a", "feat!: drop the old API"])
-        rc, log, _, _ = compare("release/v0.5.1", "chore(release): 0.5.1", computed)
+        repo, temp = self.repo(["fix: a", "feat!: drop the old API"])
+        rc, log, _, _ = self.check(repo, temp, "release/v0.5.1", "chore(release): 0.5.1")
+        self.assertEqual(rc, 1)
+        self.assertIn("call for 0.6.0", log)
+
+    def test_breaking_change_queued_ahead_fails_the_merge_group(self):
+        # The release PR was green for 0.5.1; a feat! queued ahead of it ends
+        # up in the merge group's commit, which the merge-group run checks.
+        repo, temp = self.repo(["fix: a", "chore(release): 0.5.1", "feat!: queued ahead"])
+        rc, log, out, _ = detect(
+            "merge_group", "release/v0.5.1", "chore(release): 0.5.1",
+            mg_ref=f"refs/heads/gh-readonly-queue/main/pr-7-{'b' * 40}", pr=7)
+        self.assertEqual((rc, out["release"]), (0, "true"), log)
+        rc, log, _, _ = self.check(repo, temp, out["head-ref"], out["title"])
         self.assertEqual(rc, 1)
         self.assertIn("call for 0.6.0", log)
 

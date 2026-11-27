@@ -20,21 +20,27 @@
 #       uses: netresearch/.github/.github/workflows/release-version.yml@main
 #       permissions:
 #         contents: read
+#         pull-requests: read
 #
 # `edited` is in the trigger types so that correcting the title re-runs the
-# check. On a pull request whose head branch does not start with `release/v`
-# the job passes with a notice, so the check can be made required. On a
-# `merge_group` event it passes with a notice as well: the release pull
-# request was checked before it entered the queue, and a required check that
-# never reports on a merge group ejects every queue entry.
+# check. A pull request is a release pull request when its head branch starts
+# with `release/v` or its title starts with `chore(release)`; any other pull
+# request passes with a notice, so the check can be made required.
 #
-# The check reads the pull request's head commit, so commits merged into the
-# base branch after the release branch was cut are not counted. Rebase the
-# release branch to count them.
+# On `merge_group` the check runs again at the queue's commit, which holds the
+# pull requests queued ahead of this one: a breaking change that lands ahead
+# of a release in the queue fails the release there. The pull request's
+# branch and title are read from the API (`pull-requests: read`). A required
+# check that never reports on a merge group ejects every queue entry, so add
+# the trigger wherever the branch runs a merge queue.
+#
+# On `pull_request` the check reads the pull request's head commit, so commits
+# merged into the base branch after the release branch was cut are counted
+# only in the merge group, or after a rebase.
 #
 # CALLER REQUIREMENTS
 # ===================
-# The calling job must grant `contents: read`.
+# The calling job must grant `contents: read` and `pull-requests: read`.
 #
 # VERSION RULE
 # ============
@@ -54,7 +60,9 @@
 # a middle bump, add a commit with a breaking marker to the release branch
 # (for example `git commit --allow-empty -S --signoff -m 'feat!: <what broke>'`,
 # or a `BREAKING CHANGE:` footer), or skip the check with `skip-reason` and
-# `skip-version`. The skip applies only to the release pull request whose
+# `skip-version`. Below 1.0.0 a breaking commit raises only the middle number,
+# so 1.0.0 itself is released only through the skip. Without any release tag
+# git-cliff starts at 0.1.0. The skip applies only to the release pull request whose
 # version equals `skip-version`; any other release pull request fails until
 # both inputs are removed, so an approved exception cannot carry over to the
 # next release unnoticed.
@@ -75,9 +83,13 @@
 # way computes as a patch. Lines quoted in a squash body (release notes of a
 # dependency update) count as commits of their own as well.
 #
+# git-cliff is installed from PyPI at its newest release and called directly,
+# the same way CI of this repository installs it for the tests.
+#
 # SECURITY: the branch name and the title are attacker-controlled; they reach
-# the script only through `env:` and are matched against fixed patterns,
-# never evaluated.
+# the scripts only through `env:` and step outputs, are matched against fixed
+# patterns and never evaluated. The job's token is read-only and nothing from
+# the checkout is executed.
 
 name: Release version (reusable)
 
@@ -127,6 +139,8 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      # On merge_group: the queued pull request's branch and title.
+      pull-requests: read
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
@@ -137,33 +151,82 @@ jobs:
         id: detect
         env:
           EVENT_NAME: ${{ github.event_name }}
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MG_HEAD_REF: ${{ github.event.merge_group.head_ref }}
+          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [[ "$EVENT_NAME" == merge_group ]]; then
-            echo "::notice::Merge group: the release pull request was checked before it was queued; nothing to check."
-            echo "release=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [[ "$EVENT_NAME" != pull_request* ]]; then
-            echo "::error::This workflow checks release pull requests; it was triggered by '${EVENT_NAME}'."
+          case "$EVENT_NAME" in
+            pull_request)
+              HEAD_REF=$PR_HEAD_REF
+              TITLE=$PR_TITLE
+              SHA=$PR_HEAD_SHA
+              ;;
+            merge_group)
+              # The queue builds gh-readonly-queue/<base>/pr-<N>-<sha> from the
+              # base, the pull requests ahead and this one; check that commit.
+              if ! [[ "$MG_HEAD_REF" =~ ^(refs/heads/)?gh-readonly-queue/.+/pr-([0-9]+)-[0-9a-f]{40}$ ]]; then
+                echo "::error::Cannot read the pull request number from the merge group ref '${MG_HEAD_REF}'."
+                exit 1
+              fi
+              PR_NUMBER=${BASH_REMATCH[2]}
+              HEAD_REF=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.ref')
+              TITLE=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.title')
+              SHA=$MG_HEAD_SHA
+              echo "Merge group for pull request #${PR_NUMBER}: ${HEAD_REF}"
+              ;;
+            *)
+              echo "::error::This workflow checks pull_request and merge_group events; it was triggered by '${EVENT_NAME}'."
+              exit 1
+              ;;
+          esac
+          if ! [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Not a full commit SHA: '${SHA}'"
             exit 1
           fi
-          if [[ "$HEAD_REF" == release/v* ]]; then
-            echo "release=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice::Not a release pull request (head branch does not start with release/v); nothing to check."
-            echo "release=false" >> "$GITHUB_OUTPUT"
+          # Values go to GITHUB_OUTPUT one per line.
+          if [[ "$HEAD_REF$TITLE" == *[$'\n\r']* ]]; then
+            echo "::error::The head branch or the title contains a line break."
+            exit 1
           fi
+          # A title alone marks a release pull request too, so that a release
+          # titled on another branch fails the branch check instead of passing.
+          if [[ "$HEAD_REF" == release/v* || "$TITLE" =~ ^chore\(release\) ]]; then
+            RELEASE=true
+          else
+            RELEASE=false
+            echo "::notice::Not a release pull request (head branch not release/v*, title not chore(release)); nothing to check."
+          fi
+          {
+            echo "release=${RELEASE}"
+            echo "head-ref=${HEAD_REF}"
+            echo "title=${TITLE}"
+            echo "sha=${SHA}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Checkout
         if: steps.detect.outputs.release == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ steps.detect.outputs.sha }}
           fetch-depth: 0
           fetch-tags: true
           persist-credentials: false
+
+      - name: Install git-cliff
+        if: steps.detect.outputs.release == 'true'
+        # git-cliff is dev tooling and runs its newest release. CI of this
+        # repository installs it the same way for scripts/test_release_version.py,
+        # so a release that changes what --bumped-version computes fails there.
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check --only-binary=:all: \
+            --target "$RUNNER_TEMP/git-cliff" git-cliff
+          "$RUNNER_TEMP/git-cliff/bin/git-cliff" --version
 
       - name: Write the git-cliff configuration
         if: steps.detect.outputs.release == 'true'
@@ -198,38 +261,23 @@ jobs:
           [bump]
           features_always_bump_minor = false
           breaking_always_bump_major = false
+          # Without a release tag git-cliff proposes 0.1.0, which the tag
+          # pattern would reject; name it with the tag prefix.
+          initial_tag = "v0.1.0"
           EOF
           cat "$RUNNER_TEMP/release-version-cliff.toml"
-
-      - name: Compute the next version with git-cliff
-        id: cliff
-        if: steps.detect.outputs.release == 'true'
-        uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4.9.1
-        with:
-          # git-cliff is dev tooling and runs its newest release; the tests
-          # in scripts/test_release_version.py run the newest one as well and
-          # fail when a release changes what --bumped-version computes.
-          version: latest
-          config: ${{ runner.temp }}/release-version-cliff.toml
-          args: --bumped-version
-        env:
-          # The action writes its output file into the workspace; keep it out.
-          OUTPUT: ${{ runner.temp }}/release-version-bumped.txt
 
       - name: Compare the versions
         if: steps.detect.outputs.release == 'true'
         env:
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          COMPUTED: ${{ steps.cliff.outputs.content }}
+          HEAD_REF: ${{ steps.detect.outputs.head-ref }}
+          PR_TITLE: ${{ steps.detect.outputs.title }}
           SKIP_REASON: ${{ inputs.skip-reason }}
           SKIP_VERSION: ${{ inputs.skip-version }}
         run: |
           set -euo pipefail
           SEMVER='[0-9]+\.[0-9]+\.[0-9]+'
-          # The action's content output is the file git-cliff wrote: the
-          # version and a trailing newline.
-          COMPUTED=${COMPUTED//[[:space:]]/}
+          GIT_CLIFF=${GIT_CLIFF:-$RUNNER_TEMP/git-cliff/bin/git-cliff}
 
           BRANCH_VERSION=${HEAD_REF#release/v}
           if ! [[ "$BRANCH_VERSION" =~ ^${SEMVER}$ ]]; then
@@ -245,6 +293,12 @@ jobs:
             echo "::error::The branch names ${BRANCH_VERSION}, the title names ${TITLE_VERSION}. Both must name the version being released."
             exit 1
           fi
+
+          # A git-cliff failure still reaches the skip handling below.
+          CLIFF_STATUS=0
+          COMPUTED=$("$GIT_CLIFF" --config="$RUNNER_TEMP/release-version-cliff.toml" \
+            --bumped-version 2> "$RUNNER_TEMP/git-cliff.log") || CLIFF_STATUS=$?
+          cat "$RUNNER_TEMP/git-cliff.log"
 
           {
             echo "### Release version"
@@ -270,14 +324,19 @@ jobs:
             exit 0
           fi
 
+          HINT="Below 1.0.0 a breaking change (a commit subject with '!' or a 'BREAKING CHANGE:' footer) raises the middle number and features and fixes raise the last; from 1.0.0 on they raise the major, minor and patch version. 1.0.0 itself, or any other exception the owner approved, needs skip-reason and skip-version in the calling workflow."
+          if (( CLIFF_STATUS != 0 )); then
+            echo "::error::git-cliff failed with exit code ${CLIFF_STATUS}; its log is above. ${HINT}"
+            exit 1
+          fi
           COMPUTED_VERSION=${COMPUTED#v}
           if ! [[ "$COMPUTED_VERSION" =~ ^${SEMVER}$ ]]; then
-            echo "::error::git-cliff returned no version ('${COMPUTED}'). Is there a release tag matching the tag pattern in the history of the pull request?"
+            echo "::error::git-cliff returned no version ('${COMPUTED}'). ${HINT}"
             exit 1
           fi
 
           if [[ "$COMPUTED_VERSION" != "$BRANCH_VERSION" ]]; then
-            echo "::error::This pull request releases ${BRANCH_VERSION}, but the commits since the last release call for ${COMPUTED_VERSION}. A breaking change (a commit subject with '!' or a 'BREAKING CHANGE:' footer) raises the major version, a feature the minor version, anything else the patch version; below 1.0.0 a breaking change raises the middle number and features and fixes raise the last. Either release ${COMPUTED_VERSION} (rename the branch to release/v${COMPUTED_VERSION} and retitle the pull request), or, when the release really breaks something no commit marks, add a commit with a breaking marker to this branch. An exception approved by the owner goes through the skip-reason input."
+            echo "::error::This pull request releases ${BRANCH_VERSION}, but the commits since the last release call for ${COMPUTED_VERSION}. Either release ${COMPUTED_VERSION}: open a new pull request from release/v${COMPUTED_VERSION} titled 'chore(release): ${COMPUTED_VERSION}' and close this one. Or, when this release breaks something no commit marks, add a commit with a breaking marker to this branch. ${HINT}"
             exit 1
           fi
           echo "::notice::Release version ${BRANCH_VERSION} matches the commits."
