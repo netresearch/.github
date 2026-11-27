@@ -57,6 +57,17 @@ jobs:
           PYTHONPATH: ${{ runner.temp }}/drift-fixtures-python
           PYTHONDONTWRITEBYTECODE: '1'
         run: python3 -m unittest discover -s scripts -p 'test_checks_template.py' -v
+      - name: Install the hash-pinned git-cliff for the release-version tests
+        run: >-
+          python3 -m pip install --disable-pip-version-check --only-binary=:all:
+          --require-hashes --target "$RUNNER_TEMP/release-version-python"
+          -r scripts/requirements-release-version-tests.txt
+      - name: Check the release-version comparison and git-cliff configuration
+        env:
+          PYTHONPATH: ${{ runner.temp }}/drift-fixtures-python
+          PYTHONDONTWRITEBYTECODE: '1'
+          GIT_CLIFF: ${{ runner.temp }}/release-version-python/bin/git-cliff
+        run: python3 -m unittest discover -s scripts -p 'test_release_version.py' -v
 
   markdown:
     name: Lint Markdown

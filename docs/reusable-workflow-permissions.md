@@ -73,7 +73,7 @@ truth; this table is the index.)
 | `attest-release-files.yml` | `id-token: write`, `attestations: write` |
 | `release-source-archive.yml` | `contents: write`, `id-token: write`, `attestations: write` |
 | `docker-image-ci.yml` | `contents: read`, `packages: write`, `security-events: write`, `id-token: write`, `attestations: write`, `actions: read`, `pull-requests: write` |
-| `lint-*.yml` / `php-ci.yml` / `python-ci.yml` / `python-build.yml` / `python-audit.yml` / `ansible-lint.yml` / `ansible-molecule.yml` / `ts-check.yml` / `node-audit.yml` / `node-test.yml` / `node-build.yml` / `lint-compose.yml` / `sonarqube.yml` / `smoke-test-container.yml` / `lint-container.yml` / `check-template-drift.yml` | `contents: read` |
+| `lint-*.yml` / `php-ci.yml` / `python-ci.yml` / `python-build.yml` / `python-audit.yml` / `ansible-lint.yml` / `ansible-molecule.yml` / `ts-check.yml` / `node-audit.yml` / `node-test.yml` / `node-build.yml` / `lint-compose.yml` / `sonarqube.yml` / `smoke-test-container.yml` / `lint-container.yml` / `check-template-drift.yml` / `release-version.yml` | `contents: read` |
 
 ### `netresearch/typo3-ci-workflows`
 

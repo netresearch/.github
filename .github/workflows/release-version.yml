@@ -1,0 +1,236 @@
+# Reusable "Release version" workflow — checks that a release pull request
+# releases the version its commits call for.
+#
+# A release is prepared in a pull request on branch `release/vX.Y.Z`, titled
+# `chore(release): X.Y.Z`. The version is chosen by hand. This workflow
+# computes the next version from the conventional commits since the last
+# release tag with git-cliff (`--bumped-version`) and fails when the branch
+# name, the title and the computed version do not all name the same version.
+#
+# Caller pattern:
+#
+#   name: Release version
+#   on:
+#     pull_request:
+#       types: [opened, synchronize, reopened, edited]
+#   permissions: {}
+#   jobs:
+#     release-version:
+#       uses: netresearch/.github/.github/workflows/release-version.yml@main
+#       permissions:
+#         contents: read
+#
+# `edited` is in the trigger types so that correcting the title re-runs the
+# check. On a pull request whose head branch does not start with `release/v`
+# the job passes with a notice, so the check can be made required.
+#
+# CALLER REQUIREMENTS
+# ===================
+# The calling job must grant `contents: read`.
+#
+# VERSION RULE
+# ============
+# A breaking change raises the major version, a feature the minor version,
+# anything else the patch version. Below 1.0.0 everything moves one place to
+# the right: a breaking change raises the middle number, features and fixes
+# raise the last one (git-cliff `[bump] features_always_bump_minor = false`,
+# `breaking_always_bump_major = false`). A commit counts as breaking when its
+# subject carries `!` (`feat!:`, `fix(api)!:`) or its message ends with a
+# `BREAKING CHANGE:` footer.
+#
+# When the commits and the changelog disagree, the check fails and the
+# release author aligns them. Example: the CHANGELOG.md sections of
+# netresearch/t3x-nr-llm 0.35.0, 0.39.0 and 0.41.0 carry `**BREAKING`
+# bullets, but no commit in those releases carries a breaking marker, so
+# git-cliff computes 0.34.1, 0.38.3 and 0.40.1. To release such a version as
+# a middle bump, add a commit with a breaking marker to the release branch
+# (for example `git commit --allow-empty -S --signoff -m 'feat!: <what broke>'`,
+# or a `BREAKING CHANGE:` footer), or skip the check with `skip-reason`.
+#
+# CONFIGURATION
+# =============
+# The git-cliff configuration is written to `$RUNNER_TEMP` by this workflow;
+# the caller's `cliff.toml` is not read and not changed. git-cliff layers a
+# given configuration over its embedded default, which skips `chore(deps…)`,
+# `chore(pr)` and `chore(pull)` commits even when they are breaking, so the
+# configuration below sets `commit_parsers` and `protect_breaking_commits`
+# itself.
+#
+# `split-commits` defaults to false. With it on, git-cliff treats every line
+# of a commit message as a commit of its own: a `BREAKING CHANGE:` footer is
+# then a line without a type and is dropped, so a breaking change marked that
+# way computes as a patch. Lines quoted in a squash body (release notes of a
+# dependency update) count as commits of their own as well.
+#
+# SECURITY: the branch name and the title are attacker-controlled; they reach
+# the script only through `env:` and are matched against fixed patterns,
+# never evaluated.
+
+name: Release version (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      skip-reason:
+        description: >-
+          Skip the comparison with the computed version, for a release the
+          owner approved with a different version. The reason is required to
+          be non-empty and is logged as a warning and in the job summary.
+          The branch name and the title are still compared with each other.
+        required: false
+        type: string
+        default: ''
+      tag-pattern:
+        description: >-
+          Regular expression for the release tags git-cliff counts from.
+          The default ignores interface tags such as `v1`.
+        required: false
+        type: string
+        default: '^v[0-9]+\.[0-9]+\.[0-9]+$'
+      split-commits:
+        description: >-
+          Treat every line of a commit message as a commit of its own
+          (git-cliff `split_commits`). See the header of this file for why
+          the default is false.
+        required: false
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  release-version:
+    name: Release version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
+        with:
+          egress-policy: audit
+
+      - name: Detect a release pull request
+        id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" != pull_request* ]]; then
+            echo "::error::This workflow checks release pull requests; it was triggered by '${EVENT_NAME}'."
+            exit 1
+          fi
+          if [[ "$HEAD_REF" == release/v* ]]; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Not a release pull request (head branch does not start with release/v); nothing to check."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        if: steps.detect.outputs.release == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Write the git-cliff configuration
+        if: steps.detect.outputs.release == 'true'
+        env:
+          TAG_PATTERN: ${{ inputs.tag-pattern }}
+          SPLIT_COMMITS: ${{ inputs.split-commits }}
+        run: |
+          set -euo pipefail
+          # TOML basic strings need backslashes and quotes escaped.
+          PATTERN=${TAG_PATTERN//\\/\\\\}
+          PATTERN=${PATTERN//\"/\\\"}
+          cat > "$RUNNER_TEMP/release-version-cliff.toml" <<EOF
+          [changelog]
+          body = ""
+
+          [git]
+          conventional_commits = true
+          filter_unconventional = true
+          split_commits = ${SPLIT_COMMITS}
+          protect_breaking_commits = true
+          commit_parsers = [{ message = ".*", group = "all" }]
+          use_branch_tags = true
+          tag_pattern = "${PATTERN}"
+
+          [bump]
+          features_always_bump_minor = false
+          breaking_always_bump_major = false
+          EOF
+          cat "$RUNNER_TEMP/release-version-cliff.toml"
+
+      - name: Compute the next version with git-cliff
+        id: cliff
+        if: steps.detect.outputs.release == 'true'
+        uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4.9.1
+        with:
+          version: v2.14.2
+          config: ${{ runner.temp }}/release-version-cliff.toml
+          args: --bumped-version
+        env:
+          # The action writes its output file into the workspace; keep it out.
+          OUTPUT: ${{ runner.temp }}/release-version-bumped.txt
+
+      - name: Compare the versions
+        if: steps.detect.outputs.release == 'true'
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          COMPUTED: ${{ steps.cliff.outputs.content }}
+          SKIP_REASON: ${{ inputs.skip-reason }}
+        run: |
+          set -euo pipefail
+          SEMVER='[0-9]+\.[0-9]+\.[0-9]+'
+          # The action's content output is the file git-cliff wrote: the
+          # version and a trailing newline.
+          COMPUTED=${COMPUTED//[[:space:]]/}
+
+          BRANCH_VERSION=${HEAD_REF#release/v}
+          if ! [[ "$BRANCH_VERSION" =~ ^${SEMVER}$ ]]; then
+            echo "::error::The head branch must be release/vX.Y.Z; got '${HEAD_REF}'."
+            exit 1
+          fi
+          if ! [[ "$PR_TITLE" =~ ^chore\(release\):\ (${SEMVER})$ ]]; then
+            echo "::error::The title must be 'chore(release): ${BRANCH_VERSION}'; got '${PR_TITLE}'."
+            exit 1
+          fi
+          TITLE_VERSION=${BASH_REMATCH[1]}
+          if [[ "$TITLE_VERSION" != "$BRANCH_VERSION" ]]; then
+            echo "::error::The branch names ${BRANCH_VERSION}, the title names ${TITLE_VERSION}. Both must name the version being released."
+            exit 1
+          fi
+
+          {
+            echo "### Release version"
+            echo ""
+            echo "| Source | Version |"
+            echo "|--------|---------|"
+            echo "| Branch and title | ${BRANCH_VERSION} |"
+            echo "| git-cliff --bumped-version | ${COMPUTED:-(none)} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ -n "${SKIP_REASON//[[:space:]]/}" ]]; then
+            echo "::warning::Version check skipped for ${BRANCH_VERSION} (computed: ${COMPUTED:-none}). Reason: ${SKIP_REASON}"
+            printf '\n**Skipped.** Reason: %s\n' "$SKIP_REASON" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          COMPUTED_VERSION=${COMPUTED#v}
+          if ! [[ "$COMPUTED_VERSION" =~ ^${SEMVER}$ ]]; then
+            echo "::error::git-cliff returned no version ('${COMPUTED}'). Is there a release tag matching the tag pattern in the history of the pull request?"
+            exit 1
+          fi
+
+          if [[ "$COMPUTED_VERSION" != "$BRANCH_VERSION" ]]; then
+            echo "::error::This pull request releases ${BRANCH_VERSION}, but the commits since the last release call for ${COMPUTED_VERSION}. A breaking change (a commit subject with '!' or a 'BREAKING CHANGE:' footer) raises the major version, a feature the minor version, anything else the patch version; below 1.0.0 a breaking change raises the middle number and features and fixes raise the last. Either release ${COMPUTED_VERSION} (rename the branch to release/v${COMPUTED_VERSION} and retitle the pull request), or, when the release really breaks something no commit marks, add a commit with a breaking marker to this branch. An exception approved by the owner goes through the skip-reason input."
+            exit 1
+          fi
+          echo "::notice::Release version ${BRANCH_VERSION} matches the commits."

@@ -1,0 +1,8 @@
+# PyPI release metadata: https://pypi.org/pypi/git-cliff/2.14.2/json
+# The git-cliff binary the release-version.yml tests run, the same version the
+# workflow installs. Linux x86-64 wheels; CI installs binaries only with hash
+# checking.
+git-cliff==2.14.2 \
+    --hash=sha256:603ebf8d12e1f2a5214e0174c15c492bc36895f38784d6818869c09897433174 \
+    --hash=sha256:3fa091968b4765d9640a864d3f4cdfef467595804eaac0a1897ea05c1daa9a84 \
+    --hash=sha256:a48196dd8421659e104f0ceb4b060ebc753c11cd421811cce36b34e3c5e5ecce
