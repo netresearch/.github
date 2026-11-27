@@ -52,8 +52,16 @@
 # subject carries `!` (`feat!:`, `fix(api)!:`) or its message ends with a
 # `BREAKING CHANGE:` footer.
 #
-# When the commits and the changelog disagree, the check fails and the
-# release author aligns them. Example: the CHANGELOG.md sections of
+# Below 1.0.0 a release that raises the middle number for features or fixes
+# now fails: features and fixes go into the last number, and only a breaking
+# change raises the middle one (decided 2026-11-27). Releases made under the
+# earlier habit do not pass this rule, which is intended: of the last 17
+# netresearch/t3x-nr-llm releases (v0.44.0 to v0.55.1), 12 raised the middle
+# number without a breaking commit and would have failed (11 of them carried
+# features, v0.52.0 only fixes).
+#
+# A second gap: when the commits and the changelog disagree, the check fails
+# and the release author aligns them. Example: the CHANGELOG.md sections of
 # netresearch/t3x-nr-llm 0.35.0, 0.39.0 and 0.41.0 carry `**BREAKING`
 # bullets, but no commit in those releases carries a breaking marker, so
 # git-cliff computes 0.34.1, 0.38.3 and 0.40.1. To release such a version as

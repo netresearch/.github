@@ -107,13 +107,20 @@ also removes a `.cliffignore` from the checkout, because git-cliff drops the
 commits listed there. `split-commits` defaults to false, because with it a
 `BREAKING CHANGE:` footer is dropped.
 
-When the commits and the changelog disagree, the check fails and the release
-author aligns them: add a commit with a breaking marker to the release branch,
-or set `skip-reason` together with `skip-version`. Below 1.0.0 a breaking commit
-raises only the middle number, so 1.0.0 is released only through the skip. The
-skip is logged as a warning and applies only to that version; the next release
-pull request fails until both inputs are removed. The workflow header names the
-cases from netresearch/t3x-nr-llm 0.35.0, 0.39.0 and 0.41.0.
+Below 1.0.0 a release that raises the middle number for features or fixes now
+fails: features and fixes go into the last number, and only a breaking change
+raises the middle one (decided 2026-11-27). The mismatch with earlier releases
+is intended: of the last 17 netresearch/t3x-nr-llm releases (v0.44.0 to
+v0.55.1), 12 raised the middle number without a breaking commit and would have
+failed (11 of them carried features, v0.52.0 only fixes).
+
+A second gap: when the commits and the changelog disagree, the check fails and
+the release author aligns them: add a commit with a breaking marker to the
+release branch, or set `skip-reason` together with `skip-version`. Below 1.0.0 a
+breaking commit raises only the middle number, so 1.0.0 is released only through
+the skip. The skip is logged as a warning and applies only to that version; the
+next release pull request fails until both inputs are removed. The workflow
+header names the cases from netresearch/t3x-nr-llm 0.35.0, 0.39.0 and 0.41.0.
 
 ## Reusable workflows
 
