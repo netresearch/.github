@@ -57,6 +57,19 @@ jobs:
           PYTHONPATH: ${{ runner.temp }}/drift-fixtures-python
           PYTHONDONTWRITEBYTECODE: '1'
         run: python3 -m unittest discover -s scripts -p 'test_checks_template.py' -v
+      - name: Install the newest git-cliff for the release-version tests
+        # Unpinned on purpose: release-version.yml runs the newest git-cliff,
+        # so the tests must too, to notice a release that changes the result.
+        run: >-
+          python3 -m pip install --disable-pip-version-check --only-binary=:all:
+          --target "$RUNNER_TEMP/release-version-python" git-cliff
+          && "$RUNNER_TEMP/release-version-python/bin/git-cliff" --version
+      - name: Check the release-version comparison and git-cliff configuration
+        env:
+          PYTHONPATH: ${{ runner.temp }}/drift-fixtures-python
+          PYTHONDONTWRITEBYTECODE: '1'
+          GIT_CLIFF: ${{ runner.temp }}/release-version-python/bin/git-cliff
+        run: python3 -m unittest discover -s scripts -p 'test_release_version.py' -v
 
   markdown:
     name: Lint Markdown
