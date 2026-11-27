@@ -47,9 +47,10 @@ def run_step(name, env, cwd=None):
                 out.read_text(), summary.read_text())
 
 
-def compare(head_ref, title, computed, skip=""):
+def compare(head_ref, title, computed, skip="", skip_version=""):
     return run_step("Compare the versions", {
-        "HEAD_REF": head_ref, "PR_TITLE": title, "COMPUTED": computed, "SKIP_REASON": skip})
+        "HEAD_REF": head_ref, "PR_TITLE": title, "COMPUTED": computed, "SKIP_REASON": skip,
+        "SKIP_VERSION": skip_version})
 
 
 class DetectTest(unittest.TestCase):
@@ -70,6 +71,14 @@ class DetectTest(unittest.TestCase):
         _, _, outputs, _ = run_step("Detect a release pull request",
                                     {"EVENT_NAME": "pull_request", "HEAD_REF": "release/0.56.0"})
         self.assertIn("release=false", outputs)
+
+    def test_merge_group_passes_with_notice(self):
+        # A required check must report on a merge group, or the queue ejects the entry.
+        rc, log, outputs, _ = run_step("Detect a release pull request",
+                                       {"EVENT_NAME": "merge_group", "HEAD_REF": ""})
+        self.assertEqual(rc, 0, log)
+        self.assertIn("release=false", outputs)
+        self.assertIn("::notice::Merge group", log)
 
     def test_other_event_fails(self):
         rc, log, _, _ = run_step("Detect a release pull request",
@@ -117,19 +126,42 @@ class CompareTest(unittest.TestCase):
 
     def test_skip_with_reason_passes_and_is_logged(self):
         rc, log, _, summary = compare("release/v0.56.0", "chore(release): 0.56.0", "v0.55.2",
-                                      skip="owner approved 2026-11-27: breaking API change")
+                                      skip="owner approved 2026-11-27: breaking API change",
+                                      skip_version="0.56.0")
         self.assertEqual(rc, 0, log)
         self.assertIn("::warning::Version check skipped for 0.56.0 (computed: v0.55.2). Reason:"
                       " owner approved 2026-11-27: breaking API change", log)
         self.assertIn("**Skipped.** Reason: owner approved 2026-11-27", summary)
 
     def test_blank_skip_reason_does_not_skip(self):
-        rc, log, _, _ = compare("release/v0.56.0", "chore(release): 0.56.0", "v0.55.2", skip="  \n")
+        rc, log, _, _ = compare("release/v0.56.0", "chore(release): 0.56.0", "v0.55.2", skip="  \n",
+                                skip_version="0.56.0")
         self.assertEqual(rc, 1)
         self.assertNotIn("::warning::", log)
+        self.assertIn("::error::skip-reason and skip-version must be set together.", log)
+
+    def test_blank_skip_reason_alone_counts_as_unset(self):
+        rc, log, _, _ = compare("release/v0.56.0", "chore(release): 0.56.0", "v0.56.0", skip=" \n")
+        self.assertEqual(rc, 0, log)
+        self.assertNotIn("::error::", log)
+
+    def test_skip_reason_without_version_fails(self):
+        rc, log, _, _ = compare("release/v0.56.0", "chore(release): 0.56.0", "v0.56.0", skip="ok")
+        self.assertEqual(rc, 1)
+        self.assertIn("::error::skip-reason and skip-version must be set together.", log)
+
+    def test_skip_does_not_carry_over_to_the_next_release(self):
+        # The inputs live in the caller's workflow file and merge with the release.
+        rc, log, _, _ = compare("release/v0.56.1", "chore(release): 0.56.1", "v0.56.1",
+                                skip="owner approved 0.56.0", skip_version="0.56.0")
+        self.assertEqual(rc, 1)
+        self.assertNotIn("::warning::", log)
+        self.assertIn("::error::The skip was approved for 0.56.0, but this pull request"
+                      " releases 0.56.1.", log)
 
     def test_skip_still_compares_branch_and_title(self):
-        rc, log, _, _ = compare("release/v0.56.0", "chore(release): 0.55.2", "v0.55.2", skip="ok")
+        rc, log, _, _ = compare("release/v0.56.0", "chore(release): 0.55.2", "v0.55.2", skip="ok",
+                                skip_version="0.56.0")
         self.assertEqual(rc, 1)
         self.assertIn("::error::The branch names 0.56.0", log)
 

@@ -83,26 +83,31 @@ public repositories only.
 
 ## Release version check
 
-`.github/workflows/release-version.yml` checks a release pull request, branch
-`release/vX.Y.Z` and title `chore(release): X.Y.Z`. The branch and the title
-must name the same version. That version must equal what git-cliff 2.14.2
-computes with `--bumped-version` from the conventional commits since the last
-`vX.Y.Z` tag. Below 1.0.0 a breaking change (`!` in the subject or a `BREAKING
-CHANGE:` footer) raises the middle number, and features and fixes raise the
-last. On other pull requests the job passes with a notice, so it can be a
-required check.
+`.github/workflows/release-version.yml` checks a release pull request (branch
+`release/vX.Y.Z`, title `chore(release): X.Y.Z`). The branch and the title must
+name the same version. That version must equal what the newest git-cliff computes
+with `--bumped-version` from the conventional commits since the last `vX.Y.Z`
+tag, read at the pull request's head commit. Below 1.0.0 a breaking change (`!`
+in the subject or a `BREAKING CHANGE:` footer) raises the middle number, and
+features and fixes raise the last. Other pull requests and merge groups pass
+with a notice, so the check can be required, also on a branch with a merge
+queue.
 
 The git-cliff configuration is written into `$RUNNER_TEMP` by the workflow, and
 the caller's `cliff.toml` is not read. git-cliff layers a configuration over its
-embedded default, which skips `chore(deps…)` commits. The workflow therefore
-sets its own `commit_parsers`, and `scripts/test_release_version.py` runs the
-real git-cliff on throwaway repositories to pin the bump rules. `split-commits`
-defaults to false, because with it a `BREAKING CHANGE:` footer is dropped.
+embedded default, which skips `chore(deps…)` commits, so the workflow sets its
+own `commit_parsers`. It also removes a `.cliffignore` from the checkout,
+because git-cliff drops the commits listed there.
+`scripts/test_release_version.py` runs the real git-cliff on throwaway
+repositories to pin the bump rules. `split-commits` defaults to false, because
+with it a `BREAKING CHANGE:` footer is dropped.
 
 When the commits and the changelog disagree, the check fails and the release
 author aligns them: add a commit with a breaking marker to the release branch,
-or set `skip-reason`, which is logged as a warning. The workflow header names
-the cases from netresearch/t3x-nr-llm 0.35.0, 0.39.0 and 0.41.0.
+or set `skip-reason` together with `skip-version`. The skip is logged as a
+warning and applies only to that version; the next release pull request fails
+until both inputs are removed. The workflow header names the cases from
+netresearch/t3x-nr-llm 0.35.0, 0.39.0 and 0.41.0.
 
 ## Reusable workflows
 

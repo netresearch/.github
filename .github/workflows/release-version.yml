@@ -13,6 +13,7 @@
 #   on:
 #     pull_request:
 #       types: [opened, synchronize, reopened, edited]
+#     merge_group:          # required if the branch runs a merge queue
 #   permissions: {}
 #   jobs:
 #     release-version:
@@ -22,7 +23,14 @@
 #
 # `edited` is in the trigger types so that correcting the title re-runs the
 # check. On a pull request whose head branch does not start with `release/v`
-# the job passes with a notice, so the check can be made required.
+# the job passes with a notice, so the check can be made required. On a
+# `merge_group` event it passes with a notice as well: the release pull
+# request was checked before it entered the queue, and a required check that
+# never reports on a merge group ejects every queue entry.
+#
+# The check reads the pull request's head commit, so commits merged into the
+# base branch after the release branch was cut are not counted. Rebase the
+# release branch to count them.
 #
 # CALLER REQUIREMENTS
 # ===================
@@ -45,7 +53,11 @@
 # git-cliff computes 0.34.1, 0.38.3 and 0.40.1. To release such a version as
 # a middle bump, add a commit with a breaking marker to the release branch
 # (for example `git commit --allow-empty -S --signoff -m 'feat!: <what broke>'`,
-# or a `BREAKING CHANGE:` footer), or skip the check with `skip-reason`.
+# or a `BREAKING CHANGE:` footer), or skip the check with `skip-reason` and
+# `skip-version`. The skip applies only to the release pull request whose
+# version equals `skip-version`; any other release pull request fails until
+# both inputs are removed, so an approved exception cannot carry over to the
+# next release unnoticed.
 #
 # CONFIGURATION
 # =============
@@ -78,6 +90,15 @@ on:
           owner approved with a different version. The reason is required to
           be non-empty and is logged as a warning and in the job summary.
           The branch name and the title are still compared with each other.
+          Requires `skip-version`.
+        required: false
+        type: string
+        default: ''
+      skip-version:
+        description: >-
+          The release version (X.Y.Z) `skip-reason` was approved for. A
+          release pull request for any other version fails while either input
+          is set.
         required: false
         type: string
         default: ''
@@ -119,6 +140,11 @@ jobs:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
+          if [[ "$EVENT_NAME" == merge_group ]]; then
+            echo "::notice::Merge group: the release pull request was checked before it was queued; nothing to check."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [[ "$EVENT_NAME" != pull_request* ]]; then
             echo "::error::This workflow checks release pull requests; it was triggered by '${EVENT_NAME}'."
             exit 1
@@ -180,7 +206,10 @@ jobs:
         if: steps.detect.outputs.release == 'true'
         uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4.9.1
         with:
-          version: v2.14.2
+          # git-cliff is dev tooling and runs its newest release; the tests
+          # in scripts/test_release_version.py run the newest one as well and
+          # fail when a release changes what --bumped-version computes.
+          version: latest
           config: ${{ runner.temp }}/release-version-cliff.toml
           args: --bumped-version
         env:
@@ -194,6 +223,7 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           COMPUTED: ${{ steps.cliff.outputs.content }}
           SKIP_REASON: ${{ inputs.skip-reason }}
+          SKIP_VERSION: ${{ inputs.skip-version }}
         run: |
           set -euo pipefail
           SEMVER='[0-9]+\.[0-9]+\.[0-9]+'
@@ -225,7 +255,16 @@ jobs:
             echo "| git-cliff --bumped-version | ${COMPUTED:-(none)} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          if [[ -n "${SKIP_REASON//[[:space:]]/}" ]]; then
+          SKIP_VERSION=${SKIP_VERSION//[[:space:]]/}
+          if [[ -n "${SKIP_REASON//[[:space:]]/}" || -n "$SKIP_VERSION" ]]; then
+            if [[ -z "${SKIP_REASON//[[:space:]]/}" || -z "$SKIP_VERSION" ]]; then
+              echo "::error::skip-reason and skip-version must be set together."
+              exit 1
+            fi
+            if [[ "$SKIP_VERSION" != "$BRANCH_VERSION" ]]; then
+              echo "::error::The skip was approved for ${SKIP_VERSION}, but this pull request releases ${BRANCH_VERSION}. Remove skip-reason and skip-version from the calling workflow."
+              exit 1
+            fi
             echo "::warning::Version check skipped for ${BRANCH_VERSION} (computed: ${COMPUTED:-none}). Reason: ${SKIP_REASON}"
             printf '\n**Skipped.** Reason: %s\n' "$SKIP_REASON" >> "$GITHUB_STEP_SUMMARY"
             exit 0
