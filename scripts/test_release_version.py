@@ -192,7 +192,9 @@ class CompareTest(unittest.TestCase):
                 self.assertIn("::error::The title must be 'chore(release): 0.56.0'", log)
 
     def test_malformed_branch_fails(self):
-        for branch in ("release/v0.56", "feat/x", "release/0.56.0"):
+        # "0.56.1" survived stripping the prefix unchanged and passed.
+        for branch in ("release/v0.56", "feat/x", "release/0.56.0", "0.56.0",
+                       "xrelease/v0.56.0", "release/v0.56.0-rc1"):
             with self.subTest(branch=branch):
                 rc, log, _, _ = compare(branch, "chore(release): 0.56.0", "v0.56.0")
                 self.assertEqual(rc, 1)
@@ -267,7 +269,8 @@ class GitCliffTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
 
-    def repo(self, messages, tags=("v0.5.0",), head_tags=(), split="false", ignore_last=False):
+    def repo(self, messages, tags=("v0.5.0",), head_tags=(), split="false", ignore_last=None,
+             blame_only_commit=None):
         """Create a repository and run the configuration step in it; return (repo, temp)."""
         base = Path(tempfile.mkdtemp(dir=self.tmp.name))
         repo, temp = base / "repo", base / "temp"
@@ -280,18 +283,26 @@ class GitCliffTest(unittest.TestCase):
         for message in messages:
             subprocess.run([*GIT, "-C", str(repo), "commit", "-q", "--allow-empty", "-m", message],
                            check=True)
+        if blame_only_commit:
+            # A commit whose only change is .git-blame-ignore-revs.
+            # The listed hash matches nothing; it only makes git-cliff apply the filter.
+            Path(repo, ".git-blame-ignore-revs").write_text("# formatting\n" + "0" * 40 + "\n")
+            subprocess.run([*GIT, "-C", str(repo), "add", ".git-blame-ignore-revs"], check=True)
+            subprocess.run([*GIT, "-C", str(repo), "commit", "-q", "-m", blame_only_commit],
+                           check=True)
         for tag in head_tags:
             subprocess.run([*GIT, "-C", str(repo), "tag", tag], check=True)
         if ignore_last:
             head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True,
                                   capture_output=True, text=True).stdout
-            Path(repo, ".cliffignore").write_text(head)
+            Path(repo, ignore_last).write_text(head)
         pattern = yaml.load(WORKFLOW.read_text(), Loader=WorkflowLoader)[
             "on"]["workflow_call"]["inputs"]["tag-pattern"]["default"]
         rc, log, _, _ = run_step(CONFIG, {"RUNNER_TEMP": str(temp), "TAG_PATTERN": pattern,
                                           "SPLIT_COMMITS": split}, cwd=repo)
         self.assertEqual(rc, 0, log)
-        self.assertFalse(Path(repo, ".cliffignore").exists())
+        for name in (".cliffignore", ".git-blame-ignore-revs"):
+            self.assertFalse(Path(repo, name).exists(), name)
         return repo, temp
 
     def bumped(self, messages, **kwargs):
@@ -345,7 +356,17 @@ class GitCliffTest(unittest.TestCase):
 
     def test_cliffignore_cannot_hide_a_breaking_commit(self):
         # The pull request controls .cliffignore; the workflow removes it.
-        self.assertEqual(self.bumped(["fix: a", "feat!: drop the old API"], ignore_last=True),
+        self.assertEqual(self.bumped(["fix: a", "feat!: drop the old API"],
+                                     ignore_last=".cliffignore"), "v0.6.0")
+
+    def test_blame_ignore_revs_cannot_hide_a_breaking_commit(self):
+        # git-cliff 2.14.2 drops the commits listed in .git-blame-ignore-revs.
+        self.assertEqual(self.bumped(["fix: a", "feat!: drop the old API"],
+                                     ignore_last=".git-blame-ignore-revs"), "v0.6.0")
+
+    def test_breaking_commit_touching_only_blame_ignore_revs_counts(self):
+        # git-cliff also drops a commit whose only change is that file.
+        self.assertEqual(self.bumped(["fix: a"], blame_only_commit="feat!: drop the old API"),
                          "v0.6.0")
 
     def test_first_release_is_0_1_0(self):

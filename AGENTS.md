@@ -103,9 +103,9 @@ repositories, so a git-cliff release that changes the result fails the tests.
 The configuration is written into `$RUNNER_TEMP`, and the caller's `cliff.toml`
 is not read. git-cliff layers a configuration over its embedded default, which
 skips `chore(deps…)` commits, so the workflow sets its own `commit_parsers`. It
-also removes a `.cliffignore` from the checkout, because git-cliff drops the
-commits listed there. `split-commits` defaults to false, because with it a
-`BREAKING CHANGE:` footer is dropped.
+also removes `.cliffignore` and `.git-blame-ignore-revs` from the checkout,
+because git-cliff drops the commits listed there. `split-commits` defaults to
+false, because with it a `BREAKING CHANGE:` footer is dropped.
 
 Below 1.0.0 a release that raises the middle number for features or fixes now
 fails: features and fixes go into the last number, and only a breaking change

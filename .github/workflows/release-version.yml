@@ -82,8 +82,11 @@
 # given configuration over its embedded default, which skips `chore(deps…)`,
 # `chore(pr)` and `chore(pull)` commits even when they are breaking, so the
 # configuration below sets `commit_parsers` and `protect_breaking_commits`
-# itself. A `.cliffignore` in the checkout is removed before git-cliff runs:
-# the pull request controls it and could list a breaking commit.
+# itself. A `.cliffignore` and a `.git-blame-ignore-revs` in the checkout are
+# removed before git-cliff runs: git-cliff drops the commits they list, the
+# pull request controls them, and either could list a breaking commit. These
+# are the only files git-cliff 2.14.2 reads from the repository when it is
+# given a configuration file.
 #
 # `split-commits` defaults to false. With it on, git-cliff treats every line
 # of a commit message as a commit of its own: a `BREAKING CHANGE:` footer is
@@ -243,13 +246,17 @@ jobs:
           SPLIT_COMMITS: ${{ inputs.split-commits }}
         run: |
           set -euo pipefail
-          # git-cliff drops every commit listed in .cliffignore at the
-          # repository root. The pull request controls that file, so it could
-          # hide a breaking commit from the check.
-          if [[ -e .cliffignore || -L .cliffignore ]]; then
-            echo "::notice::Ignoring the repository's .cliffignore for the version check."
-            rm -f .cliffignore
-          fi
+          # git-cliff drops every commit listed in .cliffignore and in
+          # .git-blame-ignore-revs at the repository root, and every commit
+          # that changes only .git-blame-ignore-revs (git-cliff 2.14.2:
+          # git-cliff/src/lib.rs, git-cliff-core/src/repo.rs). The pull request
+          # controls both files, so either could hide a breaking commit.
+          for ignore_file in .cliffignore .git-blame-ignore-revs; do
+            if [[ -e "$ignore_file" || -L "$ignore_file" ]]; then
+              echo "::notice::Ignoring the repository's ${ignore_file} for the version check."
+              rm -f "$ignore_file"
+            fi
+          done
           # TOML basic strings need backslashes and quotes escaped.
           PATTERN=${TAG_PATTERN//\\/\\\\}
           PATTERN=${PATTERN//\"/\\\"}
@@ -287,11 +294,11 @@ jobs:
           SEMVER='[0-9]+\.[0-9]+\.[0-9]+'
           GIT_CLIFF=${GIT_CLIFF:-$RUNNER_TEMP/git-cliff/bin/git-cliff}
 
-          BRANCH_VERSION=${HEAD_REF#release/v}
-          if ! [[ "$BRANCH_VERSION" =~ ^${SEMVER}$ ]]; then
+          if ! [[ "$HEAD_REF" =~ ^release/v(${SEMVER})$ ]]; then
             echo "::error::The head branch must be release/vX.Y.Z; got '${HEAD_REF}'."
             exit 1
           fi
+          BRANCH_VERSION=${BASH_REMATCH[1]}
           if ! [[ "$PR_TITLE" =~ ^chore\(release\):\ (${SEMVER})$ ]]; then
             echo "::error::The title must be 'chore(release): ${BRANCH_VERSION}'; got '${PR_TITLE}'."
             exit 1
