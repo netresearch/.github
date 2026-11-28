@@ -55,6 +55,7 @@ truth; this table is the index.)
 | `dependency-review.yml` | `contents: read`, `pull-requests: write` |
 | `labeler.yml` | `contents: read`, `pull-requests: write` |
 | `pr-quality.yml` | `contents: read`, `pull-requests: write` |
+| `commit-message.yml` | `contents: read`, `pull-requests: read` |
 | `greetings.yml` / `lock.yml` / `stale.yml` | `issues: write`, `pull-requests: write` |
 | `auto-merge-deps.yml` | `contents: write`, `pull-requests: write` |
 | `bun-dependency-submission.yml` | `contents: write` |
